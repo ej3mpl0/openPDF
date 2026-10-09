@@ -966,6 +966,7 @@ dependencies = [
 name = "openpdf-core"
 version = "0.1.0"
 dependencies = [
+ "getrandom 0.3.4",
  "image",
  "lopdf",
  "pdfium-render",

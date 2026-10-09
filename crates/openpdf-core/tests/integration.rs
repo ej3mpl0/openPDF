@@ -1,7 +1,7 @@
 use std::time::Duration;
 
 use openpdf_core::{
-    merge, split_all, Document, Engine, Priority, TileKey, TileRequest, TILE_SIZE,
+    blank_document, merge, split_all, Document, Engine, Priority, TileKey, TileRequest, TILE_SIZE,
 };
 
 fn corpus(name: &str) -> std::path::PathBuf {
@@ -111,4 +111,29 @@ fn cancel_stale_tile_requests() {
         }
     }
     assert!(saw_keep, "visible tile never arrived");
+}
+
+#[test]
+fn open_and_tile_large_pdf() {
+    let n = 40u32;
+    let t0 = std::time::Instant::now();
+    let doc = blank_document(n).unwrap();
+    let build = t0.elapsed();
+    let t1 = std::time::Instant::now();
+    let bytes = doc.to_bytes().unwrap();
+    let opened = Document::from_bytes(bytes, None).unwrap();
+    let open = t1.elapsed();
+    assert_eq!(opened.page_count(), n);
+    eprintln!("large pdf build={build:?} open={open:?}");
+    let Some(engine) = engine_or_skip() else {
+        return;
+    };
+    engine.bind(&opened).unwrap();
+    let t2 = std::time::Instant::now();
+    let tile = engine
+        .render_tile_blocking(TileKey::new(opened.id(), n - 1, 1.0, 0, 0))
+        .unwrap();
+    let tile_t = t2.elapsed();
+    assert!(tile.width > 0 && tile.height > 0);
+    eprintln!("large pdf tile={tile_t:?} {}x{}", tile.width, tile.height);
 }

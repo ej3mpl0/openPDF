@@ -4,16 +4,18 @@ use std::path::{Path, PathBuf};
 use anyhow::{bail, Context, Result};
 use clap::{value_parser, Arg, ArgAction, Command};
 use image::{ImageBuffer, Rgba};
+mod tools;
+
 use openpdf_core::{
     init_i18n, merge_paths, parse_page_ranges, split, split_all, tr, tr_args, Document, Engine,
     PageRange,
 };
 
-fn intern(s: String) -> &'static str {
+pub(crate) fn intern(s: String) -> &'static str {
     Box::leak(s.into_boxed_str())
 }
 
-fn l(msgid: &str) -> &'static str {
+pub(crate) fn l(msgid: &str) -> &'static str {
     intern(tr(msgid))
 }
 
@@ -24,7 +26,7 @@ fn help_template() -> String {
     )
 }
 
-fn decorate(cmd: Command) -> Command {
+pub(crate) fn decorate(cmd: Command) -> Command {
     cmd.help_template(help_template())
         .subcommand_help_heading(l("Commands:"))
         .next_help_heading(l("Options:"))
@@ -164,7 +166,7 @@ fn cli() -> Command {
                     ),
             )),
     );
-    cmd
+    tools::register(cmd, arguments)
 }
 
 fn main() {
@@ -212,11 +214,11 @@ fn run() -> Result<()> {
             let pages = m.get_one::<String>("pages").map(String::as_str);
             split_cmd(&file, &output, pages)
         }
-        _ => unreachable!(),
+        _ => tools::dispatch(&matches).unwrap_or_else(|| unreachable!()),
     }
 }
 
-fn path_arg(matches: &clap::ArgMatches, id: &str) -> PathBuf {
+pub(crate) fn path_arg(matches: &clap::ArgMatches, id: &str) -> PathBuf {
     PathBuf::from(matches.get_one::<String>(id).unwrap())
 }
 
@@ -277,7 +279,7 @@ fn print_outline(items: &[openpdf_core::OutlineItem], depth: usize) {
     }
 }
 
-fn engine() -> Result<Engine> {
+pub(crate) fn engine() -> Result<Engine> {
     Engine::new().context(tr(
         "load libpdfium (set OPENPDF_PDFIUM or install it on the system)",
     ))

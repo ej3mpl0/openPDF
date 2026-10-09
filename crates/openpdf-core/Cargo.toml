@@ -14,7 +14,12 @@ test-support = []
 lopdf = "0.36.0"
 pdfium-render = "0.9.4"
 thiserror = "2"
+image = { version = "0.25", default-features = false, features = ["png", "jpeg"] }
+getrandom = "0.3"
 zeroize = { version = "1", features = ["alloc"] }
 
 [dev-dependencies]
-image = { version = "0.25", default-features = false, features = ["png"] }
+
+[[bench]]
+name = "perf"
+harness = false

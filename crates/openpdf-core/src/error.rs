@@ -36,6 +36,14 @@ pub enum InvalidKind {
     NoPageRanges,
     NotAPageNumber { value: String },
     DocumentNotBound,
+    CropInverted,
+    PasswordRequired,
+    WrongPassword,
+    NotEncrypted,
+    AlreadyEncrypted,
+    NoInputImages,
+    EmptyOverlayText,
+    UnknownPermission { value: String },
 }
 
 /// Destructive operation blocked on a signed document.
@@ -113,6 +121,16 @@ impl InvalidKind {
                 tr_args("not a page number: {value}", &[("value", value)])
             }
             InvalidKind::DocumentNotBound => tr("document is not bound to the render engine"),
+            InvalidKind::CropInverted => tr("crop box is inverted"),
+            InvalidKind::PasswordRequired => tr("password is required"),
+            InvalidKind::WrongPassword => tr("wrong password"),
+            InvalidKind::NotEncrypted => tr("document is not encrypted"),
+            InvalidKind::AlreadyEncrypted => tr("document is already encrypted"),
+            InvalidKind::NoInputImages => tr("no input images"),
+            InvalidKind::EmptyOverlayText => tr("overlay text is empty"),
+            InvalidKind::UnknownPermission { value } => {
+                tr_args("unknown permission: {value}", &[("value", value)])
+            }
         }
     }
 }

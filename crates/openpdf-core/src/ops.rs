@@ -189,7 +189,7 @@ pub fn split_all(doc: &Document) -> Result<Vec<Document>> {
     split(doc, &ranges)
 }
 
-fn extract_pages(doc: &Document, range: &PageRange) -> Result<Document> {
+pub(crate) fn extract_pages(doc: &Document, range: &PageRange) -> Result<Document> {
     let count = doc.page_count();
     if range.end >= count {
         return Err(Error::PageOutOfRange {

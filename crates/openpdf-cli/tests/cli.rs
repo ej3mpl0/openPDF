@@ -2,6 +2,7 @@ use std::path::{Path, PathBuf};
 use std::process::Command;
 
 use openpdf_core::i18n::Catalog;
+use openpdf_core::test_support::locale_test_guard;
 
 fn bin() -> PathBuf {
     env!("CARGO_BIN_EXE_openpdf").into()
@@ -63,6 +64,7 @@ fn info_two_page() {
 
 #[test]
 fn info_follows_spanish_catalog_without_hardcoded_msgstr() {
+    let _g = locale_test_guard();
     let file = corpus("two_page.pdf");
     let en = run_locale("C", &["info", file.to_str().unwrap()]);
     let es = run_locale("es_ES.UTF-8", &["info", file.to_str().unwrap()]);
@@ -83,6 +85,7 @@ fn info_follows_spanish_catalog_without_hardcoded_msgstr() {
 
 #[test]
 fn help_follows_locale() {
+    let _g = locale_test_guard();
     let en = run_locale("C", &["--help"]);
     let es = run_locale("es", &["--help"]);
     assert!(en.status.success(), "{}", String::from_utf8_lossy(&en.stderr));
@@ -103,6 +106,7 @@ fn help_follows_locale() {
 
 #[test]
 fn info_language_es_en() {
+    let _g = locale_test_guard();
     let file = corpus("two_page.pdf");
     let out = run_language("es:en", "en_US.UTF-8", &["info", file.to_str().unwrap()]);
     assert!(out.status.success(), "{}", String::from_utf8_lossy(&out.stderr));
@@ -115,6 +119,7 @@ fn info_language_es_en() {
 
 #[test]
 fn info_language_fr_es() {
+    let _g = locale_test_guard();
     let file = corpus("two_page.pdf");
     let out = run_language("fr:es", "en_US.UTF-8", &["info", file.to_str().unwrap()]);
     assert!(out.status.success(), "{}", String::from_utf8_lossy(&out.stderr));
@@ -126,6 +131,7 @@ fn info_language_fr_es() {
 
 #[test]
 fn info_language_ignored_when_lang_is_c() {
+    let _g = locale_test_guard();
     let file = corpus("two_page.pdf");
     let out = run_language("es:en", "C", &["info", file.to_str().unwrap()]);
     assert!(out.status.success(), "{}", String::from_utf8_lossy(&out.stderr));
@@ -133,6 +139,76 @@ fn info_language_ignored_when_lang_is_c() {
     assert!(stdout.contains("pages: 2"), "{stdout}");
     let pages = spanish_pages_line();
     assert!(!stdout.contains(&pages), "{stdout}");
+}
+
+#[test]
+fn insert_extract_optimize_watermark() {
+    let dir = tempfile();
+    let inserted = dir.join("inserted.pdf");
+    let out = run(&[
+        "insert",
+        corpus("two_page.pdf").to_str().unwrap(),
+        corpus("hello.pdf").to_str().unwrap(),
+        "--at",
+        "2",
+        "-o",
+        inserted.to_str().unwrap(),
+    ]);
+    assert!(out.status.success(), "{}", String::from_utf8_lossy(&out.stderr));
+    let extracted = dir.join("one.pdf");
+    let out = run(&[
+        "extract",
+        inserted.to_str().unwrap(),
+        "--pages",
+        "2",
+        "-o",
+        extracted.to_str().unwrap(),
+    ]);
+    assert!(out.status.success(), "{}", String::from_utf8_lossy(&out.stderr));
+    let opt = dir.join("opt.pdf");
+    let out = run(&[
+        "optimize",
+        extracted.to_str().unwrap(),
+        "-o",
+        opt.to_str().unwrap(),
+    ]);
+    assert!(out.status.success(), "{}", String::from_utf8_lossy(&out.stderr));
+    let marked = dir.join("mark.pdf");
+    let out = run(&[
+        "watermark",
+        opt.to_str().unwrap(),
+        "--text",
+        "DRAFT",
+        "-o",
+        marked.to_str().unwrap(),
+    ]);
+    assert!(out.status.success(), "{}", String::from_utf8_lossy(&out.stderr));
+    let numbered = dir.join("num.pdf");
+    let out = run(&[
+        "number",
+        marked.to_str().unwrap(),
+        "-o",
+        numbered.to_str().unwrap(),
+    ]);
+    assert!(out.status.success(), "{}", String::from_utf8_lossy(&out.stderr));
+}
+
+#[test]
+fn from_images_builds_pdf() {
+    let dir = tempfile();
+    let png = dir.join("dot.png");
+    image::RgbImage::from_pixel(4, 4, image::Rgb([10, 20, 200]))
+        .save(&png)
+        .unwrap();
+    let pdf = dir.join("from.png.pdf");
+    let out = run(&[
+        "from-images",
+        png.to_str().unwrap(),
+        "-o",
+        pdf.to_str().unwrap(),
+    ]);
+    assert!(out.status.success(), "{}", String::from_utf8_lossy(&out.stderr));
+    assert!(pdf.is_file());
 }
 
 #[test]
