@@ -7,7 +7,7 @@ use std::collections::HashMap;
 use std::env;
 use std::fs;
 use std::path::{Path, PathBuf};
-use std::sync::Mutex;
+use std::sync::{LazyLock, Mutex};
 
 include!(concat!(env!("OUT_DIR"), "/embedded_po.rs"));
 
@@ -121,20 +121,11 @@ struct State {
     catalog: Catalog,
 }
 
-impl State {
-    fn english() -> Self {
-        Self {
-            locale: "en".into(),
-            catalog: Catalog::empty(),
-        }
-    }
-}
-
-static STATE: Mutex<State> = Mutex::new(State {
-    locale: String::new(),
-    catalog: Catalog {
-        entries: HashMap::new(),
-    },
+static STATE: LazyLock<Mutex<State>> = LazyLock::new(|| {
+    Mutex::new(State {
+        locale: String::new(),
+        catalog: Catalog::empty(),
+    })
 });
 
 /// Read `LC_ALL` / `LC_MESSAGES` / `LANG` / `LANGUAGE` and load that catalog.

@@ -2,12 +2,20 @@ use std::fs;
 use std::path::{Path, PathBuf};
 
 use anyhow::{bail, Context, Result};
-use clap::{value_parser, Arg, Command};
+use clap::{value_parser, Arg, ArgAction, Command};
 use image::{ImageBuffer, Rgba};
 use openpdf_core::{
     init_i18n, merge_paths, parse_page_ranges, split, split_all, tr, tr_args, Document, Engine,
     PageRange,
 };
+
+fn intern(s: String) -> &'static str {
+    Box::leak(s.into_boxed_str())
+}
+
+fn l(msgid: &str) -> &'static str {
+    intern(tr(msgid))
+}
 
 fn help_template() -> String {
     format!(
@@ -18,33 +26,34 @@ fn help_template() -> String {
 
 fn decorate(cmd: Command) -> Command {
     cmd.help_template(help_template())
-        .subcommand_help_heading(tr("Commands:"))
-        .help_heading(tr("Options:"))
-}
-
-fn with_localized_help(mut cmd: Command) -> Command {
-    cmd = cmd.mut_arg("help", |arg| arg.help(tr("Print help")));
-    if cmd.get_version().is_some() {
-        cmd = cmd.mut_arg("version", |arg| arg.help(tr("Print version")));
-    }
-    let names: Vec<String> = cmd
-        .get_subcommands()
-        .map(|c| c.get_name().to_string())
-        .collect();
-    for name in names {
-        cmd = cmd.mut_subcommand(name, with_localized_help);
-    }
-    cmd
+        .subcommand_help_heading(l("Commands:"))
+        .next_help_heading(l("Options:"))
+        .disable_help_flag(true)
+        .arg(
+            Arg::new("help")
+                .short('h')
+                .long("help")
+                .action(ArgAction::Help)
+                .help(l("Print help")),
+        )
 }
 
 fn cli() -> Command {
-    let arguments = tr("Arguments:");
+    let arguments = l("Arguments:");
     let cmd = decorate(
         Command::new("openpdf")
             .about(tr(
                 "openPDF command-line tools (share openpdf-core with the GTK app)",
             ))
             .version(env!("CARGO_PKG_VERSION"))
+            .disable_version_flag(true)
+            .arg(
+                Arg::new("version")
+                    .short('V')
+                    .long("version")
+                    .action(ArgAction::Version)
+                    .help(l("Print version")),
+            )
             .subcommand_required(true)
             .arg_required_else_help(true)
             .subcommand(decorate(
@@ -54,7 +63,7 @@ fn cli() -> Command {
                         Arg::new("file")
                             .required(true)
                             .value_name("FILE")
-                            .help_heading(&arguments)
+                            .help_heading(arguments)
                             .help(tr("PDF file")),
                     ),
             ))
@@ -65,7 +74,7 @@ fn cli() -> Command {
                         Arg::new("file")
                             .required(true)
                             .value_name("FILE")
-                            .help_heading(&arguments)
+                            .help_heading(arguments)
                             .help(tr("PDF file")),
                     )
                     .arg(
@@ -98,7 +107,7 @@ fn cli() -> Command {
                         Arg::new("file")
                             .required(true)
                             .value_name("FILE")
-                            .help_heading(&arguments)
+                            .help_heading(arguments)
                             .help(tr("PDF file")),
                     )
                     .arg(
@@ -116,7 +125,7 @@ fn cli() -> Command {
                             .required(true)
                             .num_args(1..)
                             .value_name("FILES")
-                            .help_heading(&arguments)
+                            .help_heading(arguments)
                             .help(tr("Input PDF files")),
                     )
                     .arg(
@@ -137,7 +146,7 @@ fn cli() -> Command {
                         Arg::new("file")
                             .required(true)
                             .value_name("FILE")
-                            .help_heading(&arguments)
+                            .help_heading(arguments)
                             .help(tr("PDF file")),
                     )
                     .arg(
@@ -155,7 +164,7 @@ fn cli() -> Command {
                     ),
             )),
     );
-    with_localized_help(cmd)
+    cmd
 }
 
 fn main() {
