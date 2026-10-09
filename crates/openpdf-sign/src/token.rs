@@ -8,12 +8,12 @@ use cryptoki::error::{Error as CkError, RvError};
 use cryptoki::mechanism::Mechanism;
 use cryptoki::object::{Attribute, AttributeType, ObjectClass, ObjectHandle};
 use cryptoki::session::{Session, UserType};
-use cryptoki::slot::Slot;
+use cryptoki::slot::{Slot, TokenInfo};
 use cryptoki::types::AuthPin;
 use der::Decode;
 use openpdf_core::{
-    tr_args, CertificateInfo, Error, PinProvider, Result, SecretPin, SignRequest, SignatureInfo,
-    Signer,
+    tr_args, CertificateInfo, Error, PinProvider, Result, SignRequest, SignatureInfo, Signer,
+    TokenPinStatus,
 };
 use sha2::{Digest, Sha256};
 use x509_cert::Certificate;
@@ -162,12 +162,12 @@ impl Pkcs11Backend {
                 Err(_) => continue,
             };
             for slot in slots {
-                let token_label = module
-                    .ctx
-                    .get_token_info(slot)
-                    .ok()
+                let token_info = module.ctx.get_token_info(slot).ok();
+                let token_label = token_info
+                    .as_ref()
                     .map(|t| trim_pkcs11_label(t.label()))
                     .unwrap_or_default();
+                let pin_status = token_info.as_ref().map(token_pin_status);
                 let session = match module.ctx.open_ro_session(slot) {
                     Ok(s) => s,
                     Err(_) => continue,
@@ -178,7 +178,7 @@ impl Pkcs11Backend {
                         Err(_) => continue,
                     };
                 for handle in handles {
-                    if let Some(picked) = read_cert(
+                    if let Some(mut picked) = read_cert(
                         &session,
                         handle,
                         module_index,
@@ -187,6 +187,7 @@ impl Pkcs11Backend {
                         &token_label,
                         prefix_module,
                     ) {
+                        picked.info.pin_status = pin_status;
                         out.push(picked);
                     }
                 }
@@ -206,14 +207,7 @@ impl Pkcs11Backend {
             .or_else(|_| module.ctx.open_ro_session(picked.slot))
             .map_err(pkcs11_err)?;
 
-        let pin: SecretPin = self.pin.request_pin(&picked.token_label)?;
-        {
-            let auth = AuthPin::new(pin.as_str().into());
-            session
-                .login(UserType::User, Some(&auth))
-                .map_err(pkcs11_err)?;
-        }
-        drop(pin);
+        login_user(module, &session, picked.slot, &picked.token_label, &self.pin)?;
 
         let key = find_private_key(&session, &picked.cka_id)?;
         let cert = Certificate::from_der(&picked.der).map_err(|e| Error::Sign(e.to_string()))?;
@@ -441,6 +435,44 @@ fn pkcs11_err(e: impl ToString) -> Error {
         "PKCS#11 error: {error}",
         &[("error", &e.to_string())],
     ))
+}
+
+fn login_user(
+    module: &LoadedModule,
+    session: &Session,
+    slot: Slot,
+    token_label: &str,
+    pin: &Arc<dyn PinProvider>,
+) -> Result<()> {
+    let info = module.ctx.get_token_info(slot).map_err(pkcs11_err)?;
+    if info.user_pin_locked() {
+        return Err(Error::PinLocked);
+    }
+    // Pinpad / protected path: C_Login with a NULL PIN. Never prompt, never send "".
+    if info.protected_authentication_path() {
+        return session
+            .login(UserType::User, None)
+            .map_err(pkcs11_err);
+    }
+    let secret = pin.request_pin(token_label)?;
+    if secret.as_str().trim().is_empty() {
+        return Err(Error::PinRequired);
+    }
+    let auth = AuthPin::new(secret.as_str().into());
+    let result = session
+        .login(UserType::User, Some(&auth))
+        .map_err(pkcs11_err);
+    drop(secret);
+    result
+}
+
+fn token_pin_status(info: &TokenInfo) -> TokenPinStatus {
+    TokenPinStatus::new(
+        info.user_pin_count_low(),
+        info.user_pin_final_try(),
+        info.user_pin_locked(),
+        info.protected_authentication_path(),
+    )
 }
 
 fn slot_id(slot: Slot) -> u64 {

@@ -382,6 +382,22 @@ impl PinProvider for PanicPin {
     }
 }
 
+struct EmptyPin;
+
+impl PinProvider for EmptyPin {
+    fn request_pin(&self, _token_label: &str) -> openpdf_core::Result<SecretPin> {
+        Ok(SecretPin::new(""))
+    }
+}
+
+struct CancelPin;
+
+impl PinProvider for CancelPin {
+    fn request_pin(&self, _token_label: &str) -> openpdf_core::Result<SecretPin> {
+        Err(Error::PinCancelled)
+    }
+}
+
 #[test]
 fn secret_pin_is_zeroizing() {
     let pin = SecretPin::new("1234");
@@ -415,6 +431,13 @@ fn list_certificates_does_not_ask_for_pin() {
                 .any(|c| c.subject.contains("OpenPDF Test Signer"))
         );
         assert!(certs.iter().any(|c| c.subject.contains("OpenPDF EC Test")));
+        let pin = certs
+            .iter()
+            .find(|c| c.subject.contains("OpenPDF Test Signer"))
+            .and_then(|c| c.pin_status);
+        let pin = pin.expect("PKCS#11 listing fills token PIN flags");
+        assert!(!pin.locked);
+        assert!(!pin.protected_authentication_path);
         with_locale("en", || {
             let rsa = certs
                 .iter()
@@ -515,6 +538,98 @@ fn sign_visible_appearance() {
         assert!(signed.starts_with(&original));
         let infos = signer.verify(&signed).unwrap();
         assert_eq!(infos[0].valid, Some(true));
+    }) else {
+        return;
+    };
+}
+
+#[test]
+fn empty_pin_never_decrements_softhsm_retry() {
+    let Some(()) = with_softhsm(|| {
+        let env = test_env();
+        let empty = Pkcs11Signer::new(Pkcs11Config::with_module(&env.module), EmptyPin)
+            .expect("empty-pin signer");
+        let certs = empty.list_certificates().unwrap();
+        let cert = certs
+            .iter()
+            .find(|c| can_use(c) && c.subject.contains("OpenPDF Test Signer"))
+            .expect("RSA SoftHSM test cert");
+        let before = cert.pin_status;
+        let cert_id = cert.id.clone();
+        let pdf = fs::read(corpus("hello.pdf")).unwrap();
+        let err = empty
+            .sign(
+                &pdf,
+                &SignRequest {
+                    cert_id: cert_id.clone(),
+                    ..SignRequest::default()
+                },
+            )
+            .unwrap_err();
+        assert!(
+            matches!(err, Error::PinRequired),
+            "empty PIN must not call C_Login: {err:?}"
+        );
+        let after = empty
+            .list_certificates()
+            .unwrap()
+            .into_iter()
+            .find(|c| c.id == cert_id)
+            .and_then(|c| c.pin_status);
+        assert_eq!(
+            before, after,
+            "empty PIN must not change CKF_USER_PIN_* flags"
+        );
+        let ok = signer();
+        let signed = ok
+            .sign(
+                &pdf,
+                &SignRequest {
+                    cert_id,
+                    reason: Some("empty-pin guard".into()),
+                    location: None,
+                    contact: None,
+                    appearance: None,
+                },
+            )
+            .expect("correct PIN still works after empty PIN was refused");
+        assert!(signed.starts_with(&pdf));
+    }) else {
+        return;
+    };
+}
+
+#[test]
+fn cancelled_pin_never_touches_token() {
+    let Some(()) = with_softhsm(|| {
+        let env = test_env();
+        let cancel = Pkcs11Signer::new(Pkcs11Config::with_module(&env.module), CancelPin)
+            .expect("cancel signer");
+        let certs = cancel.list_certificates().unwrap();
+        let cert = certs
+            .iter()
+            .find(|c| can_use(c) && c.subject.contains("OpenPDF Test Signer"))
+            .expect("RSA SoftHSM test cert");
+        let before = cert.pin_status;
+        let cert_id = cert.id.clone();
+        let pdf = fs::read(corpus("hello.pdf")).unwrap();
+        let err = cancel
+            .sign(
+                &pdf,
+                &SignRequest {
+                    cert_id: cert_id.clone(),
+                    ..SignRequest::default()
+                },
+            )
+            .unwrap_err();
+        assert!(matches!(err, Error::PinCancelled), "{err:?}");
+        let after = cancel
+            .list_certificates()
+            .unwrap()
+            .into_iter()
+            .find(|c| c.id == cert_id)
+            .and_then(|c| c.pin_status);
+        assert_eq!(before, after);
     }) else {
         return;
     };

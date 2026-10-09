@@ -56,6 +56,40 @@ pub struct CertificateInfo {
     pub usage: Vec<CertificateUsage>,
     /// `Some` when the UI must disable this row. [`Signer::sign`] still refuses.
     pub unusable: Option<CertUnusable>,
+    /// PKCS#11 token PIN flags (`CKF_USER_PIN_*`, protected path). Native stores leave `None`.
+    pub pin_status: Option<TokenPinStatus>,
+}
+
+/// PKCS#11 `CK_TOKEN_INFO` PIN flags, so the UI can warn before the last attempt.
+///
+/// `#[non_exhaustive]` so extra flags can be added without breaking downstream crates.
+#[non_exhaustive]
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct TokenPinStatus {
+    /// `CKF_USER_PIN_COUNT_LOW`: at least one failed login since last success.
+    pub count_low: bool,
+    /// `CKF_USER_PIN_FINAL_TRY`: one more wrong PIN locks the token.
+    pub final_try: bool,
+    /// `CKF_USER_PIN_LOCKED`: user login is impossible.
+    pub locked: bool,
+    /// `CKF_PROTECTED_AUTHENTICATION_PATH`: PIN is entered on a pinpad (`C_Login` with NULL).
+    pub protected_authentication_path: bool,
+}
+
+impl TokenPinStatus {
+    pub fn new(
+        count_low: bool,
+        final_try: bool,
+        locked: bool,
+        protected_authentication_path: bool,
+    ) -> Self {
+        Self {
+            count_low,
+            final_try,
+            locked,
+            protected_authentication_path,
+        }
+    }
 }
 
 /// Options passed from the UI to a [`Signer`] implementation (PKCS#11 lives in `openpdf-sign`).
@@ -115,6 +149,19 @@ pub fn usage_label(usage: &CertificateUsage) -> String {
         CertificateUsage::Authentication => tr("Authentication"),
         CertificateUsage::Encryption => tr("Encryption"),
         CertificateUsage::Other(detail) => tr_args("Other ({detail})", &[("detail", detail)]),
+    }
+}
+
+/// Translated PIN-retry warning for a picker, or `None` when there is nothing to show.
+pub fn describe_pin_status(status: &TokenPinStatus) -> Option<String> {
+    if status.locked {
+        Some(tr("Token PIN is locked"))
+    } else if status.final_try {
+        Some(tr("Last PIN attempt"))
+    } else if status.count_low {
+        Some(tr("Few PIN attempts remaining"))
+    } else {
+        None
     }
 }
 
@@ -307,6 +354,7 @@ mod tests {
                 },
                 usage: vec![CertificateUsage::Authentication],
                 unusable: Some(CertUnusable::AuthenticationOnly),
+                pin_status: None,
             },
             CertificateInfo {
                 id: "dnie-sign".into(),
@@ -318,6 +366,7 @@ mod tests {
                 },
                 usage: vec![CertificateUsage::Signing],
                 unusable: None,
+                pin_status: None,
             },
         ]
     }
@@ -509,6 +558,7 @@ mod tests {
             },
             usage: vec![CertificateUsage::Signing],
             unusable: None,
+            pin_status: None,
         };
         with_locale("en", || {
             assert_eq!(
@@ -581,6 +631,49 @@ mod tests {
                 cat.translate("Unsupported key algorithm")
             );
             assert_ne!(expired_es, "Certificate has expired (valid until 2020-01-01T00:00:00Z)");
+        });
+    }
+
+    #[test]
+    fn describe_pin_status_follows_catalog() {
+        with_locale("en", || {
+            assert_eq!(describe_pin_status(&TokenPinStatus::default()), None);
+            assert_eq!(
+                describe_pin_status(&TokenPinStatus {
+                    count_low: true,
+                    ..TokenPinStatus::default()
+                })
+                .as_deref(),
+                Some("Few PIN attempts remaining")
+            );
+            assert_eq!(
+                describe_pin_status(&TokenPinStatus {
+                    final_try: true,
+                    count_low: true,
+                    ..TokenPinStatus::default()
+                })
+                .as_deref(),
+                Some("Last PIN attempt")
+            );
+            assert_eq!(
+                describe_pin_status(&TokenPinStatus {
+                    locked: true,
+                    ..TokenPinStatus::default()
+                })
+                .as_deref(),
+                Some("Token PIN is locked")
+            );
+        });
+        with_locale("es", || {
+            let cat = es_catalog();
+            assert_eq!(
+                describe_pin_status(&TokenPinStatus {
+                    final_try: true,
+                    ..TokenPinStatus::default()
+                })
+                .as_deref(),
+                Some(cat.translate("Last PIN attempt"))
+            );
         });
     }
 

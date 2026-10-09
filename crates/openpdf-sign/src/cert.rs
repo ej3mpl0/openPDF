@@ -220,6 +220,7 @@ pub(crate) fn info_from_cert(cert: &Certificate, _der: &[u8], id: String) -> Cer
         },
         usage: key_usage(cert),
         unusable: unusable_reason(cert),
+        pin_status: None,
     }
 }
 

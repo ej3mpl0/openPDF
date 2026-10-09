@@ -37,7 +37,7 @@ pub use macos::KeychainSigner;
 pub use openpdf_core::{
     init_i18n, set_locale, tr, tr_args, CertUnusable, CertificateInfo, CertificateUsage,
     CertificateValidity, PinProvider, SecretPin, SignRequest, SignatureInfo, Signer,
-    VisibleAppearance,
+    TokenPinStatus, VisibleAppearance,
 };
 
 #[cfg(test)]

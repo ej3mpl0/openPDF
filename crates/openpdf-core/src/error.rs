@@ -21,6 +21,12 @@ pub enum Error {
     EmptyDocument,
     Invalid(InvalidKind),
     Sign(String),
+    /// PKCS#11 login needs a PIN and none was supplied (empty or missing).
+    PinRequired,
+    /// The user dismissed the PIN dialog. The token was not touched.
+    PinCancelled,
+    /// `CKF_USER_PIN_LOCKED`: C_Login would fail; do not consume further tries.
+    PinLocked,
     /// The PDF already has a signature; `op` would invalidate it.
     Signed {
         op: SignedOp,
@@ -99,6 +105,9 @@ impl Error {
             Error::EmptyDocument => tr("document has no pages"),
             Error::Invalid(kind) => kind.to_locale_string(),
             Error::Sign(m) => tr_args("sign: {detail}", &[("detail", &tr(m))]),
+            Error::PinRequired => tr("PIN is required"),
+            Error::PinCancelled => tr("PIN entry was cancelled"),
+            Error::PinLocked => tr("Token PIN is locked"),
             Error::Signed { op } => tr_args(
                 "document is signed; {op} would invalidate the signature (incremental save only)",
                 &[("op", &tr(op.msgid()))],
@@ -191,6 +200,9 @@ mod tests {
         let _g = crate::test_support::locale_test_guard();
         set_locale("en");
         assert_eq!(Error::EmptyDocument.to_string(), "document has no pages");
+        assert_eq!(Error::PinRequired.to_string(), "PIN is required");
+        assert_eq!(Error::PinCancelled.to_string(), "PIN entry was cancelled");
+        assert_eq!(Error::PinLocked.to_string(), "Token PIN is locked");
         set_locale("es");
         assert_eq!(
             Error::EmptyDocument.to_string(),
@@ -211,5 +223,8 @@ mod tests {
         ));
         let err = Error::invalid(InvalidKind::CertIdRequired);
         assert!(matches!(err, Error::Invalid(InvalidKind::CertIdRequired)));
+        assert!(matches!(Error::PinRequired, Error::PinRequired));
+        assert!(matches!(Error::PinCancelled, Error::PinCancelled));
+        assert!(matches!(Error::PinLocked, Error::PinLocked));
     }
 }

@@ -121,6 +121,21 @@ msgstr ""
 msgid "Unsupported key algorithm"
 msgstr ""
 
+msgid "PIN is required"
+msgstr ""
+
+msgid "PIN entry was cancelled"
+msgstr ""
+
+msgid "Token PIN is locked"
+msgstr ""
+
+msgid "Last PIN attempt"
+msgstr ""
+
+msgid "Few PIN attempts remaining"
+msgstr ""
+
 msgid "(untitled)"
 msgstr ""
 

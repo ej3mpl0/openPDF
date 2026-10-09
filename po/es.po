@@ -121,6 +121,21 @@ msgstr "El certificado aún no es válido (válido desde {not_before})"
 msgid "Unsupported key algorithm"
 msgstr "Algoritmo de clave no admitido"
 
+msgid "PIN is required"
+msgstr "Se requiere el PIN"
+
+msgid "PIN entry was cancelled"
+msgstr "Se canceló la introducción del PIN"
+
+msgid "Token PIN is locked"
+msgstr "El PIN del token está bloqueado"
+
+msgid "Last PIN attempt"
+msgstr "Último intento de PIN"
+
+msgid "Few PIN attempts remaining"
+msgstr "Quedan pocos intentos de PIN"
+
 msgid "(untitled)"
 msgstr "(sin título)"
 
