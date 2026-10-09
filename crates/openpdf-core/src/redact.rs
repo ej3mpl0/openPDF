@@ -78,6 +78,7 @@ pub fn redact(doc: &Document, boxes: &[RedactBox]) -> Result<Document> {
     }
     clear_form_values_in_boxes(&mut inner, boxes)?;
     scrub_metadata(&mut inner, &secrets);
+    wipe_secrets_everywhere(&mut inner, &secrets);
     inner.prune_objects();
     inner.renumber_objects();
     Document::from_lopdf(inner, None)
@@ -561,15 +562,131 @@ fn scrub_metadata(doc: &mut lopdf::Document, secrets: &BTreeSet<String>) {
     }
 }
 
-fn scrub_bytes(data: &[u8], secrets: &BTreeSet<String>) -> Vec<u8> {
-    let mut text = String::from_utf8_lossy(data).into_owned();
-    for secret in secrets {
-        if secret.is_empty() {
-            continue;
-        }
-        text = text.replace(secret, "");
+fn wipe_secrets_everywhere(doc: &mut lopdf::Document, secrets: &BTreeSet<String>) {
+    if secrets.is_empty() {
+        return;
     }
-    text.into_bytes()
+    let ids: Vec<ObjectId> = doc.objects.keys().copied().collect();
+    for id in ids {
+        if let Ok(obj) = doc.get_object_mut(id) {
+            wipe_object(obj, secrets);
+        }
+    }
+    if let Ok(info) = doc.trailer.get_mut(b"Info") {
+        wipe_object(info, secrets);
+    }
+}
+
+fn wipe_object(obj: &mut Object, secrets: &BTreeSet<String>) {
+    match obj {
+        Object::String(bytes, _) => *bytes = scrub_bytes(bytes, secrets),
+        Object::Array(items) => {
+            for item in items {
+                wipe_object(item, secrets);
+            }
+        }
+        Object::Dictionary(dict) => {
+            let keys: Vec<Vec<u8>> = dict.iter().map(|(k, _)| k.clone()).collect();
+            for key in keys {
+                if let Ok(value) = dict.get_mut(key.as_slice()) {
+                    wipe_object(value, secrets);
+                }
+            }
+        }
+        Object::Stream(stream) => {
+            let data = stream
+                .get_plain_content()
+                .unwrap_or_else(|_| stream.content.clone());
+            stream.set_plain_content(scrub_bytes(&data, secrets));
+            let keys: Vec<Vec<u8>> = stream.dict.iter().map(|(k, _)| k.clone()).collect();
+            for key in keys {
+                if let Ok(value) = stream.dict.get_mut(key.as_slice()) {
+                    wipe_object(value, secrets);
+                }
+            }
+        }
+        _ => {}
+    }
+}
+
+fn scrub_bytes(data: &[u8], secrets: &BTreeSet<String>) -> Vec<u8> {
+    let mut out = data.to_vec();
+    for secret in secrets {
+        for enc in secret_encodings(secret) {
+            out = remove_slice(&out, &enc);
+        }
+    }
+    out
+}
+
+fn secret_encodings(secret: &str) -> Vec<Vec<u8>> {
+    let mut out = Vec::new();
+    let utf8 = secret.as_bytes();
+    if utf8.is_empty() {
+        return out;
+    }
+    out.push(utf8.to_vec());
+    out.push(utf16_be(secret, true));
+    out.push(utf16_be(secret, false));
+    out.push(utf16_le(secret, true));
+    out.push(utf16_le(secret, false));
+    out.push(to_hex(utf8, false));
+    out.push(to_hex(utf8, true));
+    let be = utf16_be(secret, false);
+    out.push(to_hex(&be, false));
+    out.push(to_hex(&be, true));
+    out
+}
+
+fn utf16_be(s: &str, bom: bool) -> Vec<u8> {
+    let mut out = Vec::new();
+    if bom {
+        out.extend_from_slice(&[0xFE, 0xFF]);
+    }
+    for unit in s.encode_utf16() {
+        out.extend_from_slice(&unit.to_be_bytes());
+    }
+    out
+}
+
+fn utf16_le(s: &str, bom: bool) -> Vec<u8> {
+    let mut out = Vec::new();
+    if bom {
+        out.extend_from_slice(&[0xFF, 0xFE]);
+    }
+    for unit in s.encode_utf16() {
+        out.extend_from_slice(&unit.to_le_bytes());
+    }
+    out
+}
+
+fn to_hex(bytes: &[u8], upper: bool) -> Vec<u8> {
+    const LOW: &[u8; 16] = b"0123456789abcdef";
+    const UP: &[u8; 16] = b"0123456789ABCDEF";
+    let table = if upper { UP } else { LOW };
+    let mut out = Vec::with_capacity(bytes.len() * 2);
+    for b in bytes {
+        out.push(table[(b >> 4) as usize]);
+        out.push(table[(b & 0x0F) as usize]);
+    }
+    out
+}
+
+fn remove_slice(hay: &[u8], needle: &[u8]) -> Vec<u8> {
+    if needle.is_empty() {
+        return hay.to_vec();
+    }
+    let mut out = Vec::with_capacity(hay.len());
+    let mut i = 0;
+    while i < hay.len() {
+        if hay[i..].starts_with(needle) {
+            i += needle.len();
+        } else {
+            out.push(hay[i]);
+            i += 1;
+        }
+    }
+    out
 }
 
 fn record_secret(secrets: &mut BTreeSet<String>, text: &str) {
@@ -592,9 +709,27 @@ fn should_drop_text(gfx: &Gfx, text: &str, boxes: &[RedactBox]) -> bool {
 
 fn operand_text(obj: Option<&Object>) -> String {
     match obj {
-        Some(Object::String(b, _)) => String::from_utf8_lossy(b).into_owned(),
+        Some(Object::String(b, _)) => pdf_string_text(b),
         _ => String::new(),
     }
+}
+
+fn pdf_string_text(bytes: &[u8]) -> String {
+    if bytes.starts_with(&[0xFE, 0xFF]) {
+        let units: Vec<u16> = bytes[2..]
+            .chunks(2)
+            .filter_map(|c| (c.len() == 2).then_some(u16::from_be_bytes([c[0], c[1]])))
+            .collect();
+        return String::from_utf16_lossy(&units);
+    }
+    if bytes.starts_with(&[0xFF, 0xFE]) {
+        let units: Vec<u16> = bytes[2..]
+            .chunks(2)
+            .filter_map(|c| (c.len() == 2).then_some(u16::from_le_bytes([c[0], c[1]])))
+            .collect();
+        return String::from_utf16_lossy(&units);
+    }
+    String::from_utf8_lossy(bytes).into_owned()
 }
 
 fn tj_text(operands: &[Object]) -> String {
@@ -604,7 +739,7 @@ fn tj_text(operands: &[Object]) -> String {
     let mut s = String::new();
     for item in items {
         if let Object::String(b, _) = item {
-            s.push_str(&String::from_utf8_lossy(b));
+            s.push_str(&pdf_string_text(b));
         }
     }
     s
@@ -745,10 +880,18 @@ mod tests {
     use crate::test_support::corpus;
     use lopdf::content::{Content, Operation};
     use lopdf::dictionary;
+    use lopdf::StringFormat;
 
     const SECRET: &str = "SECRET42";
 
-    fn secret_pdf() -> Document {
+    #[derive(Clone, Copy)]
+    enum SecretDraw {
+        LiteralTj,
+        TjKerning,
+        HexTj,
+    }
+
+    fn secret_pdf(draw: SecretDraw, compress: bool) -> Document {
         let mut doc = lopdf::Document::with_version("1.5");
         let pages_id = doc.new_object_id();
         let font_id = doc.add_object(dictionary! {
@@ -759,18 +902,43 @@ mod tests {
         let resources_id = doc.add_object(dictionary! {
             "Font" => dictionary! { "F1" => font_id },
         });
+        let show = match draw {
+            SecretDraw::LiteralTj => Operation::new("Tj", vec![Object::string_literal(SECRET)]),
+            SecretDraw::TjKerning => Operation::new(
+                "TJ",
+                vec![Object::Array(vec![
+                    Object::string_literal("SEC"),
+                    Object::Integer(-20),
+                    Object::string_literal("RET42"),
+                ])],
+            ),
+            SecretDraw::HexTj => Operation::new(
+                "Tj",
+                vec![Object::String(
+                    SECRET.as_bytes().to_vec(),
+                    StringFormat::Hexadecimal,
+                )],
+            ),
+        };
         let content = Content {
             operations: vec![
                 Operation::new("BT", vec![]),
                 Operation::new("Tf", vec!["F1".into(), 18.into()]),
                 Operation::new("Td", vec![72.into(), 700.into()]),
-                Operation::new("Tj", vec![Object::string_literal(SECRET)]),
+                show,
                 Operation::new("ET", vec![]),
             ],
         };
-        let encoded = content.encode().unwrap();
-        let content_id = doc.add_object(Stream::new(Dictionary::new(), encoded));
-        let thumb_id = doc.add_object(Stream::new(Dictionary::new(), SECRET.as_bytes().to_vec()));
+        let mut content_stream = Stream::new(Dictionary::new(), content.encode().unwrap());
+        if compress {
+            let _ = content_stream.compress();
+        }
+        let content_id = doc.add_object(content_stream);
+        let mut thumb = Stream::new(Dictionary::new(), SECRET.as_bytes().to_vec());
+        if compress {
+            let _ = thumb.compress();
+        }
+        let thumb_id = doc.add_object(thumb);
         let page_id = doc.add_object(dictionary! {
             "Type" => "Page",
             "Parent" => pages_id,
@@ -790,7 +958,11 @@ mod tests {
             "Subject" => Object::string_literal(format!("about {SECRET}")),
         });
         let xmp = format!("<x:xmpmeta>{SECRET} hidden</x:xmpmeta>");
-        let meta_id = doc.add_object(Stream::new(Dictionary::new(), xmp.into_bytes()));
+        let mut meta = Stream::new(Dictionary::new(), xmp.into_bytes());
+        if compress {
+            let _ = meta.compress();
+        }
+        let meta_id = doc.add_object(meta);
         let catalog_id = doc.add_object(dictionary! {
             "Type" => "Catalog",
             "Pages" => pages_id,
@@ -799,6 +971,124 @@ mod tests {
         doc.trailer.set("Root", catalog_id);
         doc.trailer.set("Info", info_id);
         Document::from_lopdf(doc, None).unwrap()
+    }
+
+    fn assert_secret_present(bytes: &[u8]) {
+        assert!(
+            secret_in_pdf(bytes, SECRET),
+            "fixture must contain {SECRET} after decompressing streams and checking encodings"
+        );
+    }
+
+    fn assert_secret_absent(bytes: &[u8]) {
+        if let Some(where_) = secret_in_pdf_where(bytes, SECRET) {
+            panic!("secret still present in rewritten PDF ({where_})");
+        }
+        let reloaded = lopdf::Document::load_mem(bytes).unwrap();
+        let extracted = reloaded.extract_text(&[1]).unwrap_or_default();
+        assert!(
+            !extracted.contains(SECRET),
+            "extract_text still has secret: {extracted}"
+        );
+        if let Some(id) = reloaded.get_pages().get(&1) {
+            if let Ok(page) = reloaded.get_object(*id).and_then(|o| o.as_dict()) {
+                assert!(page.get(b"Thumb").is_err(), "Thumb must be removed");
+            }
+        }
+    }
+
+    fn secret_in_pdf(bytes: &[u8], secret: &str) -> bool {
+        secret_in_pdf_where(bytes, secret).is_some()
+    }
+
+    fn secret_in_pdf_where(bytes: &[u8], secret: &str) -> Option<&'static str> {
+        if encodings_contain(bytes, secret) {
+            return Some("raw file encodings");
+        }
+        let doc = lopdf::Document::load_mem(bytes).ok()?;
+        for obj in doc.objects.values() {
+            if let Some(w) = object_has_secret(obj, secret) {
+                return Some(w);
+            }
+        }
+        if let Ok(text) = doc.extract_text(&[1]) {
+            if text.contains(secret) {
+                return Some("extract_text");
+            }
+        }
+        None
+    }
+
+    fn object_has_secret(obj: &Object, secret: &str) -> Option<&'static str> {
+        match obj {
+            Object::String(b, _) => {
+                if encodings_contain(b, secret) || pdf_string_text(b).contains(secret) {
+                    Some("string object")
+                } else {
+                    None
+                }
+            }
+            Object::Array(items) => items.iter().find_map(|o| object_has_secret(o, secret)),
+            Object::Dictionary(dict) => dict.iter().find_map(|(_, v)| object_has_secret(v, secret)),
+            Object::Stream(stream) => {
+                if encodings_contain(&stream.content, secret) {
+                    return Some("compressed stream");
+                }
+                let plain = stream
+                    .get_plain_content()
+                    .or_else(|_| stream.decompressed_content())
+                    .unwrap_or_else(|_| stream.content.clone());
+                if encodings_contain(&plain, secret) {
+                    return Some("decompressed stream");
+                }
+                if content_strings_joined(&plain).contains(secret) {
+                    return Some("content-stream strings");
+                }
+                stream
+                    .dict
+                    .iter()
+                    .find_map(|(_, v)| object_has_secret(v, secret))
+            }
+            _ => None,
+        }
+    }
+
+    fn content_strings_joined(data: &[u8]) -> String {
+        let Ok(content) = Content::decode(data) else {
+            return String::new();
+        };
+        let mut out = String::new();
+        for op in content.operations {
+            collect_pdf_strings(&Object::Array(op.operands), &mut out);
+        }
+        out
+    }
+
+    fn collect_pdf_strings(obj: &Object, out: &mut String) {
+        match obj {
+            Object::String(b, _) => out.push_str(&pdf_string_text(b)),
+            Object::Array(items) => {
+                for item in items {
+                    collect_pdf_strings(item, out);
+                }
+            }
+            Object::Dictionary(dict) => {
+                for (_, v) in dict.iter() {
+                    collect_pdf_strings(v, out);
+                }
+            }
+            _ => {}
+        }
+    }
+
+    fn encodings_contain(hay: &[u8], secret: &str) -> bool {
+        secret_encodings(secret)
+            .iter()
+            .any(|enc| hay.windows(enc.len()).any(|w| w == enc.as_slice()))
+    }
+
+    fn redact_box() -> RedactBox {
+        RedactBox::new(0, 50.0, 680.0, 300.0, 740.0).unwrap()
     }
 
     #[test]
@@ -814,32 +1104,27 @@ mod tests {
     }
 
     #[test]
-    fn redacted_text_is_not_in_saved_bytes() {
-        let doc = secret_pdf();
-        let before = doc.to_bytes().unwrap();
-        assert!(
-            bytes_contain(&before, SECRET.as_bytes()),
-            "fixture must contain the secret"
-        );
-        let out = redact(
-            &doc,
-            &[RedactBox::new(0, 50.0, 680.0, 300.0, 740.0).unwrap()],
-        )
-        .unwrap();
-        let bytes = out.to_bytes().unwrap();
-        assert!(
-            !bytes_contain(&bytes, SECRET.as_bytes()),
-            "secret still present in rewritten PDF"
-        );
-        let reloaded = lopdf::Document::load_mem(&bytes).unwrap();
-        let extracted = reloaded.extract_text(&[1]).unwrap_or_default();
-        assert!(
-            !extracted.contains(SECRET),
-            "extract_text still has secret: {extracted}"
-        );
-        let id = *reloaded.get_pages().get(&1).unwrap();
-        let page = reloaded.get_object(id).unwrap().as_dict().unwrap();
-        assert!(page.get(b"Thumb").is_err(), "Thumb must be removed");
+    fn redacted_literal_tj_not_extractable() {
+        let doc = secret_pdf(SecretDraw::LiteralTj, true);
+        assert_secret_present(&doc.to_bytes().unwrap());
+        let out = redact(&doc, &[redact_box()]).unwrap();
+        assert_secret_absent(&out.to_bytes().unwrap());
+    }
+
+    #[test]
+    fn redacted_tj_kerning_split_not_extractable() {
+        let doc = secret_pdf(SecretDraw::TjKerning, true);
+        assert_secret_present(&doc.to_bytes().unwrap());
+        let out = redact(&doc, &[redact_box()]).unwrap();
+        assert_secret_absent(&out.to_bytes().unwrap());
+    }
+
+    #[test]
+    fn redacted_hex_string_not_extractable() {
+        let doc = secret_pdf(SecretDraw::HexTj, true);
+        assert_secret_present(&doc.to_bytes().unwrap());
+        let out = redact(&doc, &[redact_box()]).unwrap();
+        assert_secret_absent(&out.to_bytes().unwrap());
     }
 
     #[test]
@@ -849,9 +1134,5 @@ mod tests {
             redact(&doc, &[]),
             Err(Error::Invalid(InvalidKind::NoRedactionBoxes))
         ));
-    }
-
-    fn bytes_contain(hay: &[u8], needle: &[u8]) -> bool {
-        hay.windows(needle.len()).any(|w| w == needle)
     }
 }
