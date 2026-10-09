@@ -19,6 +19,8 @@ mod pin;
 mod render;
 mod save;
 mod signer;
+#[cfg(any(test, feature = "test-support"))]
+pub mod test_support;
 
 pub use command::{Command, History};
 pub use document::{Document, DocumentId, PageInfo};
@@ -39,14 +41,3 @@ pub use signer::{
     usage_label, CertificateInfo, CertificateUsage, CertificateValidity, SignRequest,
     SignatureInfo, Signer, VisibleAppearance,
 };
-
-#[cfg(test)]
-pub(crate) mod test_support {
-    use std::path::{Path, PathBuf};
-
-    pub fn corpus(name: &str) -> PathBuf {
-        Path::new(env!("CARGO_MANIFEST_DIR"))
-            .join("../../corpus")
-            .join(name)
-    }
-}

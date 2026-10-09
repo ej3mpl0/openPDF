@@ -13,6 +13,7 @@ use cryptoki::session::UserType;
 use cryptoki::types::AuthPin;
 use der::asn1::{BitString, UintRef};
 use der::{Encode, Sequence};
+use openpdf_core::test_support::with_locale;
 use openpdf_core::{
     describe_certificate, format_verify_result, format_verify_results, pin_prompt_text, tr,
     Document, Error, PinProvider, SecretPin, SignRequest, Signer, VisibleAppearance,
@@ -281,7 +282,9 @@ fn secret_pin_is_zeroizing() {
 fn verify_unsigned_corpus() {
     let pdf = fs::read(corpus("hello.pdf")).unwrap();
     assert!(verify_pdf(&pdf).unwrap().is_empty());
-    assert_eq!(format_verify_results(&[]), tr("No signatures found"));
+    with_locale("en", || {
+        assert_eq!(format_verify_results(&[]), tr("No signatures found"));
+    });
 }
 
 #[test]
@@ -296,9 +299,11 @@ fn list_certificates_does_not_ask_for_pin() {
             "SoftHSM token should expose the test certificate without a PIN"
         );
         assert!(certs.iter().any(|c| c.subject.contains("OpenPDF Test")));
-        let desc = describe_certificate(&certs[0]);
-        assert!(desc.contains("OpenPDF Test"));
-        let _ = pin_prompt_text("openpdf-test");
+        with_locale("en", || {
+            let desc = describe_certificate(&certs[0]);
+            assert!(desc.contains("OpenPDF Test"));
+            let _ = pin_prompt_text("openpdf-test");
+        });
         let _ = CertificateUsage::Signing;
     }) else {
         return;
@@ -339,8 +344,10 @@ fn sign_and_verify_corpus_keeps_prefix() {
             "name: {:?}",
             infos[0].name
         );
-        let line = format_verify_result(&infos[0]);
-        assert!(line.contains(&tr("Valid")), "{line}");
+        with_locale("en", || {
+            let line = format_verify_result(&infos[0]);
+            assert!(line.contains(&tr("Valid")), "{line}");
+        });
 
         let mut doc = Document::from_bytes(signed.clone(), None).unwrap();
         assert!(doc.is_signed());

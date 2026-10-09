@@ -94,7 +94,10 @@ fn flush(
 
 fn unquote(s: &str) -> String {
     let s = s.trim();
-    let inner = s.strip_prefix('"').and_then(|s| s.strip_suffix('"')).unwrap_or(s);
+    let inner = s
+        .strip_prefix('"')
+        .and_then(|s| s.strip_suffix('"'))
+        .unwrap_or(s);
     let mut out = String::with_capacity(inner.len());
     let mut chars = inner.chars();
     while let Some(c) = chars.next() {
@@ -249,10 +252,7 @@ pub fn current_locale() -> String {
 }
 
 fn ensure_init() {
-    let need = STATE
-        .lock()
-        .map(|s| s.locale.is_empty())
-        .unwrap_or(false);
+    let need = STATE.lock().map(|s| s.locale.is_empty()).unwrap_or(false);
     if need {
         init();
     }
@@ -390,28 +390,31 @@ msgstr "HELLO"
 
     #[test]
     fn parser_joins_wrapped_strings() {
-        let cat = Catalog::parse(
-            "msgid \"\"\n\"Hel\"\n\"lo\"\nmsgstr \"\"\n\"HEL\"\n\"LO\"\n",
-        );
+        let cat = Catalog::parse("msgid \"\"\n\"Hel\"\n\"lo\"\nmsgstr \"\"\n\"HEL\"\n\"LO\"\n");
         assert_eq!(cat.translate("Hello"), "HELLO");
     }
 
     #[test]
     fn english_is_msgid_fallback() {
-        set_locale("en");
-        assert_eq!(tr("document has no pages"), "document has no pages");
-        assert_eq!(current_locale(), "en");
+        crate::test_support::with_locale("en", || {
+            assert_eq!(tr("document has no pages"), "document has no pages");
+            assert_eq!(current_locale(), "en");
+        });
     }
 
     #[test]
     fn spanish_catalog_is_applied() {
+        let _g = crate::test_support::locale_test_guard();
         set_locale("C");
         let english = tr("document has no pages");
         set_locale("es_ES.UTF-8");
         let spanish = tr("document has no pages");
         assert_eq!(english, "document has no pages");
         assert_ne!(spanish, english);
-        assert_eq!(spanish, Catalog::parse(include_str!("../../../po/es.po")).translate("document has no pages"));
+        assert_eq!(
+            spanish,
+            Catalog::parse(include_str!("../../../po/es.po")).translate("document has no pages")
+        );
         set_locale("en");
     }
 
@@ -425,10 +428,7 @@ msgstr "HELLO"
             if s != id {
                 translated += 1;
             } else {
-                assert!(
-                    *id == "openpdf: {error}",
-                    "identity msgstr for {id}"
-                );
+                assert!(*id == "openpdf: {error}", "identity msgstr for {id}");
             }
         }
         assert!(
@@ -504,7 +504,9 @@ msgstr "HELLO"
         if !ok {
             return;
         }
-        let Ok(src) = fs::read_to_string(path) else { return };
+        let Ok(src) = fs::read_to_string(path) else {
+            return;
+        };
         for (i, line) in src.lines().enumerate() {
             if line.chars().any(is_spanish_letter) {
                 hits.push(format!("{}:{}: {line}", path.display(), i + 1));
@@ -528,27 +530,27 @@ msgstr "HELLO"
     fn language_priority_es_en() {
         let tag = detect_locale_from(Some("es:en"), None, None, Some("en_US.UTF-8"));
         assert_eq!(tag, "es");
-        set_locale(&tag);
-        let english = "document has no pages";
-        assert_ne!(tr(english), english);
-        assert_eq!(
-            tr(english),
-            Catalog::parse(include_str!("../../../po/es.po")).translate(english)
-        );
-        set_locale("en");
+        crate::test_support::with_locale(&tag, || {
+            let english = "document has no pages";
+            assert_ne!(tr(english), english);
+            assert_eq!(
+                tr(english),
+                Catalog::parse(include_str!("../../../po/es.po")).translate(english)
+            );
+        });
     }
 
     #[test]
     fn language_priority_fr_es() {
         let tag = detect_locale_from(Some("fr:es"), None, None, Some("en_US.UTF-8"));
         assert_eq!(tag, "es");
-        set_locale(&tag);
-        let english = "document has no pages";
-        assert_eq!(
-            tr(english),
-            Catalog::parse(include_str!("../../../po/es.po")).translate(english)
-        );
-        set_locale("en");
+        crate::test_support::with_locale(&tag, || {
+            let english = "document has no pages";
+            assert_eq!(
+                tr(english),
+                Catalog::parse(include_str!("../../../po/es.po")).translate(english)
+            );
+        });
     }
 
     #[test]
@@ -559,8 +561,9 @@ msgstr "HELLO"
         assert_eq!(posix, "en");
         let lc_all_c = detect_locale_from(Some("es"), Some("C"), None, Some("es_ES.UTF-8"));
         assert_eq!(lc_all_c, "en");
-        set_locale(&tag);
-        assert_eq!(tr("document has no pages"), "document has no pages");
+        crate::test_support::with_locale(&tag, || {
+            assert_eq!(tr("document has no pages"), "document has no pages");
+        });
     }
 
     #[test]
@@ -577,10 +580,8 @@ msgstr "HELLO"
 
     #[test]
     fn tr_args_replaces_placeholders() {
-        set_locale("en");
-        assert_eq!(
-            tr_args("pages: {count}", &[("count", "2")]),
-            "pages: 2"
-        );
+        crate::test_support::with_locale("en", || {
+            assert_eq!(tr_args("pages: {count}", &[("count", "2")]), "pages: 2");
+        });
     }
 }

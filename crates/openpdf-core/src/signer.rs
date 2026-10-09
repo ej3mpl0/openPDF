@@ -148,7 +148,7 @@ pub fn format_verify_result(info: &SignatureInfo) -> String {
         Some(false) => tr("Invalid"),
         None => tr("Validity unknown"),
     });
-    if parts.len() == 1 && info.name.is_none() {
+    if parts.len() == 1 {
         parts.insert(0, tr("Signature"));
     }
     parts.join("; ")
@@ -255,22 +255,13 @@ pub(crate) fn append_stub_signature(pdf: &[u8]) -> Result<Vec<u8>> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::sync::Mutex;
 
     use crate::error::Error;
-    use crate::i18n::{set_locale, Catalog};
-    use crate::test_support::corpus;
+    use crate::i18n::Catalog;
+    use crate::test_support::{corpus, with_locale};
 
     fn es_catalog() -> Catalog {
         Catalog::parse(include_str!("../../../po/es.po"))
-    }
-
-    fn with_locale(tag: &str, f: impl FnOnce()) {
-        static LOCK: Mutex<()> = Mutex::new(());
-        let _g = LOCK.lock().unwrap_or_else(|e| e.into_inner());
-        set_locale(tag);
-        f();
-        set_locale("en");
     }
 
     fn dnie_certs() -> Vec<CertificateInfo> {
