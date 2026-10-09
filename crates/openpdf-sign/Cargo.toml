@@ -3,6 +3,19 @@ name = "openpdf-sign"
 version.workspace = true
 edition.workspace = true
 license.workspace = true
+description = "PKCS#11 PAdES-B-B signing for openPDF (DNIe, FNMT, SoftHSM)"
 
 [dependencies]
 openpdf-core = { path = "../openpdf-core" }
+cms = "0.2"
+const-oid = { version = "0.9", features = ["db"] }
+cryptoki = "0.12"
+der = { version = "0.7", features = ["alloc", "derive", "oid"] }
+lopdf = "0.36.0"
+rsa = { version = "0.9", default-features = false, features = ["std", "sha2"] }
+sha2 = { version = "0.10", default-features = false, features = ["std"] }
+x509-cert = { version = "0.2", default-features = false, features = ["std"] }
+zeroize = { version = "1", features = ["alloc"] }
+
+[dev-dependencies]
+openpdf-core = { path = "../openpdf-core", features = ["test-support"] }

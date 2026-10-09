@@ -5,10 +5,16 @@ edition.workspace = true
 license.workspace = true
 description = "PDF document, render, text, and structure core for openPDF"
 
+[features]
+default = []
+# Locale test lock + helpers for dependents (openpdf-sign, openpdf-cli).
+test-support = []
+
 [dependencies]
 lopdf = "0.36.0"
 pdfium-render = "0.9.4"
 thiserror = "2"
+zeroize = { version = "1", features = ["alloc"] }
 
 [dev-dependencies]
 image = { version = "0.25", default-features = false, features = ["png"] }

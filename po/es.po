@@ -207,3 +207,96 @@ msgstr "archivos PDF de entrada"
 
 msgid "read outline"
 msgstr "leer el índice"
+
+msgid "Signing"
+msgstr "Firma"
+
+msgid "Authentication"
+msgstr "Autenticación"
+
+msgid "Encryption"
+msgstr "Cifrado"
+
+msgid "Other ({detail})"
+msgstr "Otro ({detail})"
+
+msgid "unspecified usage"
+msgstr "uso no especificado"
+
+msgid "valid {not_before} to {not_after}"
+msgstr "válido {not_before} a {not_after}"
+
+msgid "validity unknown"
+msgstr "validez desconocida"
+
+msgid "{subject} — {usage} — {validity}"
+msgstr "Certificado {subject} — {usage} — {validity}"
+
+msgid "Enter PIN for token \"{token}\""
+msgstr "Introduzca el PIN del token \"{token}\""
+
+msgid "Signer: {name}"
+msgstr "Firmante: {name}"
+
+msgid "Reason: {reason}"
+msgstr "Motivo: {reason}"
+
+msgid "Location: {location}"
+msgstr "Lugar: {location}"
+
+msgid "Valid"
+msgstr "Válida"
+
+msgid "Invalid"
+msgstr "No válida"
+
+msgid "Validity unknown"
+msgstr "Validez desconocida"
+
+msgid "Signature"
+msgstr "Firma digital"
+
+msgid "No signatures found"
+msgstr "No se encontraron firmas"
+
+msgid "unknown certificate id {id}"
+msgstr "identificador de certificado desconocido {id}"
+
+msgid "no private key for certificate"
+msgstr "no hay clave privada para el certificado"
+
+msgid "no PKCS#11 module found (set OPENPDF_PKCS11_MODULE or install OpenSC / p11-kit)"
+msgstr "no se encontró ningún módulo PKCS#11 (defina OPENPDF_PKCS11_MODULE o instale OpenSC / p11-kit)"
+
+msgid "PKCS#11 error: {error}"
+msgstr "error PKCS#11: {error}"
+
+msgid "Could not load PKCS#11 module {path}: {error}"
+msgstr "No se pudo cargar el módulo PKCS#11 {path}: {error}"
+
+msgid "not a PDF"
+msgstr "no es un PDF"
+
+msgid "page {page} not found"
+msgstr "no se encuentra la página {page}"
+
+msgid "CMS signature is too large for the reserved Contents space"
+msgstr "La firma CMS no cabe en el espacio reservado de Contents"
+
+msgid "ByteRange is invalid"
+msgstr "ByteRange no es válido"
+
+msgid "this file has no startxref"
+msgstr "este archivo no tiene startxref"
+
+msgid "Contents placeholder not found"
+msgstr "no se encontró el marcador de Contents"
+
+msgid "ByteRange not found"
+msgstr "no se encontró ByteRange"
+
+msgid "ByteRange is out of range"
+msgstr "ByteRange está fuera de rango"
+
+msgid "Signed by {name}"
+msgstr "Firmado por {name}"

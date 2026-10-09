@@ -15,6 +15,10 @@ jobs:
           tar -xzf /tmp/pdfium.tgz -C "$HOME/pdfium"
           sudo cp "$HOME/pdfium/lib/libpdfium.so" /usr/local/lib/
           sudo ldconfig
+      - name: Install SoftHSM2
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y softhsm2
       - run: cargo build --workspace --release
       - run: cargo test --workspace
         env:

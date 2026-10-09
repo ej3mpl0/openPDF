@@ -207,3 +207,96 @@ msgstr ""
 
 msgid "read outline"
 msgstr ""
+
+msgid "Signing"
+msgstr ""
+
+msgid "Authentication"
+msgstr ""
+
+msgid "Encryption"
+msgstr ""
+
+msgid "Other ({detail})"
+msgstr ""
+
+msgid "unspecified usage"
+msgstr ""
+
+msgid "valid {not_before} to {not_after}"
+msgstr ""
+
+msgid "validity unknown"
+msgstr ""
+
+msgid "{subject} — {usage} — {validity}"
+msgstr ""
+
+msgid "Enter PIN for token \"{token}\""
+msgstr ""
+
+msgid "Signer: {name}"
+msgstr ""
+
+msgid "Reason: {reason}"
+msgstr ""
+
+msgid "Location: {location}"
+msgstr ""
+
+msgid "Valid"
+msgstr ""
+
+msgid "Invalid"
+msgstr ""
+
+msgid "Validity unknown"
+msgstr ""
+
+msgid "Signature"
+msgstr ""
+
+msgid "No signatures found"
+msgstr ""
+
+msgid "unknown certificate id {id}"
+msgstr ""
+
+msgid "no private key for certificate"
+msgstr ""
+
+msgid "no PKCS#11 module found (set OPENPDF_PKCS11_MODULE or install OpenSC / p11-kit)"
+msgstr ""
+
+msgid "PKCS#11 error: {error}"
+msgstr ""
+
+msgid "Could not load PKCS#11 module {path}: {error}"
+msgstr ""
+
+msgid "not a PDF"
+msgstr ""
+
+msgid "page {page} not found"
+msgstr ""
+
+msgid "CMS signature is too large for the reserved Contents space"
+msgstr ""
+
+msgid "ByteRange is invalid"
+msgstr ""
+
+msgid "this file has no startxref"
+msgstr ""
+
+msgid "Contents placeholder not found"
+msgstr ""
+
+msgid "ByteRange not found"
+msgstr ""
+
+msgid "ByteRange is out of range"
+msgstr ""
+
+msgid "Signed by {name}"
+msgstr ""
