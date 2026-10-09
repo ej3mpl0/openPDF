@@ -34,6 +34,8 @@ jobs:
   windows:
     runs-on: windows-latest
     steps:
+      - name: Disable CRLF conversion
+        run: git config --global core.autocrlf false
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@stable
       - name: Install PDFium
@@ -92,18 +94,35 @@ jobs:
           security create-keychain -p openpdf-ci "$KC"
           security set-keychain-settings -lut 21600 "$KC"
           security unlock-keychain -p openpdf-ci "$KC"
-          openssl req -x509 -newkey rsa:2048 \
+          # System LibreSSL produces a PKCS#12 that security(1) will import.
+          # OpenSSL 3 defaults (PBES2/AES, SHA-256 MAC) fail with
+          # "MAC verification failed during PKCS12 import".
+          OPENSSL=/usr/bin/openssl
+          "$OPENSSL" req -x509 -newkey rsa:2048 \
             -keyout "$RUNNER_TEMP/openpdf-key.pem" \
             -out "$RUNNER_TEMP/openpdf-cert.pem" \
             -days 2 -nodes \
             -subj "/CN=OpenPDF Test Signer"
-          openssl pkcs12 -export \
-            -inkey "$RUNNER_TEMP/openpdf-key.pem" \
-            -in "$RUNNER_TEMP/openpdf-cert.pem" \
-            -out "$RUNNER_TEMP/openpdf-id.p12" \
-            -passout pass:openpdf-ci \
-            -name "OpenPDF Test Signer"
-          security import "$RUNNER_TEMP/openpdf-id.p12" -k "$KC" -P openpdf-ci -A
+          P12="$RUNNER_TEMP/openpdf-id.p12"
+          export_p12() {
+            "$OPENSSL" pkcs12 -export \
+              -inkey "$RUNNER_TEMP/openpdf-key.pem" \
+              -in "$RUNNER_TEMP/openpdf-cert.pem" \
+              -out "$P12" \
+              -passout pass:openpdf-ci \
+              -name "OpenPDF Test Signer" \
+              "$@"
+          }
+          if export_p12 -macalg sha1 -keypbe PBE-SHA1-3DES -certpbe PBE-SHA1-3DES \
+            && security import "$P12" -k "$KC" -P openpdf-ci -A; then
+            :
+          elif export_p12 -legacy \
+            && security import "$P12" -k "$KC" -P openpdf-ci -A; then
+            :
+          else
+            export_p12
+            security import "$P12" -k "$KC" -P openpdf-ci -A
+          fi
           security set-key-partition-list -S apple-tool:,apple:,codesign: -s -k openpdf-ci "$KC" || true
           EXISTING=$(security list-keychains -d user | tr -d '"')
           security list-keychains -d user -s "$KC" $EXISTING
