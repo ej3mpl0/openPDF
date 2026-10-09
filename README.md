@@ -589,15 +589,45 @@ active at once). `list_certificates` does not ask for a PIN.
 ### PIN
 
 The PIN is never a field on `SignRequest`, `Signer`, or `Document`.
+Do not put a PIN in an environment variable. There is no user-facing
+PIN variable (including any `OPENPDF_PKCS11_PIN`).
 
-- **PKCS#11:** `PinProvider::request_pin` runs only when `Signer::sign`
-  logs in to the token. The value lives in `SecretPin`
-  (`zeroize::Zeroizing<String>`) and is wiped when that wrapper is
-  dropped (after login).
+- **PKCS#11:** `login_user` in `token.rs` runs only from `Signer::sign`.
+  `PinProvider::request_pin` supplies a `SecretPin`
+  (`zeroize::Zeroizing<String>`), wiped after login.
 - **Windows store:** the OS owns any PIN / smart-card dialog. The
   backend never collects a PIN.
 - **macOS Keychain:** the OS owns Keychain / token prompts. The
   backend never collects a PIN.
+
+Empty, whitespace-only, missing, or cancelled PINs never reach the
+card: no `C_Login`, so no retry is spent.
+
+- Empty or whitespace-only (`trim` is empty) → `Error::PinRequired`
+  (`PIN is required`) before `C_Login`.
+- Cancelled dialog (`PinProvider` returns `Error::PinCancelled`) →
+  `PIN entry was cancelled`; the token is not touched.
+- Locked token (`CKF_USER_PIN_LOCKED`) → `Error::PinLocked`
+  (`Token PIN is locked`) and no `C_Login`.
+- Pinpad reader (`CKF_PROTECTED_AUTHENTICATION_PATH`): the **reader**
+  asks for the PIN. The app logs in with a NULL PIN and never prompts
+  or sends `""`.
+
+`CertificateInfo.pin_status` (`Option<TokenPinStatus>`) carries the
+PKCS#11 flags. Native stores leave it `None`.
+`describe_pin_status` (first match) warns the picker:
+
+| Flag | Meaning | Text |
+|------|---------|------|
+| `locked` | `CKF_USER_PIN_LOCKED` | `Token PIN is locked` |
+| `final_try` | `CKF_USER_PIN_FINAL_TRY` | `Last PIN attempt` |
+| `count_low` | `CKF_USER_PIN_COUNT_LOW` | `Few PIN attempts remaining` |
+
+`TokenPinStatus` is `#[non_exhaustive]` and may grow.
+
+**DNIe:** the card locks after **3** wrong PINs. A locked DNIe must be
+unlocked at a police station. Treat `Last PIN attempt` as the last try
+before that lock.
 
 ### Incremental signatures and locks
 

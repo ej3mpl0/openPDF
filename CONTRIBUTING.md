@@ -126,7 +126,17 @@ Windows adds CurrentUser `MY` (CNG); macOS adds the Keychain.
 PKCS#11 collects the PIN only through `PinProvider` into `SecretPin`
 (zeroized on drop). Native Windows and macOS backends let the OS show
 the PIN or Keychain dialog; they never collect a PIN. It must never
-appear on `SignRequest`, `Document`, or any stored field.
+appear on `SignRequest`, `Document`, any stored field, or an
+environment variable. There is no user-facing PIN variable. Tests use
+`StaticPinProvider` / a test `PinProvider`, never `OPENPDF_PKCS11_PIN`.
+
+`login_user` never calls `C_Login` with an empty, whitespace-only,
+missing, or cancelled PIN (`Error::PinRequired` / `PinCancelled`), and
+never logs into a locked token (`Error::PinLocked`). A pinpad
+(`CKF_PROTECTED_AUTHENTICATION_PATH`) logs in with a NULL PIN so the
+reader asks. `CertificateInfo.pin_status` / `describe_pin_status`
+surface `CKF_USER_PIN_COUNT_LOW`, `FINAL_TRY`, and `LOCKED`. The DNIe
+locks after 3 wrong PINs and must be unlocked at a police station.
 
 `CertificateInfo.unusable` (`CertUnusable`, `#[non_exhaustive]`) marks
 rows the picker must disable. Variants today: `AuthenticationOnly`
