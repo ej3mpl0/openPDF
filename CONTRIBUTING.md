@@ -9,9 +9,9 @@ available.
 ```text
 crates/openpdf-core   document model, tiles, structure ops, i18n, Signer, PinProvider
 crates/openpdf-cli    headless `openpdf` CLI (no GTK)
-crates/openpdf-sign   PKCS#11 / CMS PAdES-B-B backend (DNIe, FNMT, SoftHSM)
+crates/openpdf-sign   PAdES-B-B: PKCS#11, Windows CNG, macOS Keychain
 crates/openpdf-gtk    GTK4/libadwaita UI library (never depends on sign)
-crates/openpdf-app    `openpdf-gtk` binary (wires UI + Pkcs11Signer)
+crates/openpdf-app    `openpdf-gtk` binary (wires UI + default_signer)
 po/                   shared gettext catalogs
 corpus/               fixture PDFs for tests
 ```
@@ -119,9 +119,20 @@ assert!(matches!(
 
 ## Signing and append-only documents
 
-`openpdf-sign` implements `Signer` (PAdES-B-B via PKCS#11). The PIN is
-collected only through `PinProvider` into `SecretPin` (zeroized on drop). It
-must never appear on `SignRequest`, `Document`, or any stored field.
+`openpdf-sign` implements `Signer` (PAdES-B-B). Linux uses PKCS#11.
+Windows adds CurrentUser `MY` (CNG); macOS adds the Keychain.
+`default_signer` combines the native store with PKCS#11.
+
+PKCS#11 collects the PIN only through `PinProvider` into `SecretPin`
+(zeroized on drop). Native Windows and macOS backends let the OS show
+the PIN or Keychain dialog; they never collect a PIN. It must never
+appear on `SignRequest`, `Document`, or any stored field.
+
+`CertificateInfo.unusable` (`CertUnusable`, `#[non_exhaustive]`) marks
+rows the picker must disable. Variants today: `AuthenticationOnly`
+(DNIe authentication / no `nonRepudiation`), `Expired`, `NotYetValid`,
+`UnsupportedKey` (unknown curve or algorithm). The enum may grow;
+`match` needs a wildcard. `sign()` still refuses an unusable cert.
 
 A document with a signature dictionary (`/Type /Sig` or `/FT /Sig`) is
 locked: `is_signed()` / `is_read_only()` are true. Core refuses rotate,

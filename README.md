@@ -502,9 +502,67 @@ Document, render, structure-ops, and signing traits. **Author: Jian Yang.**
 ## Signing
 
 `openpdf-sign` implements **PAdES-B-B** (`ETSI.CAdES.detached`, SHA-256,
-detached CAdES-BES with `signing-certificate-v2`) over PKCS#11. Tokens
-documented in the loader: **DNIe** (OpenSC), **FNMT** (p11-kit / NSS
-softoken), and SoftHSM.
+detached CAdES-BES with `signing-certificate-v2`). CMS / ByteRange /
+incremental-append is shared. Backends only list certificates and sign
+opaque bytes. Native Windows and macOS stores are on
+[PR #11](https://github.com/ej3mpl0/openPDF/pull/11).
+
+### Backends per platform
+
+`default_signer(pin)` builds a `CompositeSigner` (`openpdf-sign` `backend.rs`):
+
+| Platform | Native store | PKCS#11 |
+|----------|--------------|---------|
+| Linux | none | `Pkcs11Signer` (OpenSC **DNIe**, p11-kit / NSS **FNMT**, SoftHSM) |
+| Windows | `WindowsStoreSigner`: CurrentUser `MY`, CNG / `NCryptSignHash` only | yes |
+| macOS | `KeychainSigner`: Keychain `SecIdentity` + `SecKeyCreateSignature` | yes |
+
+When a native store is compiled in and PKCS#11 also loads, PKCS#11
+certificate ids get a `pkcs11:` prefix. If PKCS#11 fails to load and a
+native store is present, listing continues from the store.
+
+### Which certificates can sign
+
+One gate on every backend (`can_use_for_pades`): empty KeyUsage, or
+KeyUsage **`nonRepudiation`** (`CertificateUsage::Signing`).
+`digitalSignature` without `nonRepudiation` is authentication-only
+(the DNIe authentication certificate). Those rows stay in
+`list_certificates` as `CertUnusable::AuthenticationOnly`; `sign()`
+refuses them.
+
+Expired and not-yet-valid certificates are also listed, with
+`unusable` set. `sign()` refuses them (`check_validity` /
+`describe_unusable`). `Signer::sign` refuses an unusable id even if
+the picker did not disable the row.
+
+### Keys and curves
+
+`cert::key_kind` accepts:
+
+- RSA
+- ECDSA **P-256** (`secp256r1`) with SHA-256
+- ECDSA **P-384** (`secp384r1`) with SHA-384
+- ECDSA **P-521** (`secp521r1`) with SHA-512
+
+Any other algorithm or **unknown curve** is `None`:
+`CertUnusable::UnsupportedKey`. `sign()` returns
+`unsupported public key algorithm`. There is no SHA-256 fallback.
+
+### `CertUnusable` in the picker
+
+`CertificateInfo.unusable: Option<CertUnusable>`. `Some` means the
+picker must disable that row. `describe_unusable()` (English msgid):
+
+| Variant | Text |
+|---------|------|
+| `AuthenticationOnly` | `Authentication only` |
+| `Expired { not_after }` | `Certificate has expired (valid until {not_after})` |
+| `NotYetValid { not_before }` | `Certificate is not yet valid (valid from {not_before})` |
+| `UnsupportedKey` | `Unsupported key algorithm` |
+
+`CertUnusable` is `#[non_exhaustive]` and **may grow** (a later
+`Revoked` is called out in the code). Downstream `match`es need a
+wildcard arm.
 
 ### PKCS#11 modules
 
@@ -512,21 +570,34 @@ softoken), and SoftHSM.
 
 1. `Pkcs11Config.module_path` when set (that path only).
 2. `OPENPDF_PKCS11_MODULE` when set.
-3. Built-in defaults: OpenSC (`opensc-pkcs11.so`), p11-kit
-   (`p11-kit-proxy.so`), NSS (`libsoftokn3.so`), SoftHSM2
-   (`libsofthsm2.so`) under `/usr/lib`, `/usr/lib64`, and
-   `/usr/lib/x86_64-linux-gnu` (including `pkcs11/` and `softhsm/`
-   subdirs).
+3. Built-in defaults for the OS:
+   - Linux: OpenSC (`opensc-pkcs11.so`), p11-kit (`p11-kit-proxy.so`),
+     NSS (`libsoftokn3.so`), SoftHSM2 (`libsofthsm2.so`) under
+     `/usr/lib`, `/usr/lib64`, and `/usr/lib/x86_64-linux-gnu`
+     (including `pkcs11/` and `softhsm/` subdirs).
+   - Windows: OpenSC `opensc-pkcs11.dll` under `C:\Program Files\OpenSC Project\OpenSC\pkcs11\`,
+     `C:\Program Files (x86)\OpenSC Project\OpenSC\pkcs11\`,
+     `C:\Windows\System32\`, and `C:\Windows\SysWOW64\`.
+   - macOS: OpenSC `opensc-pkcs11.so` under `/opt/homebrew/lib`,
+     `/usr/local/lib`, `/Library/OpenSC/lib` (and `pkcs11/` subdirs);
+     p11-kit `p11-kit-proxy.dylib` under `/opt/homebrew/lib/pkcs11`
+     and `/usr/local/lib/pkcs11`.
 
 Every path that exists and initializes is loaded (several modules can be
 active at once). `list_certificates` does not ask for a PIN.
 
 ### PIN
 
-The PIN is requested only when `Signer::sign` logs in to the token, through
-`PinProvider::request_pin`. It is never a field on `SignRequest`, `Signer`,
-or `Document`. The value lives in `SecretPin` (`zeroize::Zeroizing<String>`)
-and is wiped when that wrapper is dropped (after login).
+The PIN is never a field on `SignRequest`, `Signer`, or `Document`.
+
+- **PKCS#11:** `PinProvider::request_pin` runs only when `Signer::sign`
+  logs in to the token. The value lives in `SecretPin`
+  (`zeroize::Zeroizing<String>`) and is wiped when that wrapper is
+  dropped (after login).
+- **Windows store:** the OS owns any PIN / smart-card dialog. The
+  backend never collects a PIN.
+- **macOS Keychain:** the OS owns Keychain / token prompts. The
+  backend never collects a PIN.
 
 ### Incremental signatures and locks
 
@@ -546,16 +617,15 @@ The CLI has no verify command.
 ## Architecture
 
 - `Signer` and `PinProvider` live in **openpdf-core**.
-- **openpdf-sign** implements PKCS#11 login and CMS/PAdES
-  (`Pkcs11Signer`, `cades`, `pades`).
+- **openpdf-sign** implements PKCS#11, Windows CNG, and macOS Keychain
+  login plus CMS/PAdES (`default_signer`, `Pkcs11Signer`,
+  `WindowsStoreSigner`, `KeychainSigner`, `cades`, `pades`).
 - The **application binary** (not the GTK crate) constructs
   `Box<dyn Signer>` and hands it to UI code that only sees core:
 
 ```rust
 let pin = /* UI type that implements PinProvider */;
-let signer: Box<dyn openpdf_core::Signer> = Box::new(
-    openpdf_sign::Pkcs11Signer::new(openpdf_sign::Pkcs11Config::default(), pin)?,
-);
+let signer: Box<dyn openpdf_core::Signer> = openpdf_sign::default_signer(pin)?;
 ```
 
 - **openpdf-gtk must never depend on openpdf-sign** (enforced by
@@ -570,8 +640,9 @@ Linux, Windows, and macOS.
 - **OCR** behind an `OcrEngine` trait: Tesseract on Linux,
   `Windows.Media.Ocr` on Windows, Vision on macOS.
 - **Signing** stays in Rust in `openpdf-sign`. PKCS#11 on all three
-  (DNIe everywhere), plus the Windows certificate store and macOS
-  Keychain. UIs only see `list_certificates()` and `sign()`.
+  (DNIe everywhere). Windows CurrentUser `MY` and macOS Keychain are
+  implemented on [PR #11](https://github.com/ej3mpl0/openPDF/pull/11).
+  UIs only see `list_certificates()` and `sign()`.
 - **Native UIs** share core through an `openpdf-ffi` crate (UniFFI):
   GTK4/libadwaita on Linux, SwiftUI/AppKit in `apps/macos`, WinUI 3 + C#
   in `apps/windows` (MSIX).
@@ -586,6 +657,8 @@ Linux, Windows, and macOS.
   [PR #8](https://github.com/ej3mpl0/openPDF/pull/8) (this docs PR stacks
   that branch).
 - **Digital signing** is available in `openpdf-sign` (PAdES / PKCS#11).
+  Windows CNG and macOS Keychain backends, plus `CertUnusable` in the
+  picker, are on [PR #11](https://github.com/ej3mpl0/openPDF/pull/11).
   The GTK picker is on PR #1. There is no CLI `sign` / `verify`.
 - **Core and CLI translations** (English and Spanish) are done. GUI
   catalogs ship with the GTK crate.
