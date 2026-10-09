@@ -15,6 +15,10 @@ lopdf = "0.36.0"
 pdfium-render = "0.9.4"
 thiserror = "2"
 zeroize = { version = "1", features = ["alloc"] }
+image = { version = "0.25", default-features = false, features = ["png", "jpeg"] }
 
 [dev-dependencies]
-image = { version = "0.25", default-features = false, features = ["png"] }
+
+[[bench]]
+name = "perf"
+harness = false

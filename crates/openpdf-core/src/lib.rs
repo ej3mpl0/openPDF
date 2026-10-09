@@ -9,13 +9,18 @@
 //! on this crate.
 
 mod command;
+mod convert;
 mod document;
 mod error;
 pub mod i18n;
 mod ops;
+mod optimize;
 mod outline;
+mod overlay;
+mod pages;
 mod paths;
 mod pin;
+mod protect;
 mod render;
 mod save;
 mod signer;
@@ -28,7 +33,12 @@ pub use error::{Error, InvalidKind, Result, SignedOp};
 pub use i18n::{
     available_locales, current_locale, detect_locale, init as init_i18n, set_locale, tr, tr_args,
 };
+pub use convert::{blank_document, images_to_pdf, pdf_to_rasters, raster_to_png};
 pub use ops::{merge, merge_paths, parse_page_ranges, split, split_all, PageRange};
+pub use optimize::{optimize, OptimizeOptions};
+pub use overlay::{apply_overlay, Overlay, OverlayKind};
+pub use pages::{crop_pages, extract, insert_pages, replace_pages, CropBox};
+pub use protect::{protect, sanitize_metadata, unprotect, PdfPermissions, ProtectOptions};
 pub use outline::OutlineItem;
 pub use paths::{ensure_app_dirs, recovery_dir, settings_dir};
 pub use pin::{PinProvider, SecretPin};

@@ -3,7 +3,7 @@
 Native Linux PDF app. Rust + GTK4/libadwaita, render with pdfium-render (BSD). MuPDF is not used.
 
 - `openpdf-core`: document, tiles, text, undo, merge/split, `Signer`, `PinProvider`, sign UI strings
-- `openpdf-cli`: `openpdf info|render|text|merge|split`
+- `openpdf-cli`: `openpdf info|render|text|merge|split` plus organize (`insert`, `extract`, `replace`, `crop`), `optimize`, `protect`/`unprotect`/`sanitize`, `watermark`/`header`/`footer`/`number`, `from-images`/`to-images`
 - `openpdf-gtk`: UI (depends only on core)
 - `openpdf-sign`: PKCS#11 / PAdES backend (depends only on core)
 

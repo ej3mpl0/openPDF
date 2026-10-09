@@ -300,3 +300,117 @@ msgstr "ByteRange está fuera de rango"
 
 msgid "Signed by {name}"
 msgstr "Firmado por {name}"
+
+msgid "crop box is inverted"
+msgstr "el recorte está invertido"
+
+msgid "password is required"
+msgstr "se requiere una contraseña"
+
+msgid "wrong password"
+msgstr "contraseña incorrecta"
+
+msgid "document is not encrypted"
+msgstr "el documento no está cifrado"
+
+msgid "document is already encrypted"
+msgstr "el documento ya está cifrado"
+
+msgid "no input images"
+msgstr "no hay imágenes de entrada"
+
+msgid "overlay text is empty"
+msgstr "el texto de superposición está vacío"
+
+msgid "unknown permission: {value}"
+msgstr "permiso desconocido: {value}"
+
+msgid "Insert pages from another PDF"
+msgstr "Insertar páginas de otro PDF"
+
+msgid "Extract pages to a new PDF"
+msgstr "Extraer páginas a un PDF nuevo"
+
+msgid "Replace pages with pages from another PDF"
+msgstr "Reemplazar páginas con páginas de otro PDF"
+
+msgid "Set a crop box on pages"
+msgstr "Aplicar un recorte a las páginas"
+
+msgid "Recompress images, drop unused objects, linearize"
+msgstr "Recomprimir imágenes, quitar objetos sin uso, linealizar"
+
+msgid "Encrypt with a user/owner password (AES-256)"
+msgstr "Cifrar con contraseña de usuario/propietario (AES-256)"
+
+msgid "Remove password protection"
+msgstr "Quitar la protección por contraseña"
+
+msgid "Remove metadata, JavaScript, and embedded-file names"
+msgstr "Quitar metadatos, JavaScript y nombres de archivos incrustados"
+
+msgid "Stamp a watermark"
+msgstr "Poner una marca de agua"
+
+msgid "Add a header"
+msgstr "Añadir un encabezado"
+
+msgid "Add a footer"
+msgstr "Añadir un pie"
+
+msgid "Add page numbers"
+msgstr "Añadir números de página"
+
+msgid "Build a PDF from images"
+msgstr "Crear un PDF desde imágenes"
+
+msgid "Render pages to PNG files"
+msgstr "Renderizar páginas a archivos PNG"
+
+msgid "1-based insert position"
+msgstr "posición de inserción (desde 1)"
+
+msgid "1-based start page to replace"
+msgstr "primera página a reemplazar (desde 1)"
+
+msgid "Number of pages to replace"
+msgstr "Número de páginas a reemplazar"
+
+msgid "Crop box llx,lly,urx,ury in points"
+msgstr "Recorte llx,lly,urx,ury en puntos"
+
+msgid "JPEG quality 1-100"
+msgstr "calidad JPEG 1-100"
+
+msgid "Skip the linearized hint"
+msgstr "Omitir la marca linealizada"
+
+msgid "User password"
+msgstr "Contraseña de usuario"
+
+msgid "Owner password (defaults to user)"
+msgstr "Contraseña de propietario (por defecto la de usuario)"
+
+msgid "Permissions: print,modify,copy,annotate,fill,assemble,print-high"
+msgstr "Permisos: print,modify,copy,annotate,fill,assemble,print-high"
+
+msgid "User or owner password"
+msgstr "Contraseña de usuario o propietario"
+
+msgid "Overlay text"
+msgstr "Texto de superposición"
+
+msgid "Number format; {page} and {total} are placeholders"
+msgstr "Formato; {page} y {total} son marcadores"
+
+msgid "Image files"
+msgstr "Archivos de imagen"
+
+msgid "Source PDF"
+msgstr "PDF de origen"
+
+msgid "--at is 1-based"
+msgstr "--at empieza en 1"
+
+msgid "crop box must be llx,lly,urx,ury"
+msgstr "el recorte debe ser llx,lly,urx,ury"

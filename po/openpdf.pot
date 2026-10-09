@@ -300,3 +300,117 @@ msgstr ""
 
 msgid "Signed by {name}"
 msgstr ""
+
+msgid "crop box is inverted"
+msgstr ""
+
+msgid "password is required"
+msgstr ""
+
+msgid "wrong password"
+msgstr ""
+
+msgid "document is not encrypted"
+msgstr ""
+
+msgid "document is already encrypted"
+msgstr ""
+
+msgid "no input images"
+msgstr ""
+
+msgid "overlay text is empty"
+msgstr ""
+
+msgid "unknown permission: {value}"
+msgstr ""
+
+msgid "Insert pages from another PDF"
+msgstr ""
+
+msgid "Extract pages to a new PDF"
+msgstr ""
+
+msgid "Replace pages with pages from another PDF"
+msgstr ""
+
+msgid "Set a crop box on pages"
+msgstr ""
+
+msgid "Recompress images, drop unused objects, linearize"
+msgstr ""
+
+msgid "Encrypt with a user/owner password (AES-256)"
+msgstr ""
+
+msgid "Remove password protection"
+msgstr ""
+
+msgid "Remove metadata, JavaScript, and embedded-file names"
+msgstr ""
+
+msgid "Stamp a watermark"
+msgstr ""
+
+msgid "Add a header"
+msgstr ""
+
+msgid "Add a footer"
+msgstr ""
+
+msgid "Add page numbers"
+msgstr ""
+
+msgid "Build a PDF from images"
+msgstr ""
+
+msgid "Render pages to PNG files"
+msgstr ""
+
+msgid "1-based insert position"
+msgstr ""
+
+msgid "1-based start page to replace"
+msgstr ""
+
+msgid "Number of pages to replace"
+msgstr ""
+
+msgid "Crop box llx,lly,urx,ury in points"
+msgstr ""
+
+msgid "JPEG quality 1-100"
+msgstr ""
+
+msgid "Skip the linearized hint"
+msgstr ""
+
+msgid "User password"
+msgstr ""
+
+msgid "Owner password (defaults to user)"
+msgstr ""
+
+msgid "Permissions: print,modify,copy,annotate,fill,assemble,print-high"
+msgstr ""
+
+msgid "User or owner password"
+msgstr ""
+
+msgid "Overlay text"
+msgstr ""
+
+msgid "Number format; {page} and {total} are placeholders"
+msgstr ""
+
+msgid "Image files"
+msgstr ""
+
+msgid "Source PDF"
+msgstr ""
+
+msgid "--at is 1-based"
+msgstr ""
+
+msgid "crop box must be llx,lly,urx,ury"
+msgstr ""

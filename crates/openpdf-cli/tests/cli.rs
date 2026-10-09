@@ -136,6 +136,76 @@ fn info_language_ignored_when_lang_is_c() {
 }
 
 #[test]
+fn insert_extract_optimize_watermark() {
+    let dir = tempfile();
+    let inserted = dir.join("inserted.pdf");
+    let out = run(&[
+        "insert",
+        corpus("two_page.pdf").to_str().unwrap(),
+        corpus("hello.pdf").to_str().unwrap(),
+        "--at",
+        "2",
+        "-o",
+        inserted.to_str().unwrap(),
+    ]);
+    assert!(out.status.success(), "{}", String::from_utf8_lossy(&out.stderr));
+    let extracted = dir.join("one.pdf");
+    let out = run(&[
+        "extract",
+        inserted.to_str().unwrap(),
+        "--pages",
+        "2",
+        "-o",
+        extracted.to_str().unwrap(),
+    ]);
+    assert!(out.status.success(), "{}", String::from_utf8_lossy(&out.stderr));
+    let opt = dir.join("opt.pdf");
+    let out = run(&[
+        "optimize",
+        extracted.to_str().unwrap(),
+        "-o",
+        opt.to_str().unwrap(),
+    ]);
+    assert!(out.status.success(), "{}", String::from_utf8_lossy(&out.stderr));
+    let marked = dir.join("mark.pdf");
+    let out = run(&[
+        "watermark",
+        opt.to_str().unwrap(),
+        "--text",
+        "DRAFT",
+        "-o",
+        marked.to_str().unwrap(),
+    ]);
+    assert!(out.status.success(), "{}", String::from_utf8_lossy(&out.stderr));
+    let numbered = dir.join("num.pdf");
+    let out = run(&[
+        "number",
+        marked.to_str().unwrap(),
+        "-o",
+        numbered.to_str().unwrap(),
+    ]);
+    assert!(out.status.success(), "{}", String::from_utf8_lossy(&out.stderr));
+}
+
+#[test]
+fn from_images_builds_pdf() {
+    let dir = tempfile();
+    let png = dir.join("dot.png");
+    image::RgbImage::from_pixel(4, 4, image::Rgb([10, 20, 200]))
+        .save(&png)
+        .unwrap();
+    let pdf = dir.join("from.png.pdf");
+    let out = run(&[
+        "from-images",
+        png.to_str().unwrap(),
+        "-o",
+        pdf.to_str().unwrap(),
+    ]);
+    assert!(out.status.success(), "{}", String::from_utf8_lossy(&out.stderr));
+    assert!(pdf.is_file());
+}
+
+#[test]
 fn merge_and_split() {
     let dir = tempfile();
     let merged = dir.join("merged.pdf");

@@ -140,6 +140,11 @@ impl Document {
         self.signed
     }
 
+    /// True when the trailer has an `/Encrypt` dictionary.
+    pub fn is_encrypted(&self) -> bool {
+        self.inner.is_encrypted()
+    }
+
     /// Signed documents are locked against rotate/delete/move and full rewrites.
     /// The UI should treat this as read-only except for incremental (append-only) save.
     pub fn is_read_only(&self) -> bool {

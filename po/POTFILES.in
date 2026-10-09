@@ -9,3 +9,4 @@ crates/openpdf-core/src/render/engine.rs
 crates/openpdf-cli/src/main.rs
 crates/openpdf-sign/src/token.rs
 crates/openpdf-sign/src/pades.rs
+crates/openpdf-cli/src/tools.rs
