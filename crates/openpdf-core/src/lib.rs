@@ -6,6 +6,7 @@
 mod command;
 mod document;
 mod error;
+pub mod i18n;
 mod ops;
 mod outline;
 mod paths;
@@ -15,7 +16,10 @@ mod signer;
 
 pub use command::{Command, History};
 pub use document::{Document, DocumentId, PageInfo};
-pub use error::{Error, Result};
+pub use error::{Error, InvalidKind, Result, SignedOp};
+pub use i18n::{
+    available_locales, current_locale, detect_locale, init as init_i18n, set_locale, tr, tr_args,
+};
 pub use ops::{merge, merge_paths, parse_page_ranges, split, split_all, PageRange};
 pub use outline::OutlineItem;
 pub use paths::{ensure_app_dirs, recovery_dir, settings_dir};

@@ -1,7 +1,7 @@
 use lopdf::{Dictionary, Document as LopdfDocument, Object};
 
 use crate::document::Document;
-use crate::error::{Error, Result};
+use crate::error::{Error, InvalidKind, Result};
 
 /// Visible appearance for a certificate signature. Coordinates are PDF points.
 #[derive(Clone, Debug, Default)]
@@ -82,7 +82,7 @@ impl Document {
     /// existing signature bytes stay intact; the backend must append incrementally.
     pub fn apply_signer(&mut self, signer: &dyn Signer, request: &SignRequest) -> Result<()> {
         if request.cert_id.trim().is_empty() {
-            return Err(Error::invalid("SignRequest.cert_id is required"));
+            return Err(Error::invalid(InvalidKind::CertIdRequired));
         }
         let input = self.bytes_for_signer()?;
         let signed = signer.sign(&input, request)?;
@@ -174,7 +174,7 @@ mod tests {
         vec![
             CertificateInfo {
                 id: "dnie-auth".into(),
-                subject: "CN=CIUDANO ESPAÑOL (AUTENTICACIÓN)".into(),
+                subject: "CN=CITIZEN (AUTHENTICATION)".into(),
                 issuer: "CN=AC DNIE 001".into(),
                 validity: CertificateValidity {
                     not_before: Some("2024-01-01T00:00:00Z".into()),
@@ -184,7 +184,7 @@ mod tests {
             },
             CertificateInfo {
                 id: "dnie-sign".into(),
-                subject: "CN=CIUDANO ESPAÑOL (FIRMA)".into(),
+                subject: "CN=CITIZEN (SIGNATURE)".into(),
                 issuer: "CN=AC DNIE 001".into(),
                 validity: CertificateValidity {
                     not_before: Some("2024-01-01T00:00:00Z".into()),
@@ -280,20 +280,33 @@ mod tests {
         assert!(doc.is_read_only());
         assert!(matches!(
             doc.rotate_page(0, 90),
-            Err(Error::Signed { op: "rotate" })
+            Err(Error::Signed {
+                op: crate::error::SignedOp::Rotate
+            })
         ));
         assert!(matches!(
             doc.delete_page(0),
-            Err(Error::Signed { op: "delete" })
+            Err(Error::Signed {
+                op: crate::error::SignedOp::Delete
+            })
         ));
         assert!(matches!(
             doc.move_page(0, 2),
-            Err(Error::Signed { op: "move" })
+            Err(Error::Signed {
+                op: crate::error::SignedOp::Move
+            })
         ));
-        assert!(matches!(doc.to_bytes(), Err(Error::Signed { op: "rewrite" })));
+        assert!(matches!(
+            doc.to_bytes(),
+            Err(Error::Signed {
+                op: crate::error::SignedOp::Rewrite
+            })
+        ));
         assert!(matches!(
             doc.save(std::env::temp_dir().join("openpdf-signed-rewrite.pdf")),
-            Err(Error::Signed { op: "rewrite" })
+            Err(Error::Signed {
+                op: crate::error::SignedOp::Rewrite
+            })
         ));
         let incremental = doc.to_incremental_bytes().unwrap();
         assert!(incremental.starts_with(doc.original_bytes()));

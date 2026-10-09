@@ -8,7 +8,7 @@ use std::time::Duration;
 use pdfium_render::prelude::{PdfDocument, Pdfium};
 
 use crate::document::{Document, DocumentId};
-use crate::error::{Error, Result};
+use crate::error::{Error, InvalidKind, Result};
 
 use super::cache::TileCache;
 use super::pdfium::{self as pdfium_bind};
@@ -148,7 +148,7 @@ fn worker_loop(
                     height: h,
                     rgba,
                 }),
-                None => Err(Error::invalid("document is not bound to the render engine")),
+                None => Err(Error::invalid(InvalidKind::DocumentNotBound)),
             };
             if queue.is_cancelled(&key, gen) {
                 let _ = event_tx.send(TileEvent::Cancelled(key));
@@ -232,7 +232,7 @@ fn handle_cmd(
         WorkerCmd::Text { id, page, reply } => {
             let result = match docs.get(&id) {
                 Some(b) => pdfium_bind::page_text(&b.doc, page),
-                None => Err(Error::invalid("document is not bound to the render engine")),
+                None => Err(Error::invalid(InvalidKind::DocumentNotBound)),
             };
             let _ = reply.send(result);
         }
@@ -248,7 +248,7 @@ fn handle_cmd(
                     height: h,
                     rgba,
                 }),
-                None => Err(Error::invalid("document is not bound to the render engine")),
+                None => Err(Error::invalid(InvalidKind::DocumentNotBound)),
             };
             let _ = reply.send(result);
         }
@@ -272,7 +272,7 @@ fn handle_cmd(
                     height: h,
                     rgba,
                 }),
-                None => Err(Error::invalid("document is not bound to the render engine")),
+                None => Err(Error::invalid(InvalidKind::DocumentNotBound)),
             };
             if let Ok(ref tile) = result {
                 if let Ok(mut c) = cache.lock() {
@@ -284,7 +284,7 @@ fn handle_cmd(
         WorkerCmd::Search { id, query, reply } => {
             let result = match docs.get(&id) {
                 Some(b) => search_doc(&b.doc, &query),
-                None => Err(Error::invalid("document is not bound to the render engine")),
+                None => Err(Error::invalid(InvalidKind::DocumentNotBound)),
             };
             let _ = reply.send(result);
         }

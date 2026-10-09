@@ -47,10 +47,10 @@ pub fn bind_pdfium(bundled: Option<&Path>) -> Result<Pdfium> {
 
     match Pdfium::bind_to_system_library() {
         Ok(bindings) => Ok(Pdfium::new(bindings)),
-        Err(e) => Err(Error::pdfium(format!(
-            "could not load libpdfium (last: {}, system: {e})",
-            last.unwrap_or_else(|| "none".into())
-        ))),
+        Err(e) => Err(Error::pdfium_load(
+            last.unwrap_or_else(|| "none".into()),
+            e.to_string(),
+        )),
     }
 }
 

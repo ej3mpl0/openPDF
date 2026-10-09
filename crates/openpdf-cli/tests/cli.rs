@@ -1,6 +1,8 @@
 use std::path::{Path, PathBuf};
 use std::process::Command;
 
+use openpdf_core::i18n::Catalog;
+
 fn bin() -> PathBuf {
     env!("CARGO_BIN_EXE_openpdf").into()
 }
@@ -11,9 +13,21 @@ fn corpus(name: &str) -> PathBuf {
         .join(name)
 }
 
+fn es_catalog() -> Catalog {
+    Catalog::parse(include_str!("../../../po/es.po"))
+}
+
 fn run(args: &[&str]) -> std::process::Output {
+    run_locale("C", args)
+}
+
+fn run_locale(locale: &str, args: &[&str]) -> std::process::Output {
     Command::new(bin())
         .args(args)
+        .env("LC_ALL", locale)
+        .env("LC_MESSAGES", locale)
+        .env("LANG", locale)
+        .env_remove("LANGUAGE")
         .output()
         .expect("run openpdf")
 }
@@ -24,6 +38,45 @@ fn info_two_page() {
     assert!(out.status.success(), "{}", String::from_utf8_lossy(&out.stderr));
     let stdout = String::from_utf8_lossy(&out.stdout);
     assert!(stdout.contains("pages: 2"), "{stdout}");
+}
+
+#[test]
+fn info_follows_spanish_catalog_without_hardcoded_msgstr() {
+    let file = corpus("two_page.pdf");
+    let en = run_locale("C", &["info", file.to_str().unwrap()]);
+    let es = run_locale("es_ES.UTF-8", &["info", file.to_str().unwrap()]);
+    assert!(en.status.success(), "{}", String::from_utf8_lossy(&en.stderr));
+    assert!(es.status.success(), "{}", String::from_utf8_lossy(&es.stderr));
+
+    let en_out = String::from_utf8_lossy(&en.stdout);
+    let es_out = String::from_utf8_lossy(&es.stdout);
+    assert_ne!(en_out, es_out);
+
+    let cat = es_catalog();
+    let pages = cat.translate("pages: {count}").replace("{count}", "2");
+    assert_ne!(pages, "pages: 2");
+    assert!(es_out.contains(&pages), "{es_out}");
+    assert!(!es_out.contains("pages: 2"), "{es_out}");
+    assert!(en_out.contains("pages: 2"), "{en_out}");
+}
+
+#[test]
+fn help_follows_locale() {
+    let en = run_locale("C", &["--help"]);
+    let es = run_locale("es", &["--help"]);
+    assert!(en.status.success(), "{}", String::from_utf8_lossy(&en.stderr));
+    assert!(es.status.success(), "{}", String::from_utf8_lossy(&es.stderr));
+
+    let en_out = String::from_utf8_lossy(&en.stdout);
+    let es_out = String::from_utf8_lossy(&es.stdout);
+    assert_ne!(en_out.as_ref(), es_out.as_ref());
+
+    let about = "openPDF command-line tools (share openpdf-core with the GTK app)";
+    assert!(en_out.contains(about), "{en_out}");
+    let translated = es_catalog().translate(about);
+    assert_ne!(translated, about);
+    assert!(es_out.contains(&translated), "{es_out}");
+    assert!(!es_out.contains(about), "{es_out}");
 }
 
 #[test]
