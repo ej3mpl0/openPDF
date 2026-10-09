@@ -5,6 +5,9 @@ on:
     paths:
       - "packaging/**"
       - ".github/workflows/packaging.yml"
+      - Cargo.lock
+      - Cargo.toml
+      - crates/**/Cargo.toml
   push:
     tags:
       - "*"
@@ -18,8 +21,17 @@ permissions:
   contents: read
 
 jobs:
+  cargo-sources:
+    name: cargo-sources.json
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Check cargo-sources.json matches Cargo.lock
+        run: python3 packaging/flatpak/check-cargo-sources.py
+
   flatpak:
     name: Flatpak
+    needs: [cargo-sources]
     runs-on: ubuntu-latest
     container:
       image: ghcr.io/flathub-infra/flatpak-github-actions:gnome-51

@@ -1,5 +1,6 @@
 #!/usr/bin/env bash
 # Generate packaging/flatpak/cargo-sources.json from Cargo.lock.
+# CI runs packaging/flatpak/check-cargo-sources.py and fails if this file is stale.
 set -euo pipefail
 
 ROOT="$(cd "$(dirname "$0")/../.." && pwd)"
