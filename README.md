@@ -401,16 +401,20 @@ let signer: Box<dyn openpdf_core::Signer> = Box::new(
 
 ### Roadmap (planned, not available)
 
-These items are **not shipped**. Current priority is the Linux build.
+**In progress / not yet available.** The first release is meant to cover
+Linux, Windows, and macOS.
 
-- One native UI per platform in this repo: Linux GTK first, then Windows
-  and macOS. All share `openpdf-core`, the `openpdf` CLI, and
-  `openpdf-sign`.
-- Core and signing stay platform-neutral. Linux-only code is behind
-  `cfg`.
-- Later `Signer` backends besides PKCS#11: Windows certificate store and
-  macOS Keychain.
-- Each GitHub release ships one package per platform.
+- **Core and CLI** stay platform-neutral.
+- **OCR** behind an `OcrEngine` trait: Tesseract on Linux,
+  `Windows.Media.Ocr` on Windows, Vision on macOS.
+- **Signing** stays in Rust in `openpdf-sign`. PKCS#11 on all three
+  (DNIe everywhere), plus the Windows certificate store and macOS
+  Keychain. UIs only see `list_certificates()` and `sign()`.
+- **Native UIs** share core through an `openpdf-ffi` crate (UniFFI):
+  GTK4/libadwaita on Linux, SwiftUI/AppKit in `apps/macos`, WinUI 3 + C#
+  in `apps/windows` (MSIX).
+- **CI** matrix on the three platforms, with RAM and performance limits.
+- **Releases:** one package per platform.
 
 ## Status
 
