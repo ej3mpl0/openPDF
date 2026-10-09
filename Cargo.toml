@@ -1,0 +1,13 @@
+[workspace]
+resolver = "2"
+members = ["crates/openpdf-core", "crates/openpdf-gtk", "crates/openpdf-sign"]
+
+[workspace.package]
+edition = "2021"
+license = "MPL-2.0"
+version = "0.1.0"
+
+[profile.release]
+lto = true
+codegen-units = 1
+strip = true
