@@ -2,11 +2,15 @@
 """Run the perf/measure binary if present. Skip if it is not built yet.
 
 Fails when parsed peak RSS exceeds OPENPDF_MEASURE_RAM_MIB (default 250)
-or startup_ms exceeds OPENPDF_MEASURE_STARTUP_MS (default 8000).
+or startup_ms exceeds OPENPDF_MEASURE_STARTUP_MS.
+
+Startup defaults are 300 ms for --kind core (core/CLI) and 1500 ms for
+--kind gui. The matrix can override OPENPDF_MEASURE_STARTUP_MS per OS.
 """
 
 from __future__ import annotations
 
+import argparse
 import os
 import re
 import subprocess
@@ -14,28 +18,50 @@ import sys
 from pathlib import Path
 
 
-RAM_MIB = int(os.environ.get("OPENPDF_MEASURE_RAM_MIB", "250"))
-STARTUP_MS = int(os.environ.get("OPENPDF_MEASURE_STARTUP_MS", "8000"))
-RAM_BYTES = RAM_MIB * 1024 * 1024
+DEFAULT_STARTUP_MS = {
+    "core": 300,
+    "gui": 1500,
+}
+
+
+def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
+    parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument(
+        "--kind",
+        choices=sorted(DEFAULT_STARTUP_MS),
+        default=os.environ.get("OPENPDF_MEASURE_KIND", "core"),
+        help="core/CLI (300 ms) or GUI (1500 ms) startup budget",
+    )
+    return parser.parse_args(argv)
+
 
 ROOT = Path(os.environ.get("GITHUB_WORKSPACE", Path.cwd()))
 RELEASE = ROOT / "target" / "release"
 EXE_SUFFIX = ".exe" if os.name == "nt" else ""
 
-CANDIDATES = [
+CORE_CANDIDATES = [
     RELEASE / f"measure{EXE_SUFFIX}",
     RELEASE / f"perf{EXE_SUFFIX}",
     RELEASE / f"openpdf-measure{EXE_SUFFIX}",
 ]
+GUI_CANDIDATES = [
+    RELEASE / f"measure-gui{EXE_SUFFIX}",
+    RELEASE / f"openpdf-gtk-measure{EXE_SUFFIX}",
+    RELEASE / f"openpdf-measure-gui{EXE_SUFFIX}",
+]
 
 
-def find_binary() -> Path | None:
+def candidates_for(kind: str) -> list[Path]:
+    return GUI_CANDIDATES if kind == "gui" else CORE_CANDIDATES
+
+
+def find_binary(kind: str) -> Path | None:
     extra = os.environ.get("OPENPDF_MEASURE_BIN")
     if extra:
         p = Path(extra)
         if p.is_file():
             return p
-    for p in CANDIDATES:
+    for p in candidates_for(kind):
         if p.is_file() and os.access(p, os.X_OK):
             return p
     return None
@@ -58,13 +84,21 @@ def parse_metrics(text: str) -> tuple[int | None, int | None]:
 
 
 def main() -> int:
-    binary = find_binary()
+    args = parse_args()
+    kind = args.kind
+    ram_mib = int(os.environ.get("OPENPDF_MEASURE_RAM_MIB", "250"))
+    startup_ms = int(
+        os.environ.get("OPENPDF_MEASURE_STARTUP_MS", str(DEFAULT_STARTUP_MS[kind]))
+    )
+    ram_bytes = ram_mib * 1024 * 1024
+
+    binary = find_binary(kind)
     if binary is None:
-        print("measure: no perf/measure binary yet; skipping")
+        print(f"measure: no {kind} perf/measure binary yet; skipping")
         return 0
 
-    print(f"measure: running {binary}")
-    print(f"measure: limits ram={RAM_MIB} MiB startup={STARTUP_MS} ms")
+    print(f"measure: kind={kind} running {binary}")
+    print(f"measure: limits ram={ram_mib} MiB startup={startup_ms} ms")
     proc = subprocess.run(
         [str(binary)],
         cwd=ROOT,
@@ -81,12 +115,12 @@ def main() -> int:
         return proc.returncode
 
     rss, startup = parse_metrics(output)
-    if rss is not None and rss > RAM_BYTES:
-        print(f"measure: peak RSS {rss} bytes exceeds {RAM_BYTES} ({RAM_MIB} MiB)", file=sys.stderr)
+    if rss is not None and rss > ram_bytes:
+        print(f"measure: peak RSS {rss} bytes exceeds {ram_bytes} ({ram_mib} MiB)", file=sys.stderr)
         return 1
-    if startup is not None and startup > STARTUP_MS:
+    if startup is not None and startup > startup_ms:
         print(
-            f"measure: startup {startup} ms exceeds {STARTUP_MS} ms (OPENPDF_MEASURE_STARTUP_MS)",
+            f"measure: startup {startup} ms exceeds {startup_ms} ms (OPENPDF_MEASURE_STARTUP_MS)",
             file=sys.stderr,
         )
         return 1
