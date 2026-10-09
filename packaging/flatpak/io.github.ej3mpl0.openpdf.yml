@@ -27,6 +27,8 @@ finish-args:
   - --device=dri
   - --socket=pcsc
   - --env=OPENPDF_PDFIUM=/app/lib/libpdfium.so
+  # Arch-independent path (OpenSC --libdir=/app/lib). Avoids x86_64-only defaults in openpdf-sign.
+  - --env=OPENPDF_PKCS11_MODULE=/app/lib/pkcs11/opensc-pkcs11.so
 
 cleanup:
   - /include
@@ -43,6 +45,7 @@ modules:
   - name: pcsc-lite
     buildsystem: meson
     config-opts:
+      - -Dlibdir=/app/lib
       - -Dlibsystemd=false
       - -Dlibudev=false
       - -Dlibusb=false
@@ -70,9 +73,24 @@ modules:
       - --disable-tests
       - --disable-notify
       - --disable-strict
+      - --prefix=/app
+      - --libdir=/app/lib
       - --sysconfdir=/app/etc
       - --with-completiondir=/app/share/bash-completion/completions
+      - --with-pcsc-provider=/app/lib/libpcsclite.so
       - --enable-p11_system_config_modules=/app/share/p11-kit/modules
+    post-install:
+      - |
+        set -euo pipefail
+        so="$(find "${FLATPAK_DEST}" -name opensc-pkcs11.so \( -type f -o -type l \) | head -n1)"
+        if [ -z "$so" ]; then
+          echo "opensc-pkcs11.so missing after OpenSC install:" >&2
+          find "${FLATPAK_DEST}" -name '*opensc*' -o -name '*pkcs11*' >&2
+          exit 1
+        fi
+        install -Dm755 "$so" "${FLATPAK_DEST}/lib/pkcs11/opensc-pkcs11.so"
+        mkdir -p "${FLATPAK_DEST}/share/p11-kit/modules"
+        printf 'module: /app/lib/pkcs11/opensc-pkcs11.so\n' > "${FLATPAK_DEST}/share/p11-kit/modules/opensc.module"
     cleanup:
       - /bin
       - /sbin

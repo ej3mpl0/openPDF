@@ -11,6 +11,8 @@ concurrency:
 
 permissions:
   contents: write
+  id-token: write
+  attestations: write
 
 jobs:
   linux-flatpak:
@@ -48,6 +50,10 @@ jobs:
           cache: false
           upload-artifact: false
 
+      - uses: actions/attest-build-provenance@v2
+        with:
+          subject-path: io.github.ej3mpl0.openpdf.flatpak
+
       - uses: actions/upload-artifact@v4
         with:
           name: release-linux-flatpak
@@ -81,6 +87,10 @@ jobs:
         run: packaging/appimage/build.sh
         env:
           APPIMAGE_EXTRACT_AND_RUN: "1"
+
+      - uses: actions/attest-build-provenance@v2
+        with:
+          subject-path: packaging/appimage/dist/*.AppImage
 
       - uses: actions/upload-artifact@v4
         with:
@@ -130,6 +140,10 @@ jobs:
           print(zpath)
           PY
 
+      - uses: actions/attest-build-provenance@v2
+        with:
+          subject-path: dist/openpdf-*-windows-x64.zip
+
       - uses: actions/upload-artifact@v4
         with:
           name: release-windows-cli
@@ -174,6 +188,10 @@ jobs:
           cp "$PDFIUM_LIB" "$stage/libpdfium.dylib"
           tar -C dist -czf "${stage}.tar.gz" "$(basename "$stage")"
 
+      - uses: actions/attest-build-provenance@v2
+        with:
+          subject-path: dist/openpdf-*-macos-*.tar.gz
+
       - uses: actions/upload-artifact@v4
         with:
           name: release-macos-cli-${{ matrix.os }}
@@ -201,6 +219,10 @@ jobs:
           cd out
           sha256sum * > SHA256SUMS
           cat SHA256SUMS
+
+      - uses: actions/attest-build-provenance@v2
+        with:
+          subject-path: out/*
 
       - name: Create GitHub release
         uses: softprops/action-gh-release@v2
