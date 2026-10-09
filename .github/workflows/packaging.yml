@@ -1,0 +1,149 @@
+name: Packaging
+
+on:
+  pull_request:
+    paths:
+      - "packaging/**"
+      - ".github/workflows/packaging.yml"
+  push:
+    tags:
+      - "*"
+  workflow_dispatch:
+
+concurrency:
+  group: packaging-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+jobs:
+  flatpak:
+    name: Flatpak
+    runs-on: ubuntu-latest
+    container:
+      image: ghcr.io/flathub-infra/flatpak-github-actions:gnome-51
+      options: --privileged
+    defaults:
+      run:
+        shell: bash
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Import desktop metadata from gtk if needed
+        run: |
+          git config --global --add safe.directory "$GITHUB_WORKSPACE"
+          packaging/import-desktop-data.sh
+
+      - name: Check binary name is a single variable
+        run: |
+          set -euo pipefail
+          . packaging/config.sh
+          grep -qx "command: ${APP_BIN}" packaging/flatpak/io.github.ej3mpl0.openpdf.yml
+          grep -q "Exec=${APP_BIN} " data/io.github.ej3mpl0.openpdf.desktop
+
+      - name: Build Flatpak
+        uses: flatpak/flatpak-github-actions/flatpak-builder@v6
+        with:
+          bundle: io.github.ej3mpl0.openpdf.flatpak
+          manifest-path: packaging/flatpak/io.github.ej3mpl0.openpdf.yml
+          install-deps-from: flathub
+          cache-key: flatpak-openpdf-${{ github.sha }}
+          upload-artifact: false
+
+      - name: Upload Flatpak
+        uses: actions/upload-artifact@v4
+        with:
+          name: openpdf-flatpak
+          path: io.github.ej3mpl0.openpdf.flatpak
+          if-no-files-found: error
+
+      - name: Report Flatpak size
+        run: |
+          set -euo pipefail
+          file=io.github.ej3mpl0.openpdf.flatpak
+          bytes=$(stat -c%s "$file")
+          human=$(du -h "$file" | cut -f1)
+          echo "FLATPAK_BYTES=$bytes" >> "$GITHUB_ENV"
+          {
+            echo "## Flatpak"
+            echo
+            echo "| Bundle | Size |"
+            echo "| --- | --- |"
+            echo "| \`$file\` | ${human} (${bytes} bytes) |"
+          } >> "$GITHUB_STEP_SUMMARY"
+
+  appimage:
+    name: AppImage
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - uses: dtolnay/rust-toolchain@stable
+
+      - name: Install GTK4, libadwaita, and AppImage tools
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends \
+            libgtk-4-dev libadwaita-1-dev pkg-config \
+            librsvg2-dev file desktop-file-utils dpkg-dev
+
+      - name: Import desktop metadata from gtk if needed
+        run: |
+          git config --global --add safe.directory "$GITHUB_WORKSPACE"
+          packaging/import-desktop-data.sh
+
+      - name: Build AppImage
+        run: packaging/appimage/build.sh
+        env:
+          APPIMAGE_EXTRACT_AND_RUN: "1"
+
+      - name: Upload AppImage
+        uses: actions/upload-artifact@v4
+        with:
+          name: openpdf-appimage
+          path: packaging/appimage/dist/*.AppImage
+          if-no-files-found: error
+
+      - name: Report AppImage size
+        run: |
+          set -euo pipefail
+          file=$(ls packaging/appimage/dist/*.AppImage)
+          bytes=$(stat -c%s "$file")
+          human=$(du -h "$file" | cut -f1)
+          {
+            echo "## AppImage"
+            echo
+            echo "| Bundle | Size |"
+            echo "| --- | --- |"
+            echo "| \`$(basename "$file")\` | ${human} (${bytes} bytes) |"
+          } >> "$GITHUB_STEP_SUMMARY"
+
+  sizes:
+    name: Bundle sizes
+    needs: [flatpak, appimage]
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          path: artifacts
+
+      - name: Summarize bundle sizes
+        run: |
+          set -euo pipefail
+          {
+            echo "## Bundle sizes"
+            echo
+            echo "| Artifact | Size |"
+            echo "| --- | --- |"
+            for file in artifacts/openpdf-flatpak/*.flatpak artifacts/openpdf-appimage/*.AppImage; do
+              [ -f "$file" ] || continue
+              bytes=$(stat -c%s "$file")
+              human=$(du -h "$file" | cut -f1)
+              echo "| \`$(basename "$file")\` | ${human} (${bytes} bytes) |"
+            done
+          } >> "$GITHUB_STEP_SUMMARY"

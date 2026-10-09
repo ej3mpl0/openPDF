@@ -1,3 +1,9 @@
 /target
 **/*.png
+packaging/appimage/build/
+packaging/appimage/dist/
+packaging/flatpak/.cache/
+.flatpak-builder/
+*.flatpak
+*.AppImage
 

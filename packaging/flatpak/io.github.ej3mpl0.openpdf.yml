@@ -1,0 +1,123 @@
+# Flatpak manifest for openPDF.
+# App id matches data/io.github.ej3mpl0.openpdf.{desktop,metainfo.xml} from PR #1.
+# Binary name is APP_BIN in packaging/config.sh (currently openpdf-gtk).
+#
+# Desktop files are not duplicated here; they are installed from data/.
+# Files open through the XDG document portal (no --filesystem=home).
+# OpenSC is bundled so DNIe/FNMT PKCS#11 works with host pcscd (--socket=pcsc).
+# p11-kit server is not needed: the app loads the bundled OpenSC module.
+
+app-id: io.github.ej3mpl0.openpdf
+runtime: org.gnome.Platform
+runtime-version: "51"
+sdk: org.gnome.Sdk
+sdk-extensions:
+  - org.freedesktop.Sdk.Extension.rust-stable
+command: openpdf-gtk
+
+finish-args:
+  - --share=ipc
+  - --socket=wayland
+  - --socket=fallback-x11
+  - --device=dri
+  - --socket=pcsc
+  - --env=OPENPDF_PDFIUM=/app/lib/libpdfium.so
+
+cleanup:
+  - /include
+  - /lib/pkgconfig
+  - /share/man
+  - /share/doc
+  - /share/gtk-doc
+  - "*.la"
+  - "*.a"
+
+modules:
+  # Client library only. Host pcscd is reached via --socket=pcsc.
+  - name: pcsc-lite
+    buildsystem: meson
+    config-opts:
+      - -Dlibsystemd=false
+      - -Dlibudev=false
+      - -Dlibusb=false
+      - -Dpolkit=false
+      - -Dusb=false
+      - -Dserial=false
+    cleanup:
+      - /bin
+      - /sbin
+      - /libexec
+      - /etc
+      - /lib/systemd
+      - /share/polkit-1
+    sources:
+      - type: archive
+        url: https://pcsclite.apdu.fr/files/pcsc-lite-2.5.1.tar.xz
+        sha256: bfcfe38a20afc49849c6bf55325e38f449fc4b26d3923fdc32b969ae41a8741b
+
+  - name: opensc
+    buildsystem: autotools
+    config-opts:
+      - --disable-static
+      - --disable-doc
+      - --disable-strict
+      - --sysconfdir=/app/etc
+    cleanup:
+      - /bin
+      - /sbin
+      - /share/applications
+      - /share/opensc
+    sources:
+      - type: archive
+        url: https://github.com/OpenSC/OpenSC/releases/download/0.27.1/opensc-0.27.1.tar.gz
+        sha256: 976f4a23eaf3397a1a2c3a7aac80bf971a8c3d829c9a79f06145bfaeeae5eca7
+
+  - name: pdfium
+    buildsystem: simple
+    build-commands:
+      - install -Dm755 lib/libpdfium.so ${FLATPAK_DEST}/lib/libpdfium.so
+    sources:
+      - type: archive
+        url: https://github.com/bblanchon/pdfium-binaries/releases/download/chromium%2F8035/pdfium-linux-x64.tgz
+        sha256: 2e6db042dd2cff2d5247023dbec6c7ebb800042ce83c835d6468d45229669bd4
+
+  - name: openpdf
+    buildsystem: simple
+    build-options:
+      append-path: /usr/lib/sdk/rust-stable/bin
+      env:
+        CARGO_HOME: /run/build/openpdf/cargo
+        CARGO_NET_OFFLINE: "true"
+        RUSTUP_TOOLCHAIN: stable
+    build-commands:
+      - cargo --offline fetch --manifest-path Cargo.toml --verbose
+      - |
+        set -euo pipefail
+        # shellcheck source=../config.sh
+        . packaging/config.sh
+        cargo --offline build --release -p "$APP_BIN"
+        install -Dm0755 "target/release/${APP_BIN}" "${FLATPAK_DEST}/bin/${APP_BIN}"
+        install -Dm0644 "$DESKTOP_FILE" "${FLATPAK_DEST}/share/applications/${APP_ID}.desktop"
+        install -Dm0644 "$METAINFO_FILE" "${FLATPAK_DEST}/share/metainfo/${APP_ID}.metainfo.xml"
+        icon_src=""
+        for candidate in \
+          "data/icons/hicolor/scalable/apps/${ICON_NAME}.svg" \
+          "data/icons/hicolor/scalable/apps/${APP_ID}.svg" \
+          "data/${ICON_NAME}.svg" \
+          "packaging/icons/${ICON_NAME}.svg"
+        do
+          if [ -f "$candidate" ]; then
+            icon_src="$candidate"
+            break
+          fi
+        done
+        if [ -z "$icon_src" ]; then
+          echo "no scalable SVG icon found under data/ or packaging/icons/" >&2
+          exit 1
+        fi
+        install -Dm0644 "$icon_src" "${FLATPAK_DEST}/share/icons/hicolor/scalable/apps/${ICON_NAME}.svg"
+        install -Dm0644 "$icon_src" "${FLATPAK_DEST}/share/icons/hicolor/scalable/apps/${APP_ID}.svg"
+    sources:
+      - type: dir
+        path: ../..
+      - cargo-sources.json
