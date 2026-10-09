@@ -103,12 +103,12 @@ modules:
         CARGO_NET_OFFLINE: "true"
         RUSTUP_TOOLCHAIN: stable
     build-commands:
-      - cargo --offline fetch --manifest-path Cargo.toml --verbose
+      - cargo --offline fetch --locked --manifest-path Cargo.toml --verbose
       - |
         set -euo pipefail
         # shellcheck source=../config.sh
         . packaging/config.sh
-        cargo --offline build --release -p "$APP_BIN" -p "$CLI_CRATE"
+        cargo --offline build --locked --release -p "$APP_BIN" -p "$CLI_CRATE"
         install -Dm0755 "target/release/${APP_BIN}" "${FLATPAK_DEST}/bin/${APP_BIN}"
         install -Dm0755 "target/release/${CLI_BIN}" "${FLATPAK_DEST}/bin/${CLI_BIN}"
         if command -v ldd >/dev/null; then

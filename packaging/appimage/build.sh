@@ -51,7 +51,7 @@ if [[ ! -f "$PDFIUM_DIR/lib/libpdfium.so" ]]; then
   tar -xzf "$archive" -C "$PDFIUM_DIR"
 fi
 
-cargo build --release -p "$APP_BIN" -p "$CLI_CRATE" --manifest-path "$ROOT/Cargo.toml"
+cargo build --locked --release -p "$APP_BIN" -p "$CLI_CRATE" --manifest-path "$ROOT/Cargo.toml"
 BIN_PATH="$ROOT/target/release/$APP_BIN"
 CLI_PATH="$ROOT/target/release/$CLI_BIN"
 if [[ ! -x "$BIN_PATH" ]]; then
