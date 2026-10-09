@@ -90,7 +90,7 @@ impl KeychainBackend {
                 Err(_) => continue,
             };
             let der = cert.to_der();
-            let Some(listed) = crate::cert::listed_from_der(ID_PREFIX, der, true) else {
+            let Some(listed) = crate::cert::listed_from_der(ID_PREFIX, der) else {
                 continue;
             };
             // Must have a private key (SecIdentity implies one; confirm we can copy it).
@@ -131,12 +131,13 @@ impl KeyBackend for KeychainBackend {
             ))
         })?;
         let alg = match found.listed.kind {
-            KeyKind::Rsa => Algorithm::RSASignatureMessagePKCS1v15SHA256,
-            KeyKind::Ecdsa { hash } => match hash {
+            Some(KeyKind::Rsa) => Algorithm::RSASignatureMessagePKCS1v15SHA256,
+            Some(KeyKind::Ecdsa { hash }) => match hash {
                 EcdsaHash::Sha256 => Algorithm::ECDSASignatureMessageX962SHA256,
                 EcdsaHash::Sha384 => Algorithm::ECDSASignatureMessageX962SHA384,
                 EcdsaHash::Sha512 => Algorithm::ECDSASignatureMessageX962SHA512,
             },
+            None => return Err(Error::Sign(openpdf_core::tr("unsupported public key algorithm"))),
         };
         key.create_signature(alg, data).map_err(|e| {
             Error::Sign(tr_args(
@@ -148,5 +149,10 @@ impl KeyBackend for KeychainBackend {
 }
 
 fn test_keychain_path() -> Option<PathBuf> {
-    std::env::var_os("OPENPDF_TEST_KEYCHAIN").map(PathBuf::from)
+    #[cfg(test)]
+    {
+        return std::env::var_os("OPENPDF_TEST_KEYCHAIN").map(PathBuf::from);
+    }
+    #[cfg(not(test))]
+    None
 }

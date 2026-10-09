@@ -1,14 +1,14 @@
 //! Internal key backend: enumerate certificates and sign opaque bytes.
 
 use openpdf_core::{
-    tr, tr_args, CertificateInfo, Error, InvalidKind, PinProvider, Result, SignRequest,
-    SignatureInfo, Signer,
+    describe_unusable, tr, tr_args, CertUnusable, CertificateInfo, Error, InvalidKind,
+    PinProvider, Result, SignRequest, SignatureInfo, Signer,
 };
 use der::Decode;
 use x509_cert::Certificate;
 
 use crate::cades;
-use crate::cert::{can_use_for_pades, common_name_or_subject, KeyKind};
+use crate::cert::{can_use_for_pades, check_validity, common_name_or_subject, KeyKind};
 use crate::pades;
 use crate::token::{Pkcs11Backend, Pkcs11Config};
 
@@ -19,7 +19,7 @@ pub(crate) struct ListedCert {
     pub der: Vec<u8>,
     pub info: CertificateInfo,
     #[allow(dead_code)] // read by Windows CNG and macOS Keychain signers
-    pub kind: KeyKind,
+    pub kind: Option<KeyKind>,
 }
 
 /// Platform or PKCS#11 source. Backends do not build CMS or touch `/ByteRange`.
@@ -52,15 +52,33 @@ pub(crate) fn sign_pdf(
                 &[("id", request.cert_id.trim())],
             ))
         })?;
+    if let Some(reason) = &picked.info.unusable {
+        return Err(sign_error_for_unusable(reason));
+    }
     if !can_use_for_pades(&picked.info.usage) {
         return Err(Error::Sign(tr("certificate is not a signing cert")));
     }
     let cert = Certificate::from_der(&picked.der).map_err(|e| Error::Sign(e.to_string()))?;
+    check_validity(&cert)?;
     let name = common_name_or_subject(&cert);
     let der = picked.der.clone();
     let id = picked.info.id.clone();
     pades::sign_incremental(pdf, request, &name, |message| {
         cades::sign_detached(message, &der, |tbs| backend.sign_bytes(&id, tbs))
+    })
+}
+
+/// Map a structured unusable reason to a sign error.
+///
+/// [`CertUnusable`] is `#[non_exhaustive]`; this crate (and GTK) must keep a
+/// wildcard arm so a future `Revoked` variant does not break the build.
+fn sign_error_for_unusable(reason: &CertUnusable) -> Error {
+    Error::Sign(match reason {
+        CertUnusable::AuthenticationOnly
+        | CertUnusable::Expired { .. }
+        | CertUnusable::NotYetValid { .. }
+        | CertUnusable::UnsupportedKey => describe_unusable(reason),
+        _ => describe_unusable(reason),
     })
 }
 

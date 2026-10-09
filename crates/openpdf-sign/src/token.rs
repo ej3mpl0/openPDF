@@ -19,7 +19,8 @@ use sha2::{Digest, Sha256};
 use x509_cert::Certificate;
 
 use crate::backend::{list_certificates, sign_pdf, KeyBackend, ListedCert};
-use crate::cert::{self, can_sign_pkcs11, KeyKind};
+use crate::cades;
+use crate::cert::{self, can_use_for_pades, key_kind, EcdsaHash, KeyKind};
 use crate::pades;
 
 /// OpenSC (Spanish DNIe), p11-kit / NSS softoken (FNMT in a user NSS db), SoftHSM.
@@ -139,10 +140,7 @@ impl Pkcs11Backend {
     fn pick(&self, cert_id: &str) -> Result<PickedCert> {
         let wanted = cert_id.trim();
         if wanted.is_empty() {
-            return Err(Error::Sign(tr_args(
-                "unknown certificate id {id}",
-                &[("id", wanted)],
-            )));
+            return Err(Error::invalid(openpdf_core::InvalidKind::CertIdRequired));
         }
         for info in self.enumerate_certs()? {
             if info.info.id == wanted {
@@ -218,7 +216,13 @@ impl Pkcs11Backend {
         drop(pin);
 
         let key = find_private_key(&session, &picked.cka_id)?;
-        let sig = pkcs11_rsa_sha256(&session, key, data);
+        let cert = Certificate::from_der(&picked.der).map_err(|e| Error::Sign(e.to_string()))?;
+        let kind = key_kind(&cert)
+            .ok_or_else(|| Error::Sign(openpdf_core::tr("unsupported public key algorithm")))?;
+        let sig = match kind {
+            KeyKind::Rsa => pkcs11_rsa_sha256(&session, key, data),
+            KeyKind::Ecdsa { hash } => pkcs11_ecdsa(&session, key, data, hash),
+        };
         let _ = session.logout();
         sig
     }
@@ -229,19 +233,25 @@ impl KeyBackend for Pkcs11Backend {
         Ok(self
             .enumerate_certs()?
             .into_iter()
-            .map(|p| ListedCert {
-                id: p.info.id.clone(),
-                der: p.der,
-                info: p.info,
-                kind: KeyKind::Rsa,
+            .filter_map(|p| {
+                let cert = Certificate::from_der(&p.der).ok()?;
+                Some(ListedCert {
+                    id: p.info.id.clone(),
+                    der: p.der,
+                    info: p.info,
+                    kind: key_kind(&cert),
+                })
             })
             .collect())
     }
 
     fn sign_bytes(&self, cert_id: &str, data: &[u8]) -> Result<Vec<u8>> {
+        if cert_id.trim().is_empty() {
+            return Err(Error::invalid(openpdf_core::InvalidKind::CertIdRequired));
+        }
         let picked = self.pick(cert_id)?;
-        if !can_sign_pkcs11(&picked.info.usage) {
-            return Err(Error::Sign("certificate is not a signing cert".into()));
+        if picked.info.unusable.is_some() || !can_use_for_pades(&picked.info.usage) {
+            return Err(Error::Sign(openpdf_core::tr("certificate is not a signing cert")));
         }
         self.sign_raw(&picked, data)
     }
@@ -253,16 +263,6 @@ impl Signer for Pkcs11Signer {
     }
 
     fn sign(&self, pdf: &[u8], request: &SignRequest) -> Result<Vec<u8>> {
-        if let Ok(listed) = self.backend.list() {
-            if let Some(c) = listed
-                .iter()
-                .find(|c| c.info.id == request.cert_id.trim())
-            {
-                if !can_sign_pkcs11(&c.info.usage) {
-                    return Err(Error::Sign("certificate is not a signing cert".into()));
-                }
-            }
-        }
         sign_pdf(&self.backend, pdf, request)
     }
 
@@ -397,6 +397,35 @@ fn find_private_key(session: &Session, cka_id: &[u8]) -> Result<ObjectHandle> {
         .into_iter()
         .next()
         .ok_or_else(|| Error::Sign("no private key for certificate".into()))
+}
+
+fn pkcs11_ecdsa(
+    session: &Session,
+    key: ObjectHandle,
+    data: &[u8],
+    hash: EcdsaHash,
+) -> Result<Vec<u8>> {
+    let hashed = match hash {
+        EcdsaHash::Sha256 => Mechanism::EcdsaSha256,
+        EcdsaHash::Sha384 => Mechanism::EcdsaSha384,
+        EcdsaHash::Sha512 => Mechanism::EcdsaSha512,
+    };
+    let raw = match session.sign(&hashed, key, data) {
+        Ok(sig) => sig,
+        Err(_) => {
+            let digest: Vec<u8> = match hash {
+                EcdsaHash::Sha256 => Sha256::digest(data).to_vec(),
+                EcdsaHash::Sha384 => sha2::Sha384::digest(data).to_vec(),
+                EcdsaHash::Sha512 => sha2::Sha512::digest(data).to_vec(),
+            };
+            session.sign(&Mechanism::Ecdsa, key, &digest).map_err(pkcs11_err)?
+        }
+    };
+    if raw.len() < 2 || raw.len() % 2 != 0 {
+        return Err(Error::Sign("PKCS#11 ECDSA signature is truncated".into()));
+    }
+    let mid = raw.len() / 2;
+    cades::ecdsa_integers_to_der(&raw[..mid], &raw[mid..])
 }
 
 fn pkcs11_rsa_sha256(session: &Session, key: ObjectHandle, data: &[u8]) -> Result<Vec<u8>> {

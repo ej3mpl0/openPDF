@@ -103,6 +103,24 @@ msgstr ""
 msgid "certificate is not a signing cert"
 msgstr ""
 
+msgid "certificate is not yet valid"
+msgstr ""
+
+msgid "certificate has expired"
+msgstr ""
+
+msgid "Authentication only"
+msgstr ""
+
+msgid "Certificate has expired (valid until {not_after})"
+msgstr ""
+
+msgid "Certificate is not yet valid (valid from {not_before})"
+msgstr ""
+
+msgid "Unsupported key algorithm"
+msgstr ""
+
 msgid "(untitled)"
 msgstr ""
 

@@ -31,6 +31,21 @@ pub struct CertificateValidity {
     pub not_after: Option<String>,
 }
 
+/// Why a listed certificate cannot produce a PAdES signature.
+///
+/// Timestamps are RFC 3339 strings (same shape as [`CertificateValidity`]) so
+/// the type stays UniFFI-friendly. The enum is `#[non_exhaustive]`: future
+/// reasons such as `Revoked` must not break downstream crates — their `match`
+/// expressions need a wildcard arm.
+#[non_exhaustive]
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum CertUnusable {
+    AuthenticationOnly,
+    Expired { not_after: String },
+    NotYetValid { not_before: String },
+    UnsupportedKey,
+}
+
 /// Descriptor for one certificate on a token. `id` is what [`SignRequest::cert_id`] must carry.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct CertificateInfo {
@@ -39,6 +54,8 @@ pub struct CertificateInfo {
     pub issuer: String,
     pub validity: CertificateValidity,
     pub usage: Vec<CertificateUsage>,
+    /// `Some` when the UI must disable this row. [`Signer::sign`] still refuses.
+    pub unusable: Option<CertUnusable>,
 }
 
 /// Options passed from the UI to a [`Signer`] implementation (PKCS#11 lives in `openpdf-sign`).
@@ -98,6 +115,22 @@ pub fn usage_label(usage: &CertificateUsage) -> String {
         CertificateUsage::Authentication => tr("Authentication"),
         CertificateUsage::Encryption => tr("Encryption"),
         CertificateUsage::Other(detail) => tr_args("Other ({detail})", &[("detail", detail)]),
+    }
+}
+
+/// Translated reason a certificate cannot sign. Pair with [`describe_certificate`].
+pub fn describe_unusable(reason: &CertUnusable) -> String {
+    match reason {
+        CertUnusable::AuthenticationOnly => tr("Authentication only"),
+        CertUnusable::Expired { not_after } => tr_args(
+            "Certificate has expired (valid until {not_after})",
+            &[("not_after", not_after)],
+        ),
+        CertUnusable::NotYetValid { not_before } => tr_args(
+            "Certificate is not yet valid (valid from {not_before})",
+            &[("not_before", not_before)],
+        ),
+        CertUnusable::UnsupportedKey => tr("Unsupported key algorithm"),
     }
 }
 
@@ -273,6 +306,7 @@ mod tests {
                     not_after: Some("2028-01-01T00:00:00Z".into()),
                 },
                 usage: vec![CertificateUsage::Authentication],
+                unusable: Some(CertUnusable::AuthenticationOnly),
             },
             CertificateInfo {
                 id: "dnie-sign".into(),
@@ -283,6 +317,7 @@ mod tests {
                     not_after: Some("2028-01-01T00:00:00Z".into()),
                 },
                 usage: vec![CertificateUsage::Signing],
+                unusable: None,
             },
         ]
     }
@@ -302,6 +337,9 @@ mod tests {
                 .iter()
                 .find(|c| c.id == request.cert_id)
                 .ok_or_else(|| Error::Sign("unknown certificate".into()))?;
+            if let Some(reason) = &cert.unusable {
+                return Err(Error::Sign(describe_unusable(reason)));
+            }
             if !cert.usage.contains(&CertificateUsage::Signing) {
                 return Err(Error::Sign("certificate is not a signing cert".into()));
             }
@@ -339,7 +377,12 @@ mod tests {
         let certs = signer.list_certificates().unwrap();
         assert_eq!(certs.len(), 2);
         assert_eq!(certs[0].id, "dnie-auth");
+        assert_eq!(
+            certs[0].unusable,
+            Some(CertUnusable::AuthenticationOnly)
+        );
         assert_eq!(certs[1].usage, vec![CertificateUsage::Signing]);
+        assert_eq!(certs[1].unusable, None);
         // PIN is not a field on SignRequest or CertificateInfo — constructing
         // these values is the API contract the UI is allowed to use.
         let req = signing_request();
@@ -465,6 +508,7 @@ mod tests {
                 not_after: Some("2030-01-01T00:00:00Z".into()),
             },
             usage: vec![CertificateUsage::Signing],
+            unusable: None,
         };
         with_locale("en", || {
             assert_eq!(
@@ -489,6 +533,77 @@ mod tests {
                 expected,
                 "CN=Test — Signing — valid 2020-01-01T00:00:00Z to 2030-01-01T00:00:00Z"
             );
+        });
+    }
+
+    #[test]
+    fn describe_unusable_follows_catalog() {
+        let expired = CertUnusable::Expired {
+            not_after: "2020-01-01T00:00:00Z".into(),
+        };
+        let not_yet = CertUnusable::NotYetValid {
+            not_before: "2030-01-01T00:00:00Z".into(),
+        };
+        with_locale("en", || {
+            assert_eq!(
+                describe_unusable(&CertUnusable::AuthenticationOnly),
+                "Authentication only"
+            );
+            assert_eq!(
+                describe_unusable(&expired),
+                "Certificate has expired (valid until 2020-01-01T00:00:00Z)"
+            );
+            assert_eq!(
+                describe_unusable(&not_yet),
+                "Certificate is not yet valid (valid from 2030-01-01T00:00:00Z)"
+            );
+            assert_eq!(
+                describe_unusable(&CertUnusable::UnsupportedKey),
+                "Unsupported key algorithm"
+            );
+        });
+        with_locale("es", || {
+            let cat = es_catalog();
+            assert_eq!(
+                describe_unusable(&CertUnusable::AuthenticationOnly),
+                cat.translate("Authentication only")
+            );
+            let expired_es = cat
+                .translate("Certificate has expired (valid until {not_after})")
+                .replace("{not_after}", "2020-01-01T00:00:00Z");
+            assert_eq!(describe_unusable(&expired), expired_es);
+            let not_yet_es = cat
+                .translate("Certificate is not yet valid (valid from {not_before})")
+                .replace("{not_before}", "2030-01-01T00:00:00Z");
+            assert_eq!(describe_unusable(&not_yet), not_yet_es);
+            assert_eq!(
+                describe_unusable(&CertUnusable::UnsupportedKey),
+                cat.translate("Unsupported key algorithm")
+            );
+            assert_ne!(expired_es, "Certificate has expired (valid until 2020-01-01T00:00:00Z)");
+        });
+    }
+
+    #[test]
+    fn apply_signer_rejects_unusable_auth_cert() {
+        with_locale("en", || {
+            let mut doc = Document::open(corpus("hello.pdf")).unwrap();
+            let signer = TokenSigner {
+                certs: dnie_certs(),
+            };
+            let err = doc
+                .apply_signer(
+                    &signer,
+                    &SignRequest {
+                        cert_id: "dnie-auth".into(),
+                        ..SignRequest::default()
+                    },
+                )
+                .unwrap_err();
+            match err {
+                Error::Sign(msg) => assert_eq!(msg, "Authentication only"),
+                other => panic!("expected Sign, got {other:?}"),
+            }
         });
     }
 

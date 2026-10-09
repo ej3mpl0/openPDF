@@ -2,7 +2,7 @@
 
 use const_oid::AssociatedOid;
 use der::Decode;
-use openpdf_core::{CertificateInfo, CertificateUsage, CertificateValidity};
+use openpdf_core::{CertUnusable, CertificateInfo, CertificateUsage, CertificateValidity};
 use sha2::{Digest, Sha256};
 use x509_cert::ext::pkix::KeyUsage;
 use x509_cert::Certificate;
@@ -53,10 +53,10 @@ pub(crate) fn key_kind(cert: &Certificate) -> Option<KeyKind> {
         .as_ref()
         .and_then(|p| p.decode_as::<const_oid::ObjectIdentifier>().ok());
     let hash = match curve {
+        Some(c) if c == SECP_256_R1 => EcdsaHash::Sha256,
         Some(c) if c == SECP_384_R1 => EcdsaHash::Sha384,
         Some(c) if c == SECP_521_R1 => EcdsaHash::Sha512,
-        Some(c) if c == SECP_256_R1 => EcdsaHash::Sha256,
-        _ => EcdsaHash::Sha256,
+        _ => return None,
     };
     Some(KeyKind::Ecdsa { hash })
 }
@@ -94,21 +94,76 @@ pub(crate) fn key_usage(cert: &Certificate) -> Vec<CertificateUsage> {
     Vec::new()
 }
 
-/// PKCS#11 / DNIe: empty usage or non-repudiation (`Signing`).
-pub(crate) fn can_sign_pkcs11(usage: &[CertificateUsage]) -> bool {
+/// One gate for every backend: unspecified KeyUsage, or non-repudiation (`Signing`).
+/// Authentication-only (`digitalSignature` without `nonRepudiation`) is not PAdES.
+pub(crate) fn can_use_for_pades(usage: &[CertificateUsage]) -> bool {
     usage.is_empty() || usage.contains(&CertificateUsage::Signing)
 }
 
-/// Native stores: `digitalSignature` maps to Signing and/or Authentication.
-pub(crate) fn can_sign_native(usage: &[CertificateUsage]) -> bool {
-    usage.is_empty()
-        || usage.contains(&CertificateUsage::Signing)
-        || usage.contains(&CertificateUsage::Authentication)
+/// Reject certs outside `notBefore`..`notAfter`.
+pub(crate) fn check_validity(cert: &Certificate) -> openpdf_core::Result<()> {
+    use openpdf_core::{tr, Error};
+    let now = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_secs())
+        .unwrap_or(0);
+    let not_before = cert
+        .tbs_certificate
+        .validity
+        .not_before
+        .to_unix_duration()
+        .as_secs();
+    let not_after = cert
+        .tbs_certificate
+        .validity
+        .not_after
+        .to_unix_duration()
+        .as_secs();
+    if now < not_before {
+        return Err(Error::Sign(tr("certificate is not yet valid")));
+    }
+    if now > not_after {
+        return Err(Error::Sign(tr("certificate has expired")));
+    }
+    Ok(())
 }
 
-/// Shared PAdES gate: digitalSignature (auth or sign) or unspecified.
-pub(crate) fn can_use_for_pades(usage: &[CertificateUsage]) -> bool {
-    can_sign_native(usage)
+/// Structured reason the UI can show. `None` means the cert may sign.
+pub(crate) fn unusable_reason(cert: &Certificate) -> Option<CertUnusable> {
+    let now = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_secs())
+        .unwrap_or(0);
+    let not_before = cert
+        .tbs_certificate
+        .validity
+        .not_before
+        .to_unix_duration()
+        .as_secs();
+    let not_after = cert
+        .tbs_certificate
+        .validity
+        .not_after
+        .to_unix_duration()
+        .as_secs();
+    if now < not_before {
+        return Some(CertUnusable::NotYetValid {
+            not_before: time_rfc3339(&cert.tbs_certificate.validity.not_before)
+                .unwrap_or_default(),
+        });
+    }
+    if now > not_after {
+        return Some(CertUnusable::Expired {
+            not_after: time_rfc3339(&cert.tbs_certificate.validity.not_after).unwrap_or_default(),
+        });
+    }
+    if key_kind(cert).is_none() {
+        return Some(CertUnusable::UnsupportedKey);
+    }
+    if !can_use_for_pades(&key_usage(cert)) {
+        return Some(CertUnusable::AuthenticationOnly);
+    }
+    None
 }
 
 pub(crate) fn time_rfc3339(t: &x509_cert::time::Time) -> Option<String> {
@@ -153,6 +208,7 @@ pub(crate) fn info_from_cert(cert: &Certificate, _der: &[u8], id: String) -> Cer
             not_after: time_rfc3339(&cert.tbs_certificate.validity.not_after),
         },
         usage: key_usage(cert),
+        unusable: unusable_reason(cert),
     }
 }
 
@@ -160,15 +216,14 @@ pub(crate) fn info_from_cert(cert: &Certificate, _der: &[u8], id: String) -> Cer
 pub(crate) fn listed_from_der(
     prefix: &str,
     der: Vec<u8>,
-    require_digital_signature: bool,
 ) -> Option<crate::backend::ListedCert> {
     let cert = Certificate::from_der(&der).ok()?;
-    let kind = key_kind(&cert)?;
-    let usage = key_usage(&cert);
-    if require_digital_signature && !can_sign_native(&usage) {
-        return None;
-    }
     let id = cert_sha256_id(prefix, &der);
     let info = info_from_cert(&cert, &der, id.clone());
-    Some(crate::backend::ListedCert { id, der, info, kind })
+    Some(crate::backend::ListedCert {
+        id,
+        der,
+        info,
+        kind: key_kind(&cert),
+    })
 }

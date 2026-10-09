@@ -12,7 +12,7 @@ use rsa::pkcs1v15::{Signature, VerifyingKey};
 use rsa::pkcs8::DecodePublicKey;
 use rsa::signature::Verifier;
 use rsa::RsaPublicKey;
-use sha2::{Digest, Sha256, Sha384, Sha512};
+use sha2::{Digest, Sha256};
 use x509_cert::attr::Attribute;
 use x509_cert::spki::AlgorithmIdentifierOwned;
 use x509_cert::Certificate;
@@ -60,11 +60,11 @@ pub(crate) fn sign_detached(
         econtent: None,
     };
 
+    let kind = key_kind(&cert).ok_or_else(|| Error::Sign(tr("unsupported public key algorithm")))?;
     let signed_attrs = signed_attributes(cert_der, digest.as_slice())?;
     let tbs = signed_attrs.to_der().map_err(cms_err)?;
     let signature = sign(&tbs)?;
     let sig_octets = OctetString::new(signature).map_err(cms_err)?;
-    let kind = key_kind(&cert).ok_or_else(|| Error::Sign(tr("unsupported public key algorithm")))?;
 
     let signer_info = SignerInfo {
         version: CmsVersion::V1,
@@ -282,7 +282,6 @@ fn verify_ecdsa_p256(spki_der: &[u8], tbs: &[u8], sig: &[u8]) -> bool {
     let Ok(signature) = P256Sig::from_der(sig) else {
         return false;
     };
-    let _ = Sha256::digest(tbs);
     vk.verify(tbs, &signature).is_ok()
 }
 
@@ -296,14 +295,26 @@ fn verify_ecdsa_p384(spki_der: &[u8], tbs: &[u8], sig: &[u8]) -> bool {
     let Ok(signature) = P384Sig::from_der(sig) else {
         return false;
     };
-    let _ = Sha384::digest(tbs);
     vk.verify(tbs, &signature).is_ok()
 }
 
-fn verify_ecdsa_p521_sha512(_spki_der: &[u8], tbs: &[u8], _sig: &[u8]) -> bool {
-    // P-521 verify is not wired; signing still works. Hash is pinned for the CMS path.
-    let _ = Sha512::digest(tbs);
-    false
+fn verify_ecdsa_p521_sha512(spki_der: &[u8], tbs: &[u8], sig: &[u8]) -> bool {
+    use p521::ecdsa::signature::Verifier;
+    use p521::ecdsa::{Signature as P521Sig, VerifyingKey as P521Vk};
+    use x509_cert::spki::SubjectPublicKeyInfoOwned;
+    let Ok(spki) = SubjectPublicKeyInfoOwned::from_der(spki_der) else {
+        return false;
+    };
+    let Some(sec1) = spki.subject_public_key.as_bytes() else {
+        return false;
+    };
+    let Ok(vk) = P521Vk::from_sec1_bytes(sec1) else {
+        return false;
+    };
+    let Ok(signature) = P521Sig::from_der(sig) else {
+        return false;
+    };
+    vk.verify(tbs, &signature).is_ok()
 }
 
 fn embedded_leaf(signed_data: &SignedData) -> Option<&Certificate> {

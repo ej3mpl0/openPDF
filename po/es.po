@@ -103,6 +103,24 @@ msgstr "certificado desconocido"
 msgid "certificate is not a signing cert"
 msgstr "el certificado no es de firma"
 
+msgid "certificate is not yet valid"
+msgstr "el certificado aún no es válido"
+
+msgid "certificate has expired"
+msgstr "el certificado ha caducado"
+
+msgid "Authentication only"
+msgstr "Solo autenticación"
+
+msgid "Certificate has expired (valid until {not_after})"
+msgstr "El certificado ha caducado (válido hasta {not_after})"
+
+msgid "Certificate is not yet valid (valid from {not_before})"
+msgstr "El certificado aún no es válido (válido desde {not_before})"
+
+msgid "Unsupported key algorithm"
+msgstr "Algoritmo de clave no admitido"
+
 msgid "(untitled)"
 msgstr "(sin título)"
 

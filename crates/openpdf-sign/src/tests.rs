@@ -15,8 +15,9 @@ use der::asn1::{BitString, UintRef};
 use der::{Decode, Encode, Sequence};
 use openpdf_core::test_support::with_locale;
 use openpdf_core::{
-    describe_certificate, format_verify_result, format_verify_results, pin_prompt_text, tr,
-    Document, Error, PinProvider, SecretPin, SignRequest, Signer, VisibleAppearance,
+    describe_certificate, describe_unusable, format_verify_result, format_verify_results,
+    pin_prompt_text, tr, CertUnusable, Document, Error, PinProvider, SecretPin, SignRequest,
+    Signer, VisibleAppearance,
 };
 use x509_cert::name::Name;
 use x509_cert::serial_number::SerialNumber;
@@ -26,7 +27,7 @@ use x509_cert::{Certificate, TbsCertificate, Version};
 
 use crate::backend::{sign_pdf, KeyBackend, ListedCert};
 use crate::cades;
-use crate::cert::KeyKind;
+use crate::cert::{unusable_reason, EcdsaHash, KeyKind};
 use crate::pin::StaticPinProvider;
 use crate::token::{Pkcs11Config, Pkcs11Signer};
 use crate::{default_signer, verify_pdf, CertificateUsage};
@@ -417,7 +418,18 @@ fn unknown_cert_id_fails() {
 }
 
 fn can_use(c: &openpdf_core::CertificateInfo) -> bool {
-    c.usage.is_empty() || c.usage.contains(&CertificateUsage::Signing)
+    c.unusable.is_none() && (c.usage.is_empty() || c.usage.contains(&CertificateUsage::Signing))
+}
+
+/// Downstream crates must keep a wildcard: [`CertUnusable`] is `#[non_exhaustive]`.
+fn classify_unusable(reason: &CertUnusable) -> &'static str {
+    match reason {
+        CertUnusable::AuthenticationOnly => "auth",
+        CertUnusable::Expired { .. } => "expired",
+        CertUnusable::NotYetValid { .. } => "not-yet-valid",
+        CertUnusable::UnsupportedKey => "key",
+        _ => "other",
+    }
 }
 
 struct MockRsaBackend {
@@ -433,7 +445,7 @@ impl KeyBackend for MockRsaBackend {
             id: self.id.clone(),
             der: self.der.clone(),
             info: crate::cert::info_from_cert(&cert, &self.der, self.id.clone()),
-            kind: KeyKind::Rsa,
+            kind: Some(KeyKind::Rsa),
         }])
     }
 
@@ -446,16 +458,25 @@ impl KeyBackend for MockRsaBackend {
 }
 
 fn mock_rsa_backend() -> MockRsaBackend {
+    mock_rsa_backend_with_validity(
+        x509_cert::time::Validity::from_now(Duration::from_secs(365 * 86400)).expect("validity"),
+    )
+}
+
+fn unix_time(secs: u64) -> x509_cert::time::Time {
+    x509_cert::time::Time::try_from(std::time::SystemTime::UNIX_EPOCH + Duration::from_secs(secs))
+        .expect("time")
+}
+
+fn mock_rsa_backend_with_validity(validity: x509_cert::time::Validity) -> MockRsaBackend {
     use der::asn1::BitString;
     use der::Encode;
     use rsa::pkcs8::EncodePublicKey;
     use rsa::signature::{SignatureEncoding, Signer};
     use rsa::{RsaPrivateKey, RsaPublicKey};
-    use std::time::Duration;
     use x509_cert::name::Name;
     use x509_cert::serial_number::SerialNumber;
     use x509_cert::spki::{AlgorithmIdentifierOwned, SubjectPublicKeyInfoOwned};
-    use x509_cert::time::Validity;
     use x509_cert::{Certificate, TbsCertificate, Version};
 
     let mut rng = rand::rngs::OsRng;
@@ -464,7 +485,6 @@ fn mock_rsa_backend() -> MockRsaBackend {
     let spki_der = public.to_public_key_der().expect("spki");
     let spki = SubjectPublicKeyInfoOwned::from_der(spki_der.as_bytes()).expect("spki parse");
     let name: Name = "CN=OpenPDF Mock Signer".parse().expect("name");
-    let validity = Validity::from_now(Duration::from_secs(365 * 86400)).expect("validity");
     let sig_alg = AlgorithmIdentifierOwned {
         oid: const_oid::db::rfc5912::SHA_256_WITH_RSA_ENCRYPTION,
         parameters: Some(der::Any::null()),
@@ -501,7 +521,8 @@ fn mock_backend_shared_cms_roundtrip() {
     let backend = mock_rsa_backend();
     let listed = backend.list().unwrap();
     assert_eq!(listed.len(), 1);
-    assert_eq!(listed[0].kind, KeyKind::Rsa);
+    assert_eq!(listed[0].kind, Some(KeyKind::Rsa));
+    assert_eq!(listed[0].info.unusable, None);
     let message = b"openpdf-sign mock CMS message";
     let cms = cades::sign_detached(message, &listed[0].der, |tbs| {
         backend.sign_bytes(&listed[0].id, tbs)
@@ -543,13 +564,216 @@ fn mock_backend_pades_incremental_and_verify() {
     assert_eq!(infos[0].reason.as_deref(), Some("mock cms"));
 }
 
+#[test]
+fn cert_unusable_match_needs_wildcard() {
+    assert_eq!(
+        classify_unusable(&CertUnusable::AuthenticationOnly),
+        "auth"
+    );
+    assert_eq!(
+        classify_unusable(&CertUnusable::Expired {
+            not_after: "2020-01-01T00:00:00Z".into()
+        }),
+        "expired"
+    );
+    assert_eq!(
+        classify_unusable(&CertUnusable::NotYetValid {
+            not_before: "2030-01-01T00:00:00Z".into()
+        }),
+        "not-yet-valid"
+    );
+    assert_eq!(classify_unusable(&CertUnusable::UnsupportedKey), "key");
+}
+
+#[test]
+fn sign_rejects_expired_certificate() {
+    let backend = mock_rsa_backend_with_validity(x509_cert::time::Validity {
+        not_before: unix_time(1_577_836_800),
+        not_after: unix_time(1_609_459_200),
+    });
+    let listed = backend.list().unwrap();
+    let reason = listed[0]
+        .info
+        .unusable
+        .clone()
+        .expect("expired cert must be marked unusable");
+    assert!(matches!(reason, CertUnusable::Expired { .. }));
+    assert_eq!(classify_unusable(&reason), "expired");
+    with_locale("en", || {
+        let original = fs::read(corpus("hello.pdf")).unwrap();
+        let err = sign_pdf(
+            &backend,
+            &original,
+            &SignRequest {
+                cert_id: "mock".into(),
+                ..SignRequest::default()
+            },
+        )
+        .unwrap_err();
+        match err {
+            Error::Sign(msg) => assert_eq!(msg, describe_unusable(&reason)),
+            other => panic!("expected Sign, got {other:?}"),
+        }
+    });
+}
+
+#[test]
+fn sign_rejects_not_yet_valid_certificate() {
+    let now = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap()
+        .as_secs();
+    let backend = mock_rsa_backend_with_validity(x509_cert::time::Validity {
+        not_before: unix_time(now + 365 * 86400),
+        not_after: unix_time(now + 2 * 365 * 86400),
+    });
+    let listed = backend.list().unwrap();
+    let reason = listed[0]
+        .info
+        .unusable
+        .clone()
+        .expect("future cert must be marked unusable");
+    assert!(matches!(reason, CertUnusable::NotYetValid { .. }));
+    with_locale("en", || {
+        let original = fs::read(corpus("hello.pdf")).unwrap();
+        let err = sign_pdf(
+            &backend,
+            &original,
+            &SignRequest {
+                cert_id: "mock".into(),
+                ..SignRequest::default()
+            },
+        )
+        .unwrap_err();
+        match err {
+            Error::Sign(msg) => assert_eq!(msg, describe_unusable(&reason)),
+            other => panic!("expected Sign, got {other:?}"),
+        }
+    });
+}
+
+#[test]
+fn unusable_reason_none_for_fresh_rsa() {
+    let backend = mock_rsa_backend();
+    let cert = x509_cert::Certificate::from_der(&backend.der).unwrap();
+    assert_eq!(unusable_reason(&cert), None);
+}
+
+struct MockEcdsaBackend {
+    id: String,
+    der: Vec<u8>,
+    key: p256::ecdsa::SigningKey,
+}
+
+impl KeyBackend for MockEcdsaBackend {
+    fn list(&self) -> openpdf_core::Result<Vec<ListedCert>> {
+        let cert = x509_cert::Certificate::from_der(&self.der).expect("mock cert");
+        Ok(vec![ListedCert {
+            id: self.id.clone(),
+            der: self.der.clone(),
+            info: crate::cert::info_from_cert(&cert, &self.der, self.id.clone()),
+            kind: Some(KeyKind::Ecdsa {
+                hash: EcdsaHash::Sha256,
+            }),
+        }])
+    }
+
+    fn sign_bytes(&self, cert_id: &str, data: &[u8]) -> openpdf_core::Result<Vec<u8>> {
+        assert_eq!(cert_id, self.id);
+        use p256::ecdsa::signature::Signer;
+        let sig: p256::ecdsa::Signature = self.key.sign(data);
+        Ok(sig.to_der().as_bytes().to_vec())
+    }
+}
+
+fn mock_ecdsa_p256_backend() -> MockEcdsaBackend {
+    use der::asn1::BitString;
+    use der::Encode;
+    use p256::ecdsa::signature::Signer;
+    use x509_cert::name::Name;
+    use x509_cert::serial_number::SerialNumber;
+    use x509_cert::spki::{AlgorithmIdentifierOwned, SubjectPublicKeyInfoOwned};
+    use x509_cert::time::Validity;
+    use x509_cert::{Certificate, TbsCertificate, Version};
+
+    let key = p256::ecdsa::SigningKey::from_slice(&[0x42u8; 32]).expect("p256 key");
+    let point = key.verifying_key().to_encoded_point(false);
+    let spki = SubjectPublicKeyInfoOwned {
+        algorithm: AlgorithmIdentifierOwned {
+            oid: const_oid::ObjectIdentifier::new_unwrap("1.2.840.10045.2.1"),
+            parameters: Some(der::Any::from(&const_oid::ObjectIdentifier::new_unwrap(
+                "1.2.840.10045.3.1.7",
+            ))),
+        },
+        subject_public_key: BitString::from_bytes(point.as_bytes()).expect("sec1"),
+    };
+    let name: Name = "CN=OpenPDF ECDSA Mock".parse().expect("name");
+    let validity = Validity::from_now(Duration::from_secs(365 * 86400)).expect("validity");
+    let sig_alg = AlgorithmIdentifierOwned {
+        oid: const_oid::ObjectIdentifier::new_unwrap("1.2.840.10045.4.3.2"),
+        parameters: None,
+    };
+    let tbs = TbsCertificate {
+        version: Version::V3,
+        serial_number: SerialNumber::from(1u32),
+        signature: sig_alg.clone(),
+        issuer: name.clone(),
+        validity,
+        subject: name,
+        subject_public_key_info: spki,
+        issuer_unique_id: None,
+        subject_unique_id: None,
+        extensions: None,
+    };
+    let tbs_der = tbs.to_der().expect("tbs");
+    let sig: p256::ecdsa::Signature = key.sign(&tbs_der);
+    let cert = Certificate {
+        tbs_certificate: tbs,
+        signature_algorithm: sig_alg,
+        signature: BitString::from_bytes(sig.to_der().as_bytes()).expect("sig bits"),
+    };
+    MockEcdsaBackend {
+        id: "mock-ecdsa".into(),
+        der: cert.to_der().expect("cert der"),
+        key,
+    }
+}
+
+#[test]
+fn mock_ecdsa_p256_cms_roundtrip() {
+    let backend = mock_ecdsa_p256_backend();
+    let listed = backend.list().unwrap();
+    assert_eq!(
+        listed[0].kind,
+        Some(KeyKind::Ecdsa {
+            hash: EcdsaHash::Sha256
+        })
+    );
+    assert_eq!(listed[0].info.unusable, None);
+    let message = b"openpdf-sign mock ECDSA CMS message";
+    let cms = cades::sign_detached(message, &listed[0].der, |tbs| {
+        backend.sign_bytes(&listed[0].id, tbs)
+    })
+    .expect("cms");
+    let check = cades::verify_detached(&cms, message);
+    assert!(check.valid, "mock ECDSA CMS must verify");
+    assert!(
+        check
+            .signer
+            .as_deref()
+            .is_some_and(|s| s.contains("OpenPDF ECDSA")),
+        "signer: {:?}",
+        check.signer
+    );
+}
+
 #[cfg_attr(not(any(windows, target_os = "macos")), allow(dead_code))]
 fn native_test_cert<'a>(
     certs: &'a [openpdf_core::CertificateInfo],
 ) -> Option<&'a openpdf_core::CertificateInfo> {
-    certs
-        .iter()
-        .find(|c| c.subject.contains("OpenPDF Test Signer"))
+    certs.iter().find(|c| {
+        c.unusable.is_none() && c.subject.contains("OpenPDF Test Signer")
+    })
 }
 
 #[cfg_attr(not(any(windows, target_os = "macos")), allow(dead_code))]
