@@ -1,0 +1,16 @@
+[package]
+name = "openpdf-cli"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "Command-line interface for openPDF"
+
+[[bin]]
+name = "openpdf"
+path = "src/main.rs"
+
+[dependencies]
+openpdf-core = { path = "../openpdf-core" }
+anyhow = "1.0"
+clap = { version = "4.5", features = ["derive"] }
+image = { version = "0.25", default-features = false, features = ["png"] }
