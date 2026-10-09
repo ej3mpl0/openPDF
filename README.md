@@ -3,12 +3,10 @@
 Native PDF tools for Linux, written in Rust. Rendering uses PDFium
 (`pdfium-render`), loaded at runtime. MuPDF is not used.
 
-On `main`, **openpdf-core**, the `openpdf` CLI, and **openpdf-sign**
-(PKCS#11 PAdES) are available.
-
-**Binaries:** `openpdf` is the CLI. It does not link GTK and works headless.
-The GUI will be a separate `openpdf-gtk` binary (still in development,
-[PR #1](https://github.com/ej3mpl0/openPDF/pull/1)).
+**Binaries:** `openpdf` is the headless CLI (crate `openpdf-cli`, no GTK).
+`openpdf-gtk` is the Linux GUI (package `openpdf-app`, GTK4/libadwaita).
+The UI library crate is `openpdf-gtk`; it never depends on `openpdf-sign`.
+The app binary constructs `Box<dyn Signer>` from `openpdf-sign`.
 
 > **Author of `openpdf-core`:** Jian Yang.
 > The document model, tile engine, structure operations (rotate, delete, move,
@@ -32,10 +30,11 @@ cargo build -p openpdf-cli --release
 
 The binary is written to `target/release/openpdf`.
 
-`info`, `merge`, `split`, and the organize / optimize / protect / overlay
-commands use `lopdf` and do not need PDFium. `render`, `text`, and
-`to-images` do: `libpdfium.so` must be locatable (see
-[Loading PDFium](#loading-pdfium)).
+`info`, `merge`, `split`, organize / optimize / protect / overlay, `ocr`
+(after Tesseract is found), `redact`, and `sanitize` use `lopdf`. `render`,
+`text`, `to-images`, `ocr`, and `compare` also need `libpdfium.so` (see
+[Loading PDFium](#loading-pdfium)). The GUI needs GTK4, libadwaita, and
+PDFium.
 
 Tests:
 
@@ -46,13 +45,15 @@ cargo test --workspace
 ## CLI
 
 `openpdf` is a headless CLI (no GTK). Page numbers are **1-based**. There is
-no `sign` or `verify` subcommand; signing is a library API (`openpdf-sign`).
+no `sign` or `verify` subcommand; signing is a library API and the GTK
+certificate picker.
 
 Every operation that **edits or rewrites** a document refuses a signed PDF
 (`Error::Signed`). That includes insert, replace, crop, optimize, protect,
-unprotect, sanitize, watermark, header, footer, and number. `extract` from a
-signed file writes a new unsigned PDF. `to-images` only renders. `save` is a
-full rewrite, so these tools write `-o` through `Document::save`.
+unprotect, sanitize, watermark, header, footer, number, `ocr`, and `redact`.
+`extract` from a signed file writes a new unsigned PDF. `to-images` and
+`compare` only read. `save` is a full rewrite, so these tools write `-o`
+through `Document::save`.
 
 ### `openpdf info`
 
@@ -246,6 +247,79 @@ Render pages to PNG (`--zoom` default 1.0). `-o` is a directory
 openpdf to-images document.pdf --zoom 1.0 -o pages/
 ```
 
+### `openpdf ocr`
+
+Add an invisible searchable text layer with Tesseract. Tesseract is
+**optional** and never linked: if it is missing, every other command still
+works. Lookup order (`resolve_engine`):
+
+1. `OPENPDF_TESSERACT` (binary or `libtesseract` path).
+2. Executable `tesseract` (`/usr/bin`, `/usr/local/bin`, `/app/bin`, then
+   `PATH`).
+3. `libtesseract` via dlopen (`libtesseract.so.5` / `.so.4` / `.so`),
+   including under `/app/extensions` (Flatpak), `/usr/lib`, and
+   `/usr/lib/x86_64-linux-gnu`.
+
+`--lang` defaults to `eng`. `--list-langs` prints installed languages and
+exits. `--pages` is optional. Needs PDFium to rasterize.
+
+```bash
+openpdf ocr document.pdf --lang eng -o searchable.pdf
+openpdf ocr --list-langs
+```
+
+### `openpdf redact`
+
+True redaction: permanently remove content in one or more boxes
+(`--box page,llx,lly,urx,ury`, page 1-based, repeatable) and **rewrite**
+the file. Irreversible. Refuses signed documents. Drops text in the box
+(including an OCR text layer), punches matching image pixels, removes
+overlapping annotations, page thumbnails, and metadata that still holds
+the removed strings.
+
+```bash
+openpdf redact document.pdf --box 1,0,0,612,792 -o redacted.pdf
+```
+
+### `openpdf compare`
+
+Compare two PDFs (PDFium text + per-page pixels). `--zoom` defaults to
+1.0. Read-only; signed files are allowed. Prints `identical` or `differ`.
+
+```bash
+openpdf compare a.pdf b.pdf
+```
+
+## Linux GUI (`openpdf-gtk`)
+
+Native GTK4 + libadwaita reader (GNOME HIG). Binary name `openpdf-gtk`
+from crate `openpdf-app`. The `openpdf-gtk` crate is the UI library and
+**must not** depend on `openpdf-sign`.
+
+Features: home (recent files / open), tabs, tiled viewer with thumbnail
+sidebar, bookmarks, find, zoom / page layout, rotate / delete / undo,
+preferences (language, theme, tile cache), about. Certificate picker
+(`app.sign` / Sign with certificate): lists `Signer::list_certificates()`,
+disables non-signing certs, never stores a PIN — `GtkPinProvider` asks
+the token via `SecretPin`. A signed document is **read-only**: banner
+text *Signed document — read-only. Rotate, delete and reorder are
+disabled.* Core refuses those ops.
+
+```bash
+cargo build -p openpdf-app --release
+./target/release/openpdf-gtk
+./target/release/openpdf-gtk document.pdf
+```
+
+`--measure [PAGES]` opens the real libadwaita window (needs a display or
+`xvfb-run`), loads a multi-page PDF, waits for visible tiles and
+thumbnails, prints startup time and peak RSS, and exits non-zero if over
+the limits (8 s / 250 MiB; default 32 pages):
+
+```bash
+xvfb-run -a ./target/release/openpdf-gtk --measure 32
+```
+
 ## Loading PDFium
 
 `libpdfium` is resolved in this order (`bind_pdfium` / `Engine::new`):
@@ -418,8 +492,12 @@ Linux, Windows, and macOS.
 
 ## Status
 
-- The **GTK4 UI** is in development ([PR #1](https://github.com/ej3mpl0/openPDF/pull/1)).
-- **Digital signing is available** in `openpdf-sign` (PAdES / PKCS#11). There
-  is no CLI `sign` / `verify` command and no GTK signing UI yet.
-- **Core and CLI translations** (English and Spanish) are done. **GUI
-  translations** are still in progress.
+- **GTK4 UI** (`openpdf-gtk`) is implemented on [PR #1](https://github.com/ej3mpl0/openPDF/pull/1)
+  (this docs PR stacks it; not on `main` until #1 merges).
+- **OCR, redaction, and compare** are implemented on
+  [PR #8](https://github.com/ej3mpl0/openPDF/pull/8) (this docs PR stacks
+  that branch).
+- **Digital signing** is available in `openpdf-sign` (PAdES / PKCS#11).
+  The GTK picker is on PR #1. There is no CLI `sign` / `verify`.
+- **Core and CLI translations** (English and Spanish) are done. GUI
+  catalogs ship with the GTK crate.

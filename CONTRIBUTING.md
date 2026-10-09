@@ -8,9 +8,10 @@ available.
 
 ```text
 crates/openpdf-core   document model, tiles, structure ops, i18n, Signer, PinProvider
-crates/openpdf-cli    headless `openpdf` CLI (no GTK; GUI will be `openpdf-gtk`)
+crates/openpdf-cli    headless `openpdf` CLI (no GTK)
 crates/openpdf-sign   PKCS#11 / CMS PAdES-B-B backend (DNIe, FNMT, SoftHSM)
-crates/openpdf-gtk    workspace member only (not available)
+crates/openpdf-gtk    GTK4/libadwaita UI library (never depends on sign)
+crates/openpdf-app    `openpdf-gtk` binary (wires UI + Pkcs11Signer)
 po/                   shared gettext catalogs
 corpus/               fixture PDFs for tests
 ```
