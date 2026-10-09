@@ -1,6 +1,11 @@
 crates/openpdf-core/src/error.rs
 crates/openpdf-core/src/i18n.rs
 crates/openpdf-core/src/signer.rs
+crates/openpdf-core/src/document.rs
+crates/openpdf-core/src/outline.rs
+crates/openpdf-core/src/ops.rs
+crates/openpdf-core/src/save.rs
+crates/openpdf-core/src/render/engine.rs
 crates/openpdf-cli/src/main.rs
 crates/openpdf-sign/src/token.rs
 crates/openpdf-sign/src/pades.rs
