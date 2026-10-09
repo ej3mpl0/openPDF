@@ -6,8 +6,11 @@
 //! `/app/extensions`). It is never linked. Windows.Media.Ocr and macOS Vision
 //! implement the same trait from platform crates later.
 
+#[cfg(target_os = "linux")]
 use std::ffi::{c_char, c_void, CStr, CString};
+#[cfg(target_os = "linux")]
 use std::path::{Path, PathBuf};
+#[cfg(target_os = "linux")]
 use std::process::Command;
 
 use lopdf::content::{Content, Operation};
@@ -46,13 +49,70 @@ impl OcrCapability {
 }
 
 /// One recognized word. Box is in raster pixels, origin top-left.
+/// Owned fields only so a future UniFFI `openpdf-ffi` callback can implement this.
 #[derive(Clone, Debug, PartialEq)]
 pub struct OcrWord {
     pub text: String,
-    pub left: f32,
-    pub top: f32,
-    pub width: f32,
-    pub height: f32,
+    pub x: f32,
+    pub y: f32,
+    pub w: f32,
+    pub h: f32,
+    pub confidence: f32,
+}
+
+/// Owned page raster for [`OcrEngine::recognize`] (UniFFI-safe: no borrows).
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct OcrImage {
+    pub width: u32,
+    pub height: u32,
+    pub stride: u32,
+    pub rgba: Vec<u8>,
+}
+
+impl OcrImage {
+    pub fn from_raster(raster: Raster) -> Self {
+        Self {
+            width: raster.width,
+            height: raster.height,
+            stride: raster.width.saturating_mul(4),
+            rgba: raster.rgba,
+        }
+    }
+}
+
+/// Simple OCR failure. Mapped to [`Error`] inside [`ocr`]; keep this enum
+/// free of `io::Error` / lifetimes so Swift and C# can implement the trait.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum OcrError {
+    Unavailable {
+        hint: String,
+    },
+    LanguageMissing {
+        language: String,
+        installed: String,
+        hint: String,
+    },
+    Failed {
+        message: String,
+    },
+}
+
+impl From<OcrError> for Error {
+    fn from(e: OcrError) -> Self {
+        match e {
+            OcrError::Unavailable { hint } => Error::invalid(InvalidKind::OcrUnavailable { hint }),
+            OcrError::LanguageMissing {
+                language,
+                installed,
+                hint,
+            } => Error::invalid(InvalidKind::OcrLanguageMissing {
+                language,
+                installed,
+                hint,
+            }),
+            OcrError::Failed { message } => Error::structure(message),
+        }
+    }
 }
 
 /// OCR settings. `language` is an engine lang code (`eng`, `spa`, …).
@@ -81,7 +141,11 @@ impl Default for OcrOptions {
 pub trait OcrEngine: Send + Sync {
     fn capability(&self) -> OcrCapability;
     fn languages(&self) -> Vec<String>;
-    fn recognize(&self, raster: &Raster, language: &str) -> Result<Vec<OcrWord>>;
+    fn recognize(
+        &self,
+        image: OcrImage,
+        language: String,
+    ) -> std::result::Result<Vec<OcrWord>, OcrError>;
 }
 
 /// Stub used when no engine is configured (Windows / macOS until a platform
@@ -106,24 +170,31 @@ impl OcrEngine for UnavailableOcr {
         Vec::new()
     }
 
-    fn recognize(&self, _raster: &Raster, _language: &str) -> Result<Vec<OcrWord>> {
-        Err(Error::invalid(InvalidKind::OcrUnavailable {
+    fn recognize(
+        &self,
+        _image: OcrImage,
+        _language: String,
+    ) -> std::result::Result<Vec<OcrWord>, OcrError> {
+        Err(OcrError::Unavailable {
             hint: self.hint.clone(),
-        }))
+        })
     }
 }
 
 /// Tesseract via `tesseract` / `libtesseract` (never linked). Linux default.
+#[cfg(target_os = "linux")]
 pub struct TesseractOcr {
     inner: TessEngine,
 }
 
+#[cfg(target_os = "linux")]
 impl TesseractOcr {
     pub fn probe() -> Option<Self> {
         resolve_engine().map(|inner| Self { inner })
     }
 }
 
+#[cfg(target_os = "linux")]
 impl OcrEngine for TesseractOcr {
     fn capability(&self) -> OcrCapability {
         OcrCapability {
@@ -137,16 +208,23 @@ impl OcrEngine for TesseractOcr {
         self.inner.list_languages()
     }
 
-    fn recognize(&self, raster: &Raster, language: &str) -> Result<Vec<OcrWord>> {
-        self.inner.recognize(raster, language)
+    fn recognize(
+        &self,
+        image: OcrImage,
+        language: String,
+    ) -> std::result::Result<Vec<OcrWord>, OcrError> {
+        self.inner.recognize(&image, &language)
     }
 }
 
-/// Linux: Tesseract if present. Other OS: Tesseract only when found (CLI),
-/// otherwise [`UnavailableOcr`] so a platform crate can supply the engine.
+/// Linux default: Tesseract if present. Other OS: [`UnavailableOcr`] until a
+/// platform crate supplies Windows.Media.Ocr or Vision.
 pub fn default_ocr_engine() -> Box<dyn OcrEngine> {
-    if let Some(t) = TesseractOcr::probe() {
-        return Box::new(t);
+    #[cfg(target_os = "linux")]
+    {
+        if let Some(t) = TesseractOcr::probe() {
+            return Box::new(t);
+        }
     }
     Box::new(UnavailableOcr::new(ocr_install_hint()))
 }
@@ -207,11 +285,15 @@ pub fn ocr(
         ensure_font(&mut inner, page_id, font_id)?;
         let (pw, ph) = page_size(&inner, page_id).unwrap_or((612.0, 792.0));
         let raster = render.render_page(doc.id(), i, zoom)?;
-        let words = ocr_engine.recognize(&raster, &opts.language)?;
+        let width = raster.width;
+        let height = raster.height;
+        let words = ocr_engine
+            .recognize(OcrImage::from_raster(raster), opts.language.clone())
+            .map_err(Error::from)?;
         if words.is_empty() {
             continue;
         }
-        let ops = invisible_text_ops(&words, raster.width, raster.height, pw, ph);
+        let ops = invisible_text_ops(&words, width, height, pw, ph);
         let bytes = Content { operations: ops }
             .encode()
             .map_err(|e| Error::structure(e.to_string()))?;
@@ -225,11 +307,9 @@ pub fn ocr(
 /// How to install or supply OCR on this OS (`InvalidKind::OcrUnavailable`).
 pub fn ocr_install_hint() -> String {
     if cfg!(windows) {
-        "install Tesseract (winget install UB-Mannheim.TesseractOCR), set OPENPDF_TESSERACT, or pass a Windows.Media.Ocr OcrEngine"
-            .into()
+        "pass a Windows.Media.Ocr OcrEngine from the platform crate".into()
     } else if cfg!(target_os = "macos") {
-        "install Tesseract (brew install tesseract), set OPENPDF_TESSERACT, or pass a Vision OcrEngine"
-            .into()
+        "pass a Vision OcrEngine from the platform crate".into()
     } else {
         "install tesseract-ocr or set OPENPDF_TESSERACT to the binary or libtesseract".into()
     }
@@ -251,12 +331,14 @@ fn language_install_hint(lang: &str) -> String {
     }
 }
 
-fn ocr_unavailable() -> Error {
-    Error::invalid(InvalidKind::OcrUnavailable {
+#[cfg(target_os = "linux")]
+fn ocr_unavailable() -> OcrError {
+    OcrError::Unavailable {
         hint: ocr_install_hint(),
-    })
+    }
 }
 
+#[cfg(target_os = "linux")]
 enum TessEngine {
     Binary(PathBuf),
     Library {
@@ -265,6 +347,7 @@ enum TessEngine {
     },
 }
 
+#[cfg(target_os = "linux")]
 impl TessEngine {
     fn backend(&self) -> OcrBackend {
         match self {
@@ -283,16 +366,21 @@ impl TessEngine {
         }
     }
 
-    fn recognize(&self, raster: &Raster, lang: &str) -> Result<Vec<OcrWord>> {
+    fn recognize(
+        &self,
+        image: &OcrImage,
+        lang: &str,
+    ) -> std::result::Result<Vec<OcrWord>, OcrError> {
         match self {
-            TessEngine::Binary(bin) => recognize_binary(bin, raster, lang),
+            TessEngine::Binary(bin) => recognize_binary(bin, image, lang),
             TessEngine::Library { lib, tessdata } => {
-                recognize_library(lib, tessdata.as_deref(), raster, lang)
+                recognize_library(lib, tessdata.as_deref(), image, lang)
             }
         }
     }
 }
 
+#[cfg(target_os = "linux")]
 fn tesseract_bin_name() -> &'static str {
     if cfg!(windows) {
         "tesseract.exe"
@@ -301,6 +389,7 @@ fn tesseract_bin_name() -> &'static str {
     }
 }
 
+#[cfg(target_os = "linux")]
 fn tesseract_lib_names() -> &'static [&'static str] {
     if cfg!(windows) {
         &[
@@ -320,6 +409,7 @@ fn tesseract_lib_names() -> &'static [&'static str] {
     }
 }
 
+#[cfg(target_os = "linux")]
 fn resolve_engine() -> Option<TessEngine> {
     if let Ok(raw) = std::env::var("OPENPDF_TESSERACT") {
         if let Some(found) = probe_path(Path::new(&raw)) {
@@ -351,6 +441,7 @@ fn resolve_engine() -> Option<TessEngine> {
     None
 }
 
+#[cfg(target_os = "linux")]
 fn tesseract_bin_candidates() -> Vec<PathBuf> {
     let mut out = Vec::new();
     #[cfg(target_os = "linux")]
@@ -392,6 +483,7 @@ fn tesseract_bin_candidates() -> Vec<PathBuf> {
     out
 }
 
+#[cfg(target_os = "linux")]
 fn tesseract_lib_roots() -> Vec<PathBuf> {
     let mut out = Vec::new();
     #[cfg(target_os = "linux")]
@@ -415,6 +507,7 @@ fn tesseract_lib_roots() -> Vec<PathBuf> {
     out
 }
 
+#[cfg(target_os = "linux")]
 fn probe_path(path: &Path) -> Option<TessEngine> {
     if path.is_file() {
         let name = path.file_name().and_then(|n| n.to_str()).unwrap_or("");
@@ -461,6 +554,7 @@ fn probe_path(path: &Path) -> Option<TessEngine> {
     None
 }
 
+#[cfg(target_os = "linux")]
 fn is_executable(path: &Path) -> bool {
     path.is_file()
         && Command::new(path)
@@ -470,6 +564,7 @@ fn is_executable(path: &Path) -> bool {
             .unwrap_or(false)
 }
 
+#[cfg(target_os = "linux")]
 fn which(name: &str) -> Option<PathBuf> {
     let path = std::env::var_os("PATH")?;
     for dir in std::env::split_paths(&path) {
@@ -481,6 +576,7 @@ fn which(name: &str) -> Option<PathBuf> {
     None
 }
 
+#[cfg(target_os = "linux")]
 fn first_tessdata() -> Option<PathBuf> {
     if let Ok(p) = std::env::var("TESSDATA_PREFIX") {
         let p = PathBuf::from(p);
@@ -495,6 +591,7 @@ fn first_tessdata() -> Option<PathBuf> {
     scan_default_tessdata_dir()
 }
 
+#[cfg(target_os = "linux")]
 fn scan_default_tessdata_dir() -> Option<PathBuf> {
     let mut dirs = Vec::new();
     #[cfg(target_os = "linux")]
@@ -522,12 +619,14 @@ fn scan_default_tessdata_dir() -> Option<PathBuf> {
     dirs.into_iter().find(|d| d.is_dir())
 }
 
+#[cfg(target_os = "linux")]
 fn scan_default_tessdata() -> Vec<String> {
     scan_default_tessdata_dir()
         .map(|d| scan_tessdata(&d))
         .unwrap_or_default()
 }
 
+#[cfg(target_os = "linux")]
 fn scan_tessdata(dir: &Path) -> Vec<String> {
     let mut langs = Vec::new();
     let Ok(rd) = std::fs::read_dir(dir) else {
@@ -544,6 +643,7 @@ fn scan_tessdata(dir: &Path) -> Vec<String> {
     langs
 }
 
+#[cfg(target_os = "linux")]
 fn list_langs_binary(bin: &Path) -> Vec<String> {
     let out = Command::new(bin).arg("--list-langs").output().ok();
     let Some(out) = out else {
@@ -565,7 +665,29 @@ fn list_langs_binary(bin: &Path) -> Vec<String> {
     langs
 }
 
-fn recognize_binary(bin: &Path, raster: &Raster, lang: &str) -> Result<Vec<OcrWord>> {
+#[cfg(target_os = "linux")]
+fn packed_rgba(image: &OcrImage) -> Vec<u8> {
+    let row = (image.width as usize).saturating_mul(4);
+    let stride = image.stride.max(image.width.saturating_mul(4)) as usize;
+    if stride == row {
+        return image.rgba.clone();
+    }
+    let mut out = Vec::with_capacity(row.saturating_mul(image.height as usize));
+    for y in 0..image.height as usize {
+        let start = y.saturating_mul(stride);
+        if start + row <= image.rgba.len() {
+            out.extend_from_slice(&image.rgba[start..start + row]);
+        }
+    }
+    out
+}
+
+#[cfg(target_os = "linux")]
+fn recognize_binary(
+    bin: &Path,
+    image: &OcrImage,
+    lang: &str,
+) -> std::result::Result<Vec<OcrWord>, OcrError> {
     let dir = std::env::temp_dir().join(format!(
         "openpdf-ocr-{}-{}",
         std::process::id(),
@@ -574,16 +696,21 @@ fn recognize_binary(bin: &Path, raster: &Raster, lang: &str) -> Result<Vec<OcrWo
             .unwrap_or_default()
             .as_nanos()
     ));
-    std::fs::create_dir_all(&dir)?;
+    std::fs::create_dir_all(&dir).map_err(|e| OcrError::Failed {
+        message: e.to_string(),
+    })?;
     let png = dir.join("page.png");
     let img = image::ImageBuffer::<image::Rgba<u8>, _>::from_raw(
-        raster.width,
-        raster.height,
-        raster.rgba.clone(),
+        image.width,
+        image.height,
+        packed_rgba(image),
     )
-    .ok_or_else(|| Error::structure("RGBA buffer size"))?;
-    img.save(&png)
-        .map_err(|e| Error::structure(e.to_string()))?;
+    .ok_or_else(|| OcrError::Failed {
+        message: "RGBA buffer size".into(),
+    })?;
+    img.save(&png).map_err(|e| OcrError::Failed {
+        message: e.to_string(),
+    })?;
     let out = Command::new(bin)
         .arg(&png)
         .arg("stdout")
@@ -596,24 +723,27 @@ fn recognize_binary(bin: &Path, raster: &Raster, lang: &str) -> Result<Vec<OcrWo
     if !out.status.success() {
         let err = String::from_utf8_lossy(&out.stderr);
         if err.contains("Error opening data file") || err.contains("Failed loading language") {
-            return Err(Error::invalid(InvalidKind::OcrLanguageMissing {
+            return Err(OcrError::LanguageMissing {
                 language: lang.to_string(),
                 installed: list_langs_binary(bin).join(", "),
                 hint: language_install_hint(lang),
-            }));
+            });
         }
-        return Err(Error::structure(err.into_owned()));
+        return Err(OcrError::Failed {
+            message: err.into_owned(),
+        });
     }
     Ok(parse_tsv(&String::from_utf8_lossy(&out.stdout)))
 }
 
+#[cfg(target_os = "linux")]
 fn recognize_library(
     lib_path: &Path,
     tessdata: Option<&Path>,
-    raster: &Raster,
+    image: &OcrImage,
     lang: &str,
-) -> Result<Vec<OcrWord>> {
-    let rgb = rgba_to_rgb(raster);
+) -> std::result::Result<Vec<OcrWord>, OcrError> {
+    let rgb = rgba_to_rgb(image);
     let lib = unsafe { libloading::Library::new(lib_path) }.map_err(|_| ocr_unavailable())?;
     unsafe {
         let create: libloading::Symbol<unsafe extern "C" fn() -> *mut c_void> = lib
@@ -646,7 +776,9 @@ fn recognize_library(
         if api.is_null() {
             return Err(ocr_unavailable());
         }
-        let lang_c = CString::new(lang).map_err(|e| Error::structure(e.to_string()))?;
+        let lang_c = CString::new(lang).map_err(|e| OcrError::Failed {
+            message: e.to_string(),
+        })?;
         let data_c = tessdata.and_then(|p| CString::new(p.to_string_lossy().as_bytes()).ok());
         let datapath = data_c
             .as_ref()
@@ -656,19 +788,19 @@ fn recognize_library(
         if rc != 0 {
             end(api);
             delete(api);
-            return Err(Error::invalid(InvalidKind::OcrLanguageMissing {
+            return Err(OcrError::LanguageMissing {
                 language: lang.to_string(),
                 installed: tessdata.map(scan_tessdata).unwrap_or_default().join(", "),
                 hint: language_install_hint(lang),
-            }));
+            });
         }
         set_image(
             api,
             rgb.as_ptr(),
-            raster.width as i32,
-            raster.height as i32,
+            image.width as i32,
+            image.height as i32,
             3,
-            (raster.width * 3) as i32,
+            (image.width * 3) as i32,
         );
         let ptr = get_tsv(api, 0);
         let words = if ptr.is_null() {
@@ -684,14 +816,17 @@ fn recognize_library(
     }
 }
 
-fn rgba_to_rgb(raster: &Raster) -> Vec<u8> {
-    let mut rgb = Vec::with_capacity((raster.width * raster.height * 3) as usize);
-    for px in raster.rgba.as_chunks::<4>().0 {
+#[cfg(target_os = "linux")]
+fn rgba_to_rgb(image: &OcrImage) -> Vec<u8> {
+    let packed = packed_rgba(image);
+    let mut rgb = Vec::with_capacity((image.width * image.height * 3) as usize);
+    for px in packed.as_chunks::<4>().0 {
         rgb.extend_from_slice(&px[..3]);
     }
     rgb
 }
 
+#[cfg(any(test, target_os = "linux"))]
 fn parse_tsv(tsv: &str) -> Vec<OcrWord> {
     let mut words = Vec::new();
     for (i, line) in tsv.lines().enumerate() {
@@ -723,10 +858,11 @@ fn parse_tsv(tsv: &str) -> Vec<OcrWord> {
         }
         words.push(OcrWord {
             text: text.to_string(),
-            left,
-            top,
-            width,
-            height,
+            x: left,
+            y: top,
+            w: width,
+            h: height,
+            confidence: conf,
         });
     }
     words
@@ -741,10 +877,10 @@ fn invisible_text_ops(words: &[OcrWord], iw: u32, ih: u32, pw: f32, ph: f32) -> 
         Operation::new("Tr", vec![3.into()]),
     ];
     for w in words {
-        let x = w.left * sx;
-        let y = ph - (w.top + w.height) * sy;
-        let size = (w.height * sy).clamp(4.0, 72.0);
-        let box_w = w.width * sx;
+        let x = w.x * sx;
+        let y = ph - (w.y + w.h) * sy;
+        let size = (w.h * sy).clamp(4.0, 72.0);
+        let box_w = w.w * sx;
         let bytes = winansi(&w.text);
         if bytes.is_empty() {
             continue;
@@ -891,13 +1027,18 @@ mod tests {
             vec!["eng".into()]
         }
 
-        fn recognize(&self, _raster: &Raster, _language: &str) -> Result<Vec<OcrWord>> {
+        fn recognize(
+            &self,
+            _image: OcrImage,
+            _language: String,
+        ) -> std::result::Result<Vec<OcrWord>, OcrError> {
             Ok(vec![OcrWord {
                 text: "Hello".into(),
-                left: 10.0,
-                top: 20.0,
-                width: 40.0,
-                height: 12.0,
+                x: 10.0,
+                y: 20.0,
+                w: 40.0,
+                h: 12.0,
+                confidence: 90.0,
             }])
         }
     }
@@ -933,16 +1074,17 @@ mod tests {
         assert!(!eng.capability().available);
         let err = eng
             .recognize(
-                &Raster {
+                OcrImage {
                     width: 1,
                     height: 1,
+                    stride: 4,
                     rgba: vec![0, 0, 0, 255],
                 },
-                "eng",
+                "eng".into(),
             )
             .unwrap_err();
         match err {
-            Error::Invalid(InvalidKind::OcrUnavailable { hint }) => {
+            OcrError::Unavailable { hint } => {
                 assert!(!hint.is_empty());
             }
             other => panic!("unexpected {other:?}"),
@@ -1019,18 +1161,19 @@ mod tests {
         let words = parse_tsv(tsv);
         assert_eq!(words.len(), 1);
         assert_eq!(words[0].text, "Hello");
-        assert_eq!(words[0].width, 40.0);
-        assert_eq!(words[0].height, 12.0);
+        assert_eq!(words[0].w, 40.0);
+        assert_eq!(words[0].h, 12.0);
     }
 
     #[test]
     fn invisible_text_scales_horizontally_to_word_width() {
         let words = [OcrWord {
             text: "Hello".into(),
-            left: 10.0,
-            top: 20.0,
-            width: 40.0,
-            height: 12.0,
+            x: 10.0,
+            y: 20.0,
+            w: 40.0,
+            h: 12.0,
+            confidence: 90.0,
         }];
         let ops = invisible_text_ops(&words, 100, 100, 100.0, 100.0);
         let tz = ops

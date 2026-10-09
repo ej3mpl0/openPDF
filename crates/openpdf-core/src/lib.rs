@@ -43,9 +43,11 @@ pub use error::{Error, InvalidKind, Result, SignedOp};
 pub use i18n::{
     available_locales, current_locale, detect_locale, init as init_i18n, set_locale, tr, tr_args,
 };
+#[cfg(target_os = "linux")]
+pub use ocr::TesseractOcr;
 pub use ocr::{
     default_ocr_engine, ocr, ocr_capability, ocr_install_hint, OcrBackend, OcrCapability,
-    OcrEngine, OcrOptions, OcrWord, TesseractOcr, UnavailableOcr,
+    OcrEngine, OcrError, OcrImage, OcrOptions, OcrWord, UnavailableOcr,
 };
 pub use ops::{merge, merge_paths, parse_page_ranges, split, split_all, PageRange};
 pub use optimize::{optimize, OptimizeOptions};
