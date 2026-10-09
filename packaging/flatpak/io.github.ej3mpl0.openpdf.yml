@@ -45,7 +45,6 @@ modules:
   - name: pcsc-lite
     buildsystem: meson
     config-opts:
-      - -Dlibdir=/app/lib
       - -Dlibsystemd=false
       - -Dlibudev=false
       - -Dlibusb=false
@@ -77,7 +76,6 @@ modules:
       - --libdir=/app/lib
       - --sysconfdir=/app/etc
       - --with-completiondir=/app/share/bash-completion/completions
-      - --with-pcsc-provider=/app/lib/libpcsclite.so
       - --enable-p11_system_config_modules=/app/share/p11-kit/modules
     post-install:
       - |
