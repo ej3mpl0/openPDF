@@ -399,6 +399,19 @@ let signer: Box<dyn openpdf_core::Signer> = Box::new(
 - **openpdf-gtk must never depend on openpdf-sign** (enforced by
   `gtk_manifest_does_not_depend_on_sign`).
 
+### Roadmap (planned, not available)
+
+These items are **not shipped**. Current priority is the Linux build.
+
+- One native UI per platform in this repo: Linux GTK first, then Windows
+  and macOS. All share `openpdf-core`, the `openpdf` CLI, and
+  `openpdf-sign`.
+- Core and signing stay platform-neutral. Linux-only code is behind
+  `cfg`.
+- Later `Signer` backends besides PKCS#11: Windows certificate store and
+  macOS Keychain.
+- Each GitHub release ships one package per platform.
+
 ## Status
 
 - The **GTK4 UI** is in development ([PR #1](https://github.com/ej3mpl0/openPDF/pull/1)).
