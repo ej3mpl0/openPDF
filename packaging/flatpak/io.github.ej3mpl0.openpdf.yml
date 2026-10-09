@@ -16,6 +16,10 @@ sdk-extensions:
   - org.freedesktop.Sdk.Extension.rust-stable
 command: openpdf-gtk
 
+build-options:
+  strip: true
+  no-debuginfo: true
+
 finish-args:
   - --share=ipc
   - --socket=wayland
@@ -27,6 +31,7 @@ finish-args:
 cleanup:
   - /include
   - /lib/pkgconfig
+  - /lib/debug
   - /share/man
   - /share/doc
   - /share/gtk-doc
@@ -61,6 +66,9 @@ modules:
     config-opts:
       - --disable-static
       - --disable-doc
+      - --disable-man
+      - --disable-tests
+      - --disable-notify
       - --disable-strict
       - --sysconfdir=/app/etc
       - --with-completiondir=/app/share/bash-completion/completions
@@ -137,6 +145,7 @@ modules:
         fi
         install -Dm0644 "$icon_src" "${FLATPAK_DEST}/share/icons/hicolor/scalable/apps/${ICON_NAME}.svg"
         install -Dm0644 "$icon_src" "${FLATPAK_DEST}/share/icons/hicolor/scalable/apps/${APP_ID}.svg"
+        rm -rf target cargo
     sources:
       - type: dir
         path: ../..
