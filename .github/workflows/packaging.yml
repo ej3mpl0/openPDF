@@ -49,7 +49,6 @@ jobs:
         with:
           bundle: io.github.ej3mpl0.openpdf.flatpak
           manifest-path: packaging/flatpak/io.github.ej3mpl0.openpdf.yml
-          install-deps-from: flathub
           cache-key: flatpak-openpdf-${{ github.sha }}
           upload-artifact: false
 

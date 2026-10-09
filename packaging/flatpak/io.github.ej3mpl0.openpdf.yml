@@ -62,6 +62,8 @@ modules:
       - --disable-doc
       - --disable-strict
       - --sysconfdir=/app/etc
+      - --with-completiondir=/app/share/bash-completion/completions
+      - --enable-p11_system_config_modules=/app/share/p11-kit/modules
     cleanup:
       - /bin
       - /sbin
