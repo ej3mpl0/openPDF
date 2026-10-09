@@ -2,20 +2,42 @@ use std::collections::BTreeMap;
 use std::sync::Arc;
 
 use lopdf::encryption::crypt_filters::{Aes256CryptFilter, CryptFilter};
-use lopdf::{EncryptionState, EncryptionVersion, Object, Permissions};
+use lopdf::{EncryptionState, EncryptionVersion, Object, Permissions, StringFormat};
+use zeroize::Zeroizing;
 
 use crate::document::Document;
 use crate::error::{Error, InvalidKind, Result, SignedOp};
 
-fn random_aes_key() -> Result<[u8; 32]> {
-    let mut key = [0u8; 32];
-    std::fs::File::open("/dev/urandom")
-        .and_then(|mut f| {
-            use std::io::Read;
-            f.read_exact(&mut key)
-        })
-        .map_err(Error::from)?;
+fn fill_random(buf: &mut [u8]) -> Result<()> {
+    getrandom::fill(buf).map_err(|e| Error::structure(e.to_string()))
+}
+
+fn random_aes_key() -> Result<Zeroizing<[u8; 32]>> {
+    let mut key = Zeroizing::new([0u8; 32]);
+    fill_random(key.as_mut())?;
     Ok(key)
+}
+
+fn random_file_id() -> Result<Zeroizing<[u8; 16]>> {
+    let mut id = Zeroizing::new([0u8; 16]);
+    fill_random(id.as_mut())?;
+    Ok(id)
+}
+
+fn ensure_file_ids(doc: &mut lopdf::Document) -> Result<()> {
+    if doc.trailer.get(b"ID").is_ok() {
+        return Ok(());
+    }
+    let first = random_file_id()?;
+    let second = random_file_id()?;
+    doc.trailer.set(
+        "ID",
+        vec![
+            Object::String(first.to_vec(), StringFormat::Hexadecimal),
+            Object::String(second.to_vec(), StringFormat::Hexadecimal),
+        ],
+    );
+    Ok(())
 }
 
 /// User-facing permission flags (AES-256 / revision 6).
@@ -97,23 +119,26 @@ impl PdfPermissions {
 }
 
 /// AES-256 (V5 / R6) passwords and permissions.
+///
+/// Passwords live in [`Zeroizing`] so they are wiped when this struct is dropped
+/// (same contract as `SecretPin` on the signing side).
 #[derive(Clone, Debug)]
 pub struct ProtectOptions {
-    pub user_password: String,
-    pub owner_password: String,
+    pub user_password: Zeroizing<String>,
+    pub owner_password: Zeroizing<String>,
     pub permissions: PdfPermissions,
     pub encrypt_metadata: bool,
 }
 
 impl ProtectOptions {
     pub fn new(user: impl Into<String>, owner: impl Into<String>) -> Result<Self> {
-        let user_password = user.into();
-        let mut owner_password = owner.into();
+        let user_password = Zeroizing::new(user.into());
+        let mut owner_password = Zeroizing::new(owner.into());
         if user_password.is_empty() && owner_password.is_empty() {
             return Err(Error::invalid(InvalidKind::PasswordRequired));
         }
         if owner_password.is_empty() {
-            owner_password.clone_from(&user_password);
+            *owner_password = (*user_password).clone();
         }
         Ok(Self {
             user_password,
@@ -133,12 +158,13 @@ pub fn protect(doc: &Document, opts: &ProtectOptions) -> Result<Document> {
         return Err(Error::invalid(InvalidKind::AlreadyEncrypted));
     }
     let mut inner = doc.assembled_lopdf()?;
+    ensure_file_ids(&mut inner)?;
     let file_key = random_aes_key()?;
     let crypt_filter: Arc<dyn CryptFilter> = Arc::new(Aes256CryptFilter);
     let version = EncryptionVersion::V5 {
         encrypt_metadata: opts.encrypt_metadata,
         crypt_filters: BTreeMap::from([(b"StdCF".to_vec(), crypt_filter)]),
-        file_encryption_key: &file_key,
+        file_encryption_key: file_key.as_ref(),
         stream_filter: b"StdCF".to_vec(),
         string_filter: b"StdCF".to_vec(),
         owner_password: &opts.owner_password,
@@ -149,6 +175,7 @@ pub fn protect(doc: &Document, opts: &ProtectOptions) -> Result<Document> {
     inner
         .encrypt(&state)
         .map_err(|e| Error::structure(e.to_string()))?;
+    drop(state);
     Document::from_lopdf(inner, None)
 }
 
@@ -163,9 +190,10 @@ pub fn unprotect(doc: &Document, password: &str) -> Result<Document> {
     if password.is_empty() {
         return Err(Error::invalid(InvalidKind::PasswordRequired));
     }
+    let password = Zeroizing::new(password.to_string());
     let mut inner = doc.assembled_lopdf()?;
     inner
-        .decrypt(password)
+        .decrypt(&password)
         .map_err(|_| Error::invalid(InvalidKind::WrongPassword))?;
     inner.trailer.remove(b"Encrypt");
     Document::from_lopdf(inner, None)
@@ -203,6 +231,14 @@ mod tests {
     use super::*;
     use crate::signer::append_stub_signature;
     use crate::test_support::corpus;
+
+    #[test]
+    fn random_key_and_id_are_nonzero() {
+        let key = random_aes_key().unwrap();
+        assert!(key.iter().any(|b| *b != 0));
+        let id = random_file_id().unwrap();
+        assert!(id.iter().any(|b| *b != 0));
+    }
 
     #[test]
     fn protect_unprotect_roundtrip() {
