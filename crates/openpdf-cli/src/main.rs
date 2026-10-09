@@ -7,7 +7,7 @@ use image::{ImageBuffer, Rgba};
 mod tools;
 
 use openpdf_core::{
-    init_i18n, merge_paths, parse_page_ranges, split, split_all, tr, tr_args, Document, Engine,
+    init, merge_paths, parse_page_ranges, split, split_all, tr, tr_args, Document, Engine,
     PageRange,
 };
 
@@ -170,7 +170,7 @@ fn cli() -> Command {
 }
 
 fn main() {
-    init_i18n();
+    init();
     if let Err(e) = run() {
         if is_pin_cancelled(&e) {
             // Quiet success: a cancelled PIN is not an error (exit 0).

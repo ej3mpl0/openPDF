@@ -399,7 +399,7 @@ pub struct Engine {
 }
 
 impl Engine {
-    /// Bind PDFium from `OPENPDF_PDFIUM`, a bundled path, or the system library.
+    /// Bind PDFium from absolute paths only (`OPENPDF_PDFIUM`, next to the exe, system dirs).
     pub fn new() -> Result<Self> {
         worker()?;
         Self::register()

@@ -1,4 +1,3 @@
-use std::env;
 use std::path::{Path, PathBuf};
 
 use pdfium_render::prelude::*;
@@ -16,57 +15,96 @@ pub fn pdfium_library_name() -> &'static str {
     }
 }
 
-fn pdfium_search_paths(bundled: Option<&Path>) -> Vec<PathBuf> {
+fn push_abs(out: &mut Vec<PathBuf>, path: PathBuf) {
+    if let Some(p) = crate::dll::require_absolute(path) {
+        if !out.contains(&p) {
+            out.push(p);
+        }
+    }
+}
+
+/// Absolute PDFium candidates only. No CWD, no bare library name.
+pub(crate) fn pdfium_search_paths(bundled: Option<&Path>) -> Vec<PathBuf> {
     let mut candidates: Vec<PathBuf> = Vec::new();
     let lib = pdfium_library_name();
 
-    if let Ok(p) = env::var("OPENPDF_PDFIUM") {
-        if !p.is_empty() {
-            candidates.push(PathBuf::from(p));
-        }
+    if let Some(p) = crate::dll::env_absolute("OPENPDF_PDFIUM") {
+        push_abs(&mut candidates, p);
     }
     if let Some(p) = bundled {
-        candidates.push(p.to_path_buf());
+        push_abs(&mut candidates, p.to_path_buf());
     }
-    if let Ok(exe) = env::current_exe() {
-        if let Some(dir) = exe.parent() {
-            candidates.push(dir.to_path_buf());
-            candidates.push(dir.join(lib));
-            #[cfg(target_os = "macos")]
-            {
-                candidates.push(dir.join("Frameworks"));
-                candidates.push(dir.join("../Frameworks"));
-                if let Some(contents) = dir.parent() {
-                    candidates.push(contents.join("Frameworks"));
-                    candidates.push(contents.join("Frameworks").join(lib));
-                }
+    if let Some(dir) = crate::dll::exe_dir() {
+        push_abs(&mut candidates, dir.clone());
+        push_abs(&mut candidates, dir.join(lib));
+        #[cfg(target_os = "macos")]
+        {
+            push_abs(&mut candidates, dir.join("Frameworks"));
+            push_abs(&mut candidates, dir.join("Frameworks").join(lib));
+            if let Some(contents) = dir.parent() {
+                let frameworks = contents.join("Frameworks");
+                push_abs(&mut candidates, frameworks.clone());
+                push_abs(&mut candidates, frameworks.join(lib));
             }
         }
     }
-    candidates.push(PathBuf::from("."));
-    candidates.push(PathBuf::from(lib));
 
     #[cfg(target_os = "linux")]
     {
-        candidates.push(PathBuf::from("/usr/local/lib"));
-        candidates.push(PathBuf::from("/usr/local/lib").join(lib));
-        candidates.push(PathBuf::from("/usr/lib"));
-        candidates.push(PathBuf::from("/usr/lib").join(lib));
-        candidates.push(PathBuf::from("/usr/lib/x86_64-linux-gnu"));
-        candidates.push(PathBuf::from("/usr/lib/x86_64-linux-gnu").join(lib));
+        for dir in [
+            "/usr/local/lib",
+            "/usr/lib",
+            "/usr/lib/x86_64-linux-gnu",
+            "/usr/lib/aarch64-linux-gnu",
+        ] {
+            push_abs(&mut candidates, PathBuf::from(dir));
+            push_abs(&mut candidates, PathBuf::from(dir).join(lib));
+        }
+    }
+
+    #[cfg(target_os = "macos")]
+    {
+        for dir in ["/usr/local/lib", "/opt/homebrew/lib"] {
+            push_abs(&mut candidates, PathBuf::from(dir));
+            push_abs(&mut candidates, PathBuf::from(dir).join(lib));
+        }
     }
 
     #[cfg(windows)]
     {
-        if let Ok(windir) = env::var("WINDIR") {
-            candidates.push(PathBuf::from(windir).join("System32").join(lib));
+        if let Some(windir) = crate::dll::env_absolute("WINDIR") {
+            push_abs(&mut candidates, windir.join("System32").join(lib));
         }
     }
 
     candidates
 }
 
-/// Resolve and load PDFium from a bundled path, `OPENPDF_PDFIUM`, or the system.
+fn bind_path(path: &Path) -> std::result::Result<Pdfium, String> {
+    crate::dll::harden();
+    let path = crate::dll::require_absolute(path).ok_or_else(|| "relative path".to_string())?;
+    #[cfg(windows)]
+    {
+        use libloading::os::windows::{
+            Library, LOAD_LIBRARY_SEARCH_DEFAULT_DIRS, LOAD_LIBRARY_SEARCH_DLL_LOAD_DIR,
+        };
+        let flags = LOAD_LIBRARY_SEARCH_DEFAULT_DIRS | LOAD_LIBRARY_SEARCH_DLL_LOAD_DIR;
+        let _pre = unsafe { Library::load_with_flags(&path, flags) }.map_err(|e| e.to_string())?;
+        match Pdfium::bind_to_library(&path) {
+            Ok(bindings) => Ok(Pdfium::new(bindings)),
+            Err(e) => Err(e.to_string()),
+        }
+    }
+    #[cfg(not(windows))]
+    {
+        match Pdfium::bind_to_library(&path) {
+            Ok(bindings) => Ok(Pdfium::new(bindings)),
+            Err(e) => Err(e.to_string()),
+        }
+    }
+}
+
+/// Resolve and load PDFium from absolute paths only (no CWD / bare name).
 pub fn bind_pdfium(bundled: Option<&Path>) -> Result<Pdfium> {
     let candidates = pdfium_search_paths(bundled);
 
@@ -77,19 +115,16 @@ pub fn bind_pdfium(bundled: Option<&Path>) -> Result<Pdfium> {
         } else {
             c
         };
-        match Pdfium::bind_to_library(&lib) {
-            Ok(bindings) => return Ok(Pdfium::new(bindings)),
-            Err(e) => last = Some(e.to_string()),
+        match bind_path(&lib) {
+            Ok(pdfium) => return Ok(pdfium),
+            Err(e) => last = Some(e),
         }
     }
 
-    match Pdfium::bind_to_system_library() {
-        Ok(bindings) => Ok(Pdfium::new(bindings)),
-        Err(e) => Err(Error::pdfium_load(
-            last.unwrap_or_else(|| "none".into()),
-            e.to_string(),
-        )),
-    }
+    Err(Error::pdfium_load(
+        last.unwrap_or_else(|| "none".into()),
+        "no absolute PDFium library",
+    ))
 }
 
 pub fn render_tile(
@@ -213,6 +248,23 @@ mod tests {
             assert_eq!(name, "libpdfium.dylib");
         } else {
             assert_eq!(name, "libpdfium.so");
+        }
+    }
+
+    #[test]
+    fn candidates_are_absolute_never_cwd_or_bare_name() {
+        let lib = pdfium_library_name();
+        for p in pdfium_search_paths(None) {
+            assert!(p.is_absolute(), "relative PDFium candidate: {p:?}");
+            assert_ne!(p, PathBuf::from("."));
+            assert_ne!(p, PathBuf::from(lib));
+            assert_ne!(p.as_os_str(), ".");
+        }
+        for p in pdfium_search_paths(Some(Path::new(lib))) {
+            assert!(p.is_absolute(), "relative bundled path leaked: {p:?}");
+        }
+        for p in pdfium_search_paths(Some(Path::new("."))) {
+            assert!(p.is_absolute(), "CWD leaked: {p:?}");
         }
     }
 }

@@ -8,7 +8,7 @@
 
 #[cfg(target_os = "linux")]
 use std::ffi::{c_char, c_void, CStr, CString};
-#[cfg(target_os = "linux")]
+#[cfg(any(test, target_os = "linux"))]
 use std::path::{Path, PathBuf};
 #[cfg(target_os = "linux")]
 use std::process::Command;
@@ -399,7 +399,7 @@ impl TessEngine {
     }
 }
 
-#[cfg(target_os = "linux")]
+#[cfg(any(test, target_os = "linux"))]
 fn tesseract_bin_name() -> &'static str {
     if cfg!(windows) {
         "tesseract.exe"
@@ -408,7 +408,7 @@ fn tesseract_bin_name() -> &'static str {
     }
 }
 
-#[cfg(target_os = "linux")]
+#[cfg(any(test, target_os = "linux"))]
 fn tesseract_lib_names() -> &'static [&'static str] {
     if cfg!(windows) {
         &[
@@ -430,37 +430,51 @@ fn tesseract_lib_names() -> &'static [&'static str] {
 
 #[cfg(target_os = "linux")]
 fn resolve_engine() -> Option<TessEngine> {
-    if let Ok(raw) = std::env::var("OPENPDF_TESSERACT") {
-        if let Some(found) = probe_path(Path::new(&raw)) {
+    for candidate in tesseract_search_paths() {
+        if let Some(found) = probe_path(&candidate) {
             return Some(found);
-        }
-    }
-    for candidate in tesseract_bin_candidates() {
-        if is_executable(&candidate) {
-            return Some(TessEngine::Binary(candidate));
-        }
-    }
-    if let Some(bin) = which(tesseract_bin_name()).or_else(|| which("tesseract")) {
-        return Some(TessEngine::Binary(bin));
-    }
-    for root in tesseract_lib_roots() {
-        if let Some(found) = probe_path(&root) {
-            return Some(found);
-        }
-    }
-    for name in tesseract_lib_names() {
-        if let Ok(lib) = unsafe { libloading::Library::new(name) } {
-            drop(lib);
-            return Some(TessEngine::Library {
-                lib: PathBuf::from(name),
-                tessdata: first_tessdata(),
-            });
         }
     }
     None
 }
 
-#[cfg(target_os = "linux")]
+/// Absolute Tesseract binary / library candidates. No CWD, no bare names.
+#[cfg(any(test, target_os = "linux"))]
+fn tesseract_search_paths() -> Vec<PathBuf> {
+    let mut out = Vec::new();
+    if let Some(p) = crate::dll::env_absolute("OPENPDF_TESSERACT") {
+        push_abs(&mut out, p);
+    }
+    for p in tesseract_bin_candidates() {
+        push_abs(&mut out, p);
+    }
+    #[cfg(target_os = "linux")]
+    {
+        for name in [tesseract_bin_name(), "tesseract"] {
+            if let Some(bin) = which_absolute(name) {
+                push_abs(&mut out, bin);
+            }
+        }
+    }
+    for root in tesseract_lib_roots() {
+        for name in tesseract_lib_names() {
+            push_abs(&mut out, root.join(name));
+        }
+        push_abs(&mut out, root);
+    }
+    out
+}
+
+#[cfg(any(test, target_os = "linux"))]
+fn push_abs(out: &mut Vec<PathBuf>, path: PathBuf) {
+    if let Some(p) = crate::dll::require_absolute(path) {
+        if !out.contains(&p) {
+            out.push(p);
+        }
+    }
+}
+
+#[cfg(any(test, target_os = "linux"))]
 fn tesseract_bin_candidates() -> Vec<PathBuf> {
     let mut out = Vec::new();
     #[cfg(target_os = "linux")]
@@ -502,7 +516,7 @@ fn tesseract_bin_candidates() -> Vec<PathBuf> {
     out
 }
 
-#[cfg(target_os = "linux")]
+#[cfg(any(test, target_os = "linux"))]
 fn tesseract_lib_roots() -> Vec<PathBuf> {
     let mut out = Vec::new();
     #[cfg(target_os = "linux")]
@@ -528,6 +542,8 @@ fn tesseract_lib_roots() -> Vec<PathBuf> {
 
 #[cfg(target_os = "linux")]
 fn probe_path(path: &Path) -> Option<TessEngine> {
+    let path = crate::dll::require_absolute(path)?;
+    let path = path.as_path();
     if path.is_file() {
         let name = path.file_name().and_then(|n| n.to_str()).unwrap_or("");
         let is_lib = name.contains("tesseract")
@@ -584,10 +600,16 @@ fn is_executable(path: &Path) -> bool {
 }
 
 #[cfg(target_os = "linux")]
-fn which(name: &str) -> Option<PathBuf> {
+fn which_absolute(name: &str) -> Option<PathBuf> {
     let path = std::env::var_os("PATH")?;
     for dir in std::env::split_paths(&path) {
+        if !dir.is_absolute() {
+            continue;
+        }
         let p = dir.join(name);
+        let Some(p) = crate::dll::require_absolute(p) else {
+            continue;
+        };
         if is_executable(&p) {
             return Some(p);
         }
@@ -597,8 +619,7 @@ fn which(name: &str) -> Option<PathBuf> {
 
 #[cfg(target_os = "linux")]
 fn first_tessdata() -> Option<PathBuf> {
-    if let Ok(p) = std::env::var("TESSDATA_PREFIX") {
-        let p = PathBuf::from(p);
+    if let Some(p) = crate::dll::env_absolute("TESSDATA_PREFIX") {
         if p.join("eng.traineddata").is_file() {
             return Some(p);
         }
@@ -1062,6 +1083,17 @@ mod tests {
                 h: 12.0,
                 confidence: 90.0,
             }])
+        }
+    }
+
+    #[test]
+    fn tesseract_candidates_are_absolute() {
+        for p in tesseract_search_paths() {
+            assert!(p.is_absolute(), "relative Tesseract candidate: {p:?}");
+            assert_ne!(p, PathBuf::from("."));
+            assert_ne!(p, PathBuf::from("tesseract"));
+            assert_ne!(p, PathBuf::from("tesseract.exe"));
+            assert_ne!(p, PathBuf::from("libtesseract.so"));
         }
     }
 

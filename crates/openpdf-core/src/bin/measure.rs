@@ -98,6 +98,7 @@ fn windows_peak_working_set() -> Option<u64> {
 }
 
 fn main() {
+    openpdf_core::init();
     let n = pages();
     let os = std::env::consts::OS;
     let arch = std::env::consts::ARCH;

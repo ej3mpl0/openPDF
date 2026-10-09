@@ -16,6 +16,7 @@
 mod command;
 mod compare;
 mod convert;
+mod dll;
 mod document;
 mod error;
 pub mod i18n;
@@ -43,6 +44,13 @@ pub use error::{Error, InvalidKind, Result, SignedOp};
 pub use i18n::{
     available_locales, current_locale, detect_locale, init as init_i18n, set_locale, tr, tr_args,
 };
+
+/// Call this first from the app / CLI / measure binary.
+/// Hardens Windows DLL search (no CWD) and loads the gettext catalog.
+pub fn init() {
+    dll::harden();
+    i18n::init();
+}
 #[cfg(target_os = "linux")]
 pub use ocr::TesseractOcr;
 pub use ocr::{
