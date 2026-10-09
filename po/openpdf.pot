@@ -460,5 +460,11 @@ msgstr ""
 msgid "unsupported public key algorithm"
 msgstr ""
 
+msgid "ECDSA signature is truncated"
+msgstr ""
+
+msgid "ECDSA signature has the wrong field size"
+msgstr ""
+
 msgid "no signing certificates found"
 msgstr ""

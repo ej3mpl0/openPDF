@@ -1129,6 +1129,7 @@ dependencies = [
  "ecdsa",
  "elliptic-curve",
  "primeorder",
+ "rand_core 0.6.4",
  "sha2",
 ]
 

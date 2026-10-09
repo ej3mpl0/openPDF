@@ -146,8 +146,28 @@ fn signature_algorithm(kind: KeyKind) -> AlgorithmIdentifierOwned {
     }
 }
 
-/// IEEE P1363 `r||s` integers → DER `SEQUENCE { INTEGER r, INTEGER s }`.
-#[allow(dead_code)] // used by the Windows NCrypt ECDSA path
+/// IEEE P1363 `r||s` (fixed field size) → DER `SEQUENCE { INTEGER r, INTEGER s }`.
+///
+/// `field_len` is 32 (P-256), 48 (P-384) or 66 (P-521). Tokens sometimes pad
+/// P-521 to 68-byte halves; those are accepted when each half is ≥ `field_len`.
+pub(crate) fn ecdsa_p1363_to_der(raw: &[u8], field_len: usize) -> Result<Vec<u8>> {
+    let (r, s) = split_p1363(raw, field_len)?;
+    ecdsa_integers_to_der(r, s)
+}
+
+fn split_p1363(raw: &[u8], field_len: usize) -> Result<(&[u8], &[u8])> {
+    if field_len == 0 || raw.len() < 2 * field_len || raw.len() % 2 != 0 {
+        return Err(Error::Sign(tr("ECDSA signature is truncated")));
+    }
+    let mid = raw.len() / 2;
+    if mid != field_len && mid > field_len + 2 {
+        return Err(Error::Sign(tr("ECDSA signature has the wrong field size")));
+    }
+    Ok((&raw[..mid], &raw[mid..]))
+}
+
+/// IEEE P1363 `r` and `s` integers → DER `SEQUENCE { INTEGER r, INTEGER s }`.
+#[allow(dead_code)] // used by tests and native / PKCS#11 ECDSA paths
 pub(crate) fn ecdsa_integers_to_der(r: &[u8], s: &[u8]) -> Result<Vec<u8>> {
     let r = trim_be(r);
     let s = trim_be(s);

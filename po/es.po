@@ -460,5 +460,11 @@ msgstr "SecKeyCreateSignature ha fallado: {error}"
 msgid "unsupported public key algorithm"
 msgstr "algoritmo de clave pública no admitido"
 
+msgid "ECDSA signature is truncated"
+msgstr "la firma ECDSA está truncada"
+
+msgid "ECDSA signature has the wrong field size"
+msgstr "la firma ECDSA tiene un tamaño de campo incorrecto"
+
 msgid "no signing certificates found"
 msgstr "no se encontraron certificados de firma"

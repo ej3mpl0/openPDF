@@ -250,7 +250,10 @@ impl KeyBackend for Pkcs11Backend {
             return Err(Error::invalid(openpdf_core::InvalidKind::CertIdRequired));
         }
         let picked = self.pick(cert_id)?;
-        if picked.info.unusable.is_some() || !can_use_for_pades(&picked.info.usage) {
+        if let Some(reason) = &picked.info.unusable {
+            return Err(Error::Sign(openpdf_core::describe_unusable(reason)));
+        }
+        if !can_use_for_pades(&picked.info.usage) {
             return Err(Error::Sign(openpdf_core::tr("certificate is not a signing cert")));
         }
         self.sign_raw(&picked, data)
@@ -405,43 +408,31 @@ fn pkcs11_ecdsa(
     data: &[u8],
     hash: EcdsaHash,
 ) -> Result<Vec<u8>> {
-    let hashed = match hash {
-        EcdsaHash::Sha256 => Mechanism::EcdsaSha256,
-        EcdsaHash::Sha384 => Mechanism::EcdsaSha384,
-        EcdsaHash::Sha512 => Mechanism::EcdsaSha512,
+    // CKM_ECDSA: we pre-hash so SignerInfo (ecdsa-with-SHA*) matches the token.
+    let digest: Vec<u8> = match hash {
+        EcdsaHash::Sha256 => Sha256::digest(data).to_vec(),
+        EcdsaHash::Sha384 => sha2::Sha384::digest(data).to_vec(),
+        EcdsaHash::Sha512 => sha2::Sha512::digest(data).to_vec(),
     };
-    let raw = match session.sign(&hashed, key, data) {
-        Ok(sig) => sig,
-        Err(_) => {
-            let digest: Vec<u8> = match hash {
-                EcdsaHash::Sha256 => Sha256::digest(data).to_vec(),
-                EcdsaHash::Sha384 => sha2::Sha384::digest(data).to_vec(),
-                EcdsaHash::Sha512 => sha2::Sha512::digest(data).to_vec(),
-            };
-            session.sign(&Mechanism::Ecdsa, key, &digest).map_err(pkcs11_err)?
-        }
-    };
-    if raw.len() < 2 || raw.len() % 2 != 0 {
-        return Err(Error::Sign("PKCS#11 ECDSA signature is truncated".into()));
-    }
-    let mid = raw.len() / 2;
-    cades::ecdsa_integers_to_der(&raw[..mid], &raw[mid..])
+    let raw = session
+        .sign(&Mechanism::Ecdsa, key, &digest)
+        .map_err(pkcs11_err)?;
+    cades::ecdsa_p1363_to_der(&raw, hash.field_len())
 }
 
 fn pkcs11_rsa_sha256(session: &Session, key: ObjectHandle, data: &[u8]) -> Result<Vec<u8>> {
-    match session.sign(&Mechanism::Sha256RsaPkcs, key, data) {
+    // CKM_RSA_PKCS over DigestInfo(SHA-256) so SignerInfo stays sha256WithRSAEncryption.
+    let mut info = Vec::with_capacity(19 + 32);
+    info.extend_from_slice(&[
+        0x30, 0x31, 0x30, 0x0d, 0x06, 0x09, 0x60, 0x86, 0x48, 0x01, 0x65, 0x03, 0x04, 0x02, 0x01,
+        0x05, 0x00, 0x04, 0x20,
+    ]);
+    info.extend_from_slice(Sha256::digest(data).as_slice());
+    match session.sign(&Mechanism::RsaPkcs, key, &info) {
         Ok(sig) => Ok(sig),
-        Err(_) => {
-            let mut info = Vec::with_capacity(19 + 32);
-            info.extend_from_slice(&[
-                0x30, 0x31, 0x30, 0x0d, 0x06, 0x09, 0x60, 0x86, 0x48, 0x01, 0x65, 0x03, 0x04, 0x02,
-                0x01, 0x05, 0x00, 0x04, 0x20,
-            ]);
-            info.extend_from_slice(Sha256::digest(data).as_slice());
-            session
-                .sign(&Mechanism::RsaPkcs, key, &info)
-                .map_err(pkcs11_err)
-        }
+        Err(_) => session
+            .sign(&Mechanism::Sha256RsaPkcs, key, data)
+            .map_err(pkcs11_err),
     }
 }
 

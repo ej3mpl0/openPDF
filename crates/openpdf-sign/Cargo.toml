@@ -14,7 +14,7 @@ der = { version = "0.7", features = ["alloc", "derive", "oid"] }
 lopdf = "0.36.0"
 p256 = { version = "0.13", default-features = false, features = ["ecdsa", "pkcs8"] }
 p384 = { version = "0.13", default-features = false, features = ["ecdsa", "pkcs8"] }
-p521 = { version = "0.13", default-features = false, features = ["ecdsa", "pkcs8"] }
+p521 = { version = "0.13", default-features = false, features = ["ecdsa", "getrandom", "pkcs8"] }
 rsa = { version = "0.9", default-features = false, features = ["std", "sha2", "u64_digit"] }
 sha2 = { version = "0.10", default-features = false, features = ["std"] }
 x509-cert = { version = "0.2", default-features = false, features = ["std"] }

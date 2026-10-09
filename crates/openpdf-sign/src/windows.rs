@@ -140,6 +140,11 @@ impl KeyBackend for WindowsStoreBackend {
             if listed.id != cert_id {
                 continue;
             }
+            if !found.is_null() {
+                unsafe {
+                    CertFreeCertificateContext(Some(found));
+                }
+            }
             found = unsafe { CertDuplicateCertificateContext(Some(ctx)) };
             kind = listed.kind;
         }
@@ -267,11 +272,7 @@ fn sign_with_ncrypt(key: NCRYPT_KEY_HANDLE, data: &[u8], kind: KeyKind) -> Resul
                 EcdsaHash::Sha512 => Sha512::digest(data).to_vec(),
             };
             let raw = ncrypt_sign_hash(key, None, &digest, NCRYPT_FLAGS(0))?;
-            if raw.len() < 2 || raw.len() % 2 != 0 {
-                return Err(Error::Sign(tr("NCryptSignHash failed")));
-            }
-            let mid = raw.len() / 2;
-            crate::cades::ecdsa_integers_to_der(&raw[..mid], &raw[mid..])
+            crate::cades::ecdsa_p1363_to_der(&raw, hash.field_len())
         }
     }
 }

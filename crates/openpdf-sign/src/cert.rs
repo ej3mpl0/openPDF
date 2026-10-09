@@ -35,6 +35,17 @@ pub(crate) enum EcdsaHash {
     Sha512,
 }
 
+impl EcdsaHash {
+    /// IEEE P1363 field size: P-256=32, P-384=48, P-521=66.
+    pub(crate) fn field_len(self) -> usize {
+        match self {
+            EcdsaHash::Sha256 => 32,
+            EcdsaHash::Sha384 => 48,
+            EcdsaHash::Sha512 => 66,
+        }
+    }
+}
+
 pub(crate) fn key_kind(cert: &Certificate) -> Option<KeyKind> {
     let oid = cert.tbs_certificate.subject_public_key_info.algorithm.oid;
     if oid == ID_RSA_ENCRYPTION
