@@ -78,11 +78,21 @@ modules:
   - name: pdfium
     buildsystem: simple
     build-commands:
-      - install -Dm755 lib/libpdfium.so ${FLATPAK_DEST}/lib/libpdfium.so
+      - |
+        set -euo pipefail
+        so="$(find . -name libpdfium.so \( -type f -o -type l \) | head -n1)"
+        if [ -z "$so" ]; then
+          echo "libpdfium.so missing after extract:" >&2
+          find . -maxdepth 3 -print >&2
+          exit 1
+        fi
+        install -Dm755 "$so" "${FLATPAK_DEST}/lib/libpdfium.so"
     sources:
       - type: archive
         url: https://github.com/bblanchon/pdfium-binaries/releases/download/chromium%2F8035/pdfium-linux-x64.tgz
         sha256: 2e6db042dd2cff2d5247023dbec6c7ebb800042ce83c835d6468d45229669bd4
+        archive-type: tar-gzip
+        strip-components: 0
 
   - name: openpdf
     buildsystem: simple
