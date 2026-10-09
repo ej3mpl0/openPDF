@@ -14,6 +14,94 @@ The app binary constructs `Box<dyn Signer>` from `openpdf-sign`.
 
 License: [MPL-2.0](https://www.mozilla.org/MPL/2.0/).
 
+## Installation
+
+A push of a `v*` tag runs `.github/workflows/release.yml`. That workflow
+attaches the files below to the GitHub release, plus a `SHA256SUMS` list.
+**Flathub is not available yet.** There is no Flathub package and no
+`flatpak install flathub ...` command.
+
+### Linux Flatpak (`x86_64` and `aarch64`)
+
+The release file is **`io.github.ej3mpl0.openpdf.flatpak`** (`bundle:` in
+`release.yml`). The Flatpak manifest
+(`packaging/flatpak/io.github.ej3mpl0.openpdf.yml`) ships PDFium for
+`x86_64` and `aarch64` (`only-arches`). The app id is
+`io.github.ej3mpl0.openpdf`; the GUI command is `openpdf-gtk`; the CLI
+`openpdf` is in the same bundle.
+
+```bash
+flatpak install --user io.github.ej3mpl0.openpdf.flatpak
+flatpak run io.github.ej3mpl0.openpdf
+```
+
+Permissions from `finish-args` (do not grant a home filesystem):
+
+- **Files:** the XDG document portal. The manifest does not set
+  `--filesystem=home`.
+- **Smart cards / DNIe:** `--socket=pcsc` talks to host `pcscd`. OpenSC
+  is bundled and `OPENPDF_PKCS11_MODULE` is
+  `/app/lib/pkcs11/opensc-pkcs11.so`.
+
+### Linux AppImage (`x86_64`)
+
+`packaging/appimage/build.sh` writes **`openPDF-x86_64.AppImage`**
+(`APP_NAME`-`ARCH`). AppImage packaging is x86_64 only. The image
+contains `openpdf-gtk` and `openpdf`.
+
+```bash
+chmod +x openPDF-x86_64.AppImage
+./openPDF-x86_64.AppImage
+```
+
+### Windows CLI (`x64`)
+
+Every release ships **`openpdf-<version>-windows-x64.zip`**, where
+`<version>` is the tag without the leading `v` (`GITHUB_REF_NAME#v` in
+`release.yml`). The zip holds `openpdf.exe` and `pdfium.dll` in a folder
+of the same name.
+
+```text
+openpdf-<version>-windows-x64/openpdf.exe
+openpdf-<version>-windows-x64/pdfium.dll
+```
+
+Unzip and run `openpdf.exe` from that folder (`pdfium.dll` must stay
+beside the exe).
+
+### macOS CLI (arm64 and Intel)
+
+The `macos-cli` matrix (`macos-latest` and `macos-13`) packs one
+`tar.gz` per runner. `uname -m` is mapped to `arm64` or `x64`:
+
+- **`openpdf-<version>-macos-arm64.tar.gz`** — Apple Silicon (`arm64`)
+- **`openpdf-<version>-macos-x64.tar.gz`** — Intel (`x86_64`)
+
+Each archive holds `openpdf` and `libpdfium.dylib`. Extract and run
+`./openpdf` from that folder.
+
+### Verify downloads
+
+`SHA256SUMS` is attached next to the artifacts. Check a download:
+
+```bash
+sha256sum -c SHA256SUMS
+```
+
+On macOS, `shasum -a 256 -c SHA256SUMS` is the equivalent.
+
+Each release job also writes a GitHub artifact attestation
+(`actions/attest-build-provenance@v2`; the publish job attests every
+file in `out/`, including `SHA256SUMS`). Verify a file with the GitHub
+CLI:
+
+```bash
+gh attestation verify io.github.ej3mpl0.openpdf.flatpak --repo ej3mpl0/openPDF
+gh attestation verify openPDF-x86_64.AppImage --repo ej3mpl0/openPDF
+gh attestation verify openpdf-<version>-windows-x64.zip --repo ej3mpl0/openPDF
+gh attestation verify openpdf-<version>-macos-arm64.tar.gz --repo ej3mpl0/openPDF
+```
+
 ## Building
 
 Rust *stable* is required (`rust-toolchain.toml`). From the workspace root:
@@ -501,3 +589,6 @@ Linux, Windows, and macOS.
   The GTK picker is on PR #1. There is no CLI `sign` / `verify`.
 - **Core and CLI translations** (English and Spanish) are done. GUI
   catalogs ship with the GTK crate.
+- **Release packages** (Flatpak, AppImage, Windows CLI zip, macOS CLI
+  tarballs) are produced by [PR #6](https://github.com/ej3mpl0/openPDF/pull/6).
+  Flathub is not published.
