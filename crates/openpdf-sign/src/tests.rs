@@ -409,9 +409,18 @@ fn list_certificates_does_not_ask_for_pin() {
             !certs.is_empty(),
             "SoftHSM token should expose the test certificate without a PIN"
         );
-        assert!(certs.iter().any(|c| c.subject.contains("OpenPDF Test")));
+        assert!(
+            certs
+                .iter()
+                .any(|c| c.subject.contains("OpenPDF Test Signer"))
+        );
+        assert!(certs.iter().any(|c| c.subject.contains("OpenPDF EC Test")));
         with_locale("en", || {
-            let desc = describe_certificate(&certs[0]);
+            let rsa = certs
+                .iter()
+                .find(|c| c.subject.contains("OpenPDF Test Signer"))
+                .unwrap();
+            let desc = describe_certificate(rsa);
             assert!(desc.contains("OpenPDF Test"));
             let _ = pin_prompt_text("openpdf-test");
         });
@@ -426,7 +435,10 @@ fn sign_and_verify_corpus_keeps_prefix() {
     let Some(()) = with_softhsm(|| {
         let signer = signer();
         let certs = signer.list_certificates().unwrap();
-        let cert = certs.iter().find(|c| can_use(c)).unwrap_or(&certs[0]);
+        let cert = certs
+            .iter()
+            .find(|c| can_use(c) && c.subject.contains("OpenPDF Test Signer"))
+            .expect("RSA SoftHSM test cert");
         let original = fs::read(corpus("hello.pdf")).unwrap();
         let request = SignRequest {
             cert_id: cert.id.clone(),
@@ -483,7 +495,11 @@ fn sign_and_verify_corpus_keeps_prefix() {
 fn sign_visible_appearance() {
     let Some(()) = with_softhsm(|| {
         let signer = signer();
-        let cert = &signer.list_certificates().unwrap()[0];
+        let certs = signer.list_certificates().unwrap();
+        let cert = certs
+            .iter()
+            .find(|c| can_use(c))
+            .expect("usable SoftHSM cert");
         let original = fs::read(corpus("two_page.pdf")).unwrap();
         let request = SignRequest {
             cert_id: cert.id.clone(),
