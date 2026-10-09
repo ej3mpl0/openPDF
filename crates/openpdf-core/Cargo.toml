@@ -3,5 +3,12 @@ name = "openpdf-core"
 version.workspace = true
 edition.workspace = true
 license.workspace = true
+description = "PDF document, render, text, and structure core for openPDF"
 
 [dependencies]
+lopdf = "0.36.0"
+pdfium-render = "0.9.4"
+thiserror = "2"
+
+[dev-dependencies]
+image = { version = "0.25", default-features = false, features = ["png"] }
