@@ -1,0 +1,209 @@
+# openPDF gettext template. English msgids; translations go in po/{lang}.po
+msgid ""
+msgstr ""
+"Project-Id-Version: openpdf 0.1.0\n"
+"Language: \n"
+"MIME-Version: 1.0\n"
+"Content-Type: text/plain; charset=UTF-8\n"
+"Content-Transfer-Encoding: 8bit\n"
+
+msgid "I/O error: {detail}"
+msgstr ""
+
+msgid "PDF structure: {detail}"
+msgstr ""
+
+msgid "PDFium: {detail}"
+msgstr ""
+
+msgid "page {page} is out of range (0..{count})"
+msgstr ""
+
+msgid "document has no pages"
+msgstr ""
+
+msgid "sign: {detail}"
+msgstr ""
+
+msgid "document is signed; {op} would invalidate the signature (incremental save only)"
+msgstr ""
+
+msgid "edit"
+msgstr ""
+
+msgid "rotate"
+msgstr ""
+
+msgid "delete"
+msgstr ""
+
+msgid "move"
+msgstr ""
+
+msgid "undo"
+msgstr ""
+
+msgid "redo"
+msgstr ""
+
+msgid "rewrite"
+msgstr ""
+
+msgid "SignRequest.cert_id is required"
+msgstr ""
+
+msgid "range {start}-{end} is inverted"
+msgstr ""
+
+msgid "page numbers are 1-based"
+msgstr ""
+
+msgid "no page ranges"
+msgstr ""
+
+msgid "not a page number: {value}"
+msgstr ""
+
+msgid "document is not bound to the render engine"
+msgstr ""
+
+msgid "missing Catalog"
+msgstr ""
+
+msgid "missing Pages"
+msgstr ""
+
+msgid "page has no MediaBox"
+msgstr ""
+
+msgid "MediaBox too short"
+msgstr ""
+
+msgid "expected number"
+msgstr ""
+
+msgid "outline nest too deep"
+msgstr ""
+
+msgid "outline sibling loop"
+msgstr ""
+
+msgid "incremental save did not preserve original bytes"
+msgstr ""
+
+msgid "render thread closed"
+msgstr ""
+
+msgid "could not load libpdfium (last: {last}, system: {system})"
+msgstr ""
+
+msgid "unknown certificate"
+msgstr ""
+
+msgid "certificate is not a signing cert"
+msgstr ""
+
+msgid "(untitled)"
+msgstr ""
+
+msgid "openPDF command-line tools (share openpdf-core with the GTK app)"
+msgstr ""
+
+msgid "Page count, sizes, and outline"
+msgstr ""
+
+msgid "Render a page to PNG"
+msgstr ""
+
+msgid "Extract text"
+msgstr ""
+
+msgid "Merge two or more PDFs"
+msgstr ""
+
+msgid "Split a PDF into one file per page (or per --pages range)"
+msgstr ""
+
+msgid "Page number (1-based)"
+msgstr ""
+
+msgid "Zoom factor"
+msgstr ""
+
+msgid "Output path"
+msgstr ""
+
+msgid "1-based ranges, e.g. 1-3,5"
+msgstr ""
+
+msgid "Usage:"
+msgstr ""
+
+msgid "Commands:"
+msgstr ""
+
+msgid "Options:"
+msgstr ""
+
+msgid "Arguments:"
+msgstr ""
+
+msgid "file: {path}"
+msgstr ""
+
+msgid "pages: {count}"
+msgstr ""
+
+msgid "page {n}: {w} x {h} pt  rot {rot}"
+msgstr ""
+
+msgid "outline: (none)"
+msgstr ""
+
+msgid "outline:"
+msgstr ""
+
+msgid "{title} -> {page}"
+msgstr ""
+
+msgid "wrote {path}"
+msgstr ""
+
+msgid "wrote {path} ({count} pages)"
+msgstr ""
+
+msgid "openpdf: {error}"
+msgstr ""
+
+msgid "--page is 1-based"
+msgstr ""
+
+msgid "merge needs at least two input files and -o"
+msgstr ""
+
+msgid "load libpdfium (set OPENPDF_PDFIUM or install it on the system)"
+msgstr ""
+
+msgid "open {path}"
+msgstr ""
+
+msgid "RGBA buffer size"
+msgstr ""
+
+msgid "write {path}"
+msgstr ""
+
+msgid "Print help"
+msgstr ""
+
+msgid "Print version"
+msgstr ""
+
+msgid "PDF file"
+msgstr ""
+
+msgid "Input PDF files"
+msgstr ""
+
+msgid "read outline"
+msgstr ""

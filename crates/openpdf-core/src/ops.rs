@@ -4,7 +4,7 @@ use std::path::Path;
 use lopdf::{Dictionary, Document as LopdfDocument, Object, ObjectId};
 
 use crate::document::Document;
-use crate::error::{Error, Result};
+use crate::error::{Error, InvalidKind, Result};
 use crate::signer::strip_signatures;
 
 /// Inclusive 0-based page range.
@@ -17,7 +17,7 @@ pub struct PageRange {
 impl PageRange {
     pub fn new(start: u32, end: u32) -> Result<Self> {
         if start > end {
-            return Err(Error::invalid(format!("range {start}-{end} is inverted")));
+            return Err(Error::invalid(InvalidKind::RangeInverted { start, end }));
         }
         Ok(Self { start, end })
     }
@@ -52,7 +52,7 @@ pub fn parse_page_ranges(spec: &str, page_count: u32) -> Result<Vec<PageRange>> 
             (n, n)
         };
         if a == 0 || b == 0 {
-            return Err(Error::invalid("page numbers are 1-based"));
+            return Err(Error::invalid(InvalidKind::PageNumbersOneBased));
         }
         let start = a - 1;
         let end = b - 1;
@@ -65,7 +65,7 @@ pub fn parse_page_ranges(spec: &str, page_count: u32) -> Result<Vec<PageRange>> 
         ranges.push(PageRange::new(start, end)?);
     }
     if ranges.is_empty() {
-        return Err(Error::invalid("no page ranges"));
+        return Err(Error::invalid(InvalidKind::NoPageRanges));
     }
     Ok(ranges)
 }
@@ -73,7 +73,7 @@ pub fn parse_page_ranges(spec: &str, page_count: u32) -> Result<Vec<PageRange>> 
 fn parse_one(s: &str) -> Result<u32> {
     s.trim()
         .parse()
-        .map_err(|_| Error::invalid(format!("not a page number: {s}")))
+        .map_err(|_| Error::invalid(InvalidKind::NotAPageNumber { value: s.to_string() }))
 }
 
 /// Concatenate documents in order. Uses lopdf (not PDFium) so gtk/sign stay off this path.
@@ -250,6 +250,14 @@ mod tests {
                 PageRange { start: 3, end: 3 }
             ]
         );
+        assert!(matches!(
+            parse_page_ranges("0-1", 5),
+            Err(Error::Invalid(InvalidKind::PageNumbersOneBased))
+        ));
+        assert!(matches!(
+            parse_page_ranges("foo", 5),
+            Err(Error::Invalid(InvalidKind::NotAPageNumber { .. }))
+        ));
     }
 
     #[test]

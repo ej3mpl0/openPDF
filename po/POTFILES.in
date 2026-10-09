@@ -1,0 +1,3 @@
+crates/openpdf-core/src/error.rs
+crates/openpdf-core/src/i18n.rs
+crates/openpdf-cli/src/main.rs

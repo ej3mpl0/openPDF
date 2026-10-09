@@ -4,7 +4,7 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use lopdf::{Dictionary, Document as LopdfDocument, Object, ObjectId};
 
 use crate::command::{normalize_rotation, Applied, Command, History};
-use crate::error::{Error, Result};
+use crate::error::{Error, Result, SignedOp};
 use crate::outline::{load_outline, OutlineItem};
 use crate::signer::contains_signature;
 
@@ -150,7 +150,7 @@ impl Document {
     /// before enabling those tools.
     pub fn ensure_editable(&self) -> Result<()> {
         if self.signed {
-            Err(Error::signed("edit"))
+            Err(Error::signed(SignedOp::Edit))
         } else {
             Ok(())
         }
@@ -179,7 +179,7 @@ impl Document {
             return Ok(());
         }
         if self.signed {
-            return Err(Error::signed("rotate"));
+            return Err(Error::signed(SignedOp::Rotate));
         }
         self.slots[i].rotation = normalize_rotation(self.slots[i].rotation + delta);
         self.dirty = true;
@@ -189,7 +189,7 @@ impl Document {
 
     pub fn delete_page(&mut self, index: u32) -> Result<()> {
         if self.signed {
-            return Err(Error::signed("delete"));
+            return Err(Error::signed(SignedOp::Delete));
         }
         if self.slots.len() <= 1 {
             return Err(Error::EmptyDocument);
@@ -214,7 +214,7 @@ impl Document {
             return Ok(());
         }
         if self.signed {
-            return Err(Error::signed("move"));
+            return Err(Error::signed(SignedOp::Move));
         }
         let slot = self.slots.remove(f);
         let insert_at = if t > f { t - 1 } else { t };
@@ -229,7 +229,7 @@ impl Document {
             return Ok(false);
         }
         if self.signed {
-            return Err(Error::signed("undo"));
+            return Err(Error::signed(SignedOp::Undo));
         }
         let Some(applied) = self.history.pop_undo() else {
             return Ok(false);
@@ -245,7 +245,7 @@ impl Document {
             return Ok(false);
         }
         if self.signed {
-            return Err(Error::signed("redo"));
+            return Err(Error::signed(SignedOp::Redo));
         }
         let Some(applied) = self.history.pop_redo() else {
             return Ok(false);

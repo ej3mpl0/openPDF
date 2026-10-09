@@ -4,7 +4,7 @@ use std::path::Path;
 use lopdf::{IncrementalDocument, Object};
 
 use crate::document::{Document, PageSlot};
-use crate::error::{Error, Result};
+use crate::error::{Error, Result, SignedOp};
 
 impl Document {
     /// Rewrite the PDF (optimized "Save as"). Existing signatures are not preserved.
@@ -25,7 +25,7 @@ impl Document {
 
     pub fn to_bytes(&self) -> Result<Vec<u8>> {
         if self.is_signed() {
-            return Err(Error::signed("rewrite"));
+            return Err(Error::signed(SignedOp::Rewrite));
         }
         let mut doc = self.assembled_lopdf()?;
         let mut buf = Vec::new();
