@@ -1,5 +1,6 @@
 #!/usr/bin/env bash
-# Build an x86_64 AppImage: release binary + libpdfium + GTK4/libadwaita.
+# Build an x86_64 AppImage: GUI + CLI + libpdfium + GTK4/libadwaita.
+# The CLI (CLI_BIN) is a separate binary and must not load GTK.
 set -euo pipefail
 
 ROOT="$(cd "$(dirname "$0")/../.." && pwd)"
@@ -50,10 +51,19 @@ if [[ ! -f "$PDFIUM_DIR/lib/libpdfium.so" ]]; then
   tar -xzf "$archive" -C "$PDFIUM_DIR"
 fi
 
-cargo build --release -p "$APP_BIN" --manifest-path "$ROOT/Cargo.toml"
+cargo build --release -p "$APP_BIN" -p "$CLI_CRATE" --manifest-path "$ROOT/Cargo.toml"
 BIN_PATH="$ROOT/target/release/$APP_BIN"
+CLI_PATH="$ROOT/target/release/$CLI_BIN"
 if [[ ! -x "$BIN_PATH" ]]; then
-  echo "release binary not found: $BIN_PATH" >&2
+  echo "release GUI binary not found: $BIN_PATH" >&2
+  exit 1
+fi
+if [[ ! -x "$CLI_PATH" ]]; then
+  echo "release CLI binary not found: $CLI_PATH" >&2
+  exit 1
+fi
+if ldd "$CLI_PATH" | grep -E 'libgtk|libadwaita'; then
+  echo "${CLI_BIN} must not link GTK/libadwaita" >&2
   exit 1
 fi
 
@@ -63,6 +73,7 @@ mkdir -p "$APPDIR/usr/bin" "$APPDIR/usr/lib" "$APPDIR/usr/share/applications" \
   "$APPDIR/apprun-hooks"
 
 install -Dm0755 "$BIN_PATH" "$APPDIR/usr/bin/$APP_BIN"
+install -Dm0755 "$CLI_PATH" "$APPDIR/usr/bin/$CLI_BIN"
 install -Dm0755 "$PDFIUM_DIR/lib/libpdfium.so" "$APPDIR/usr/lib/libpdfium.so"
 install -Dm0644 "$ROOT/$DESKTOP_FILE" "$APPDIR/usr/share/applications/${APP_ID}.desktop"
 install -Dm0644 "$ROOT/$METAINFO_FILE" "$APPDIR/usr/share/metainfo/${APP_ID}.metainfo.xml"
@@ -117,6 +128,7 @@ done
 "$LINUXDEPLOY" \
   --appdir "$APPDIR" \
   --executable "$APPDIR/usr/bin/$APP_BIN" \
+  --executable "$APPDIR/usr/bin/$CLI_BIN" \
   --desktop-file "$APPDIR/usr/share/applications/${APP_ID}.desktop" \
   --icon-file "$APPDIR/usr/share/icons/hicolor/scalable/apps/${ICON_NAME}.svg" \
   "${extra_libs[@]}" \

@@ -37,12 +37,17 @@ jobs:
           git config --global --add safe.directory "$GITHUB_WORKSPACE"
           packaging/import-desktop-data.sh
 
-      - name: Check binary name is a single variable
+      - name: Check GUI/CLI binary names
         run: |
           set -euo pipefail
           . packaging/config.sh
+          test "$APP_BIN" = "openpdf-gtk"
+          test "$CLI_BIN" = "openpdf"
+          test "$APP_BIN" != "$CLI_BIN"
           grep -qx "command: ${APP_BIN}" packaging/flatpak/io.github.ej3mpl0.openpdf.yml
           grep -q "Exec=${APP_BIN} " data/io.github.ej3mpl0.openpdf.desktop
+          grep -q "CLI_BIN" packaging/appimage/build.sh
+          grep -q "CLI_CRATE" packaging/flatpak/io.github.ej3mpl0.openpdf.yml
 
       - name: Build Flatpak
         uses: flatpak/flatpak-github-actions/flatpak-builder@v6

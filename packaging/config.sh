@@ -1,6 +1,10 @@
 # Shared packaging settings. Scripts source this file.
-# The installed binary name is a single variable so it can later become `openpdf`.
+#
+# GUI binary (Flatpak command + .desktop Exec). Keep this a single variable.
 APP_BIN="${APP_BIN:-openpdf-gtk}"
+# CLI binary from crate openpdf-cli. Separate from the GUI; must not load GTK.
+CLI_BIN="${CLI_BIN:-openpdf}"
+CLI_CRATE="${CLI_CRATE:-openpdf-cli}"
 
 # App id and desktop/metainfo paths match PR #1 (branch `gtk`) under data/.
 APP_ID="io.github.ej3mpl0.openpdf"

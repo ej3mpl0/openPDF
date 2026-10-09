@@ -1,6 +1,7 @@
 # Flatpak manifest for openPDF.
 # App id matches data/io.github.ej3mpl0.openpdf.{desktop,metainfo.xml} from PR #1.
-# Binary name is APP_BIN in packaging/config.sh (currently openpdf-gtk).
+# GUI binary is APP_BIN in packaging/config.sh (openpdf-gtk; .desktop Exec).
+# CLI binary is CLI_BIN (openpdf from crate openpdf-cli) and must not load GTK.
 #
 # Desktop files are not duplicated here; they are installed from data/.
 # Files open through the XDG document portal (no --filesystem=home).
@@ -97,8 +98,15 @@ modules:
         set -euo pipefail
         # shellcheck source=../config.sh
         . packaging/config.sh
-        cargo --offline build --release -p "$APP_BIN"
+        cargo --offline build --release -p "$APP_BIN" -p "$CLI_CRATE"
         install -Dm0755 "target/release/${APP_BIN}" "${FLATPAK_DEST}/bin/${APP_BIN}"
+        install -Dm0755 "target/release/${CLI_BIN}" "${FLATPAK_DEST}/bin/${CLI_BIN}"
+        if command -v ldd >/dev/null; then
+          if ldd "${FLATPAK_DEST}/bin/${CLI_BIN}" | grep -E 'libgtk|libadwaita'; then
+            echo "${CLI_BIN} must not link GTK/libadwaita" >&2
+            exit 1
+          fi
+        fi
         install -Dm0644 "$DESKTOP_FILE" "${FLATPAK_DEST}/share/applications/${APP_ID}.desktop"
         install -Dm0644 "$METAINFO_FILE" "${FLATPAK_DEST}/share/metainfo/${APP_ID}.metainfo.xml"
         icon_src=""
