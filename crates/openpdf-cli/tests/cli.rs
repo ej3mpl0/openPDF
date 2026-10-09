@@ -2,6 +2,7 @@ use std::path::{Path, PathBuf};
 use std::process::Command;
 
 use openpdf_core::i18n::Catalog;
+use openpdf_core::test_support::locale_test_guard;
 
 fn bin() -> PathBuf {
     env!("CARGO_BIN_EXE_openpdf").into()
@@ -63,6 +64,7 @@ fn info_two_page() {
 
 #[test]
 fn info_follows_spanish_catalog_without_hardcoded_msgstr() {
+    let _g = locale_test_guard();
     let file = corpus("two_page.pdf");
     let en = run_locale("C", &["info", file.to_str().unwrap()]);
     let es = run_locale("es_ES.UTF-8", &["info", file.to_str().unwrap()]);
@@ -83,6 +85,7 @@ fn info_follows_spanish_catalog_without_hardcoded_msgstr() {
 
 #[test]
 fn help_follows_locale() {
+    let _g = locale_test_guard();
     let en = run_locale("C", &["--help"]);
     let es = run_locale("es", &["--help"]);
     assert!(en.status.success(), "{}", String::from_utf8_lossy(&en.stderr));
@@ -103,6 +106,7 @@ fn help_follows_locale() {
 
 #[test]
 fn info_language_es_en() {
+    let _g = locale_test_guard();
     let file = corpus("two_page.pdf");
     let out = run_language("es:en", "en_US.UTF-8", &["info", file.to_str().unwrap()]);
     assert!(out.status.success(), "{}", String::from_utf8_lossy(&out.stderr));
@@ -115,6 +119,7 @@ fn info_language_es_en() {
 
 #[test]
 fn info_language_fr_es() {
+    let _g = locale_test_guard();
     let file = corpus("two_page.pdf");
     let out = run_language("fr:es", "en_US.UTF-8", &["info", file.to_str().unwrap()]);
     assert!(out.status.success(), "{}", String::from_utf8_lossy(&out.stderr));
@@ -126,6 +131,7 @@ fn info_language_fr_es() {
 
 #[test]
 fn info_language_ignored_when_lang_is_c() {
+    let _g = locale_test_guard();
     let file = corpus("two_page.pdf");
     let out = run_language("es:en", "C", &["info", file.to_str().unwrap()]);
     assert!(out.status.success(), "{}", String::from_utf8_lossy(&out.stderr));
