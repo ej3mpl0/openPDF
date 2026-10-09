@@ -6,6 +6,7 @@ use lopdf::{Dictionary, Document as LopdfDocument, Object, ObjectId};
 use crate::command::{normalize_rotation, Applied, Command, History};
 use crate::error::{Error, Result};
 use crate::outline::{load_outline, OutlineItem};
+use crate::signer::contains_signature;
 
 static NEXT_DOC_ID: AtomicU64 = AtomicU64::new(1);
 
@@ -44,6 +45,7 @@ pub struct Document {
     slots: Vec<PageSlot>,
     history: History,
     dirty: bool,
+    signed: bool,
 }
 
 impl Document {
@@ -72,6 +74,7 @@ impl Document {
         path: Option<PathBuf>,
     ) -> Result<Self> {
         let slots = slots_from(&inner)?;
+        let signed = contains_signature(&inner);
         Ok(Self {
             id: DocumentId::next(),
             path,
@@ -80,6 +83,7 @@ impl Document {
             slots,
             history: History::new(),
             dirty: false,
+            signed,
         })
     }
 
@@ -131,6 +135,27 @@ impl Document {
         self.dirty
     }
 
+    /// True when the PDF contains at least one signature dictionary (`/Type /Sig` or `/FT /Sig`).
+    pub fn is_signed(&self) -> bool {
+        self.signed
+    }
+
+    /// Signed documents are locked against rotate/delete/move and full rewrites.
+    /// The UI should treat this as read-only except for incremental (append-only) save.
+    pub fn is_read_only(&self) -> bool {
+        self.signed
+    }
+
+    /// Error if rotate/delete/move would break a signature. The UI can call this
+    /// before enabling those tools.
+    pub fn ensure_editable(&self) -> Result<()> {
+        if self.signed {
+            Err(Error::signed("edit"))
+        } else {
+            Ok(())
+        }
+    }
+
     pub fn can_undo(&self) -> bool {
         self.history.can_undo()
     }
@@ -153,6 +178,9 @@ impl Document {
         if delta == 0 {
             return Ok(());
         }
+        if self.signed {
+            return Err(Error::signed("rotate"));
+        }
         self.slots[i].rotation = normalize_rotation(self.slots[i].rotation + delta);
         self.dirty = true;
         self.history.push(Applied::Rotate { index: i, delta });
@@ -160,6 +188,9 @@ impl Document {
     }
 
     pub fn delete_page(&mut self, index: u32) -> Result<()> {
+        if self.signed {
+            return Err(Error::signed("delete"));
+        }
         if self.slots.len() <= 1 {
             return Err(Error::EmptyDocument);
         }
@@ -182,6 +213,9 @@ impl Document {
         if f == t || f + 1 == t {
             return Ok(());
         }
+        if self.signed {
+            return Err(Error::signed("move"));
+        }
         let slot = self.slots.remove(f);
         let insert_at = if t > f { t - 1 } else { t };
         self.slots.insert(insert_at, slot);
@@ -191,6 +225,12 @@ impl Document {
     }
 
     pub fn undo(&mut self) -> Result<bool> {
+        if !self.history.can_undo() {
+            return Ok(false);
+        }
+        if self.signed {
+            return Err(Error::signed("undo"));
+        }
         let Some(applied) = self.history.pop_undo() else {
             return Ok(false);
         };
@@ -201,6 +241,12 @@ impl Document {
     }
 
     pub fn redo(&mut self) -> Result<bool> {
+        if !self.history.can_redo() {
+            return Ok(false);
+        }
+        if self.signed {
+            return Err(Error::signed("redo"));
+        }
         let Some(applied) = self.history.pop_redo() else {
             return Ok(false);
         };
@@ -302,6 +348,7 @@ impl Document {
     pub(crate) fn reload_from_saved(&mut self, bytes: Vec<u8>) -> Result<()> {
         let inner = LopdfDocument::load_mem(&bytes)?;
         self.slots = slots_from(&inner)?;
+        self.signed = contains_signature(&inner);
         self.inner = inner;
         self.original = bytes;
         self.dirty = false;
@@ -425,6 +472,9 @@ mod tests {
         let p = doc.page(0).unwrap();
         assert!((p.width_pt - 612.0).abs() < 0.1);
         assert!((p.height_pt - 792.0).abs() < 0.1);
+        assert!(!doc.is_signed());
+        assert!(!doc.is_read_only());
+        doc.ensure_editable().unwrap();
     }
 
     #[test]

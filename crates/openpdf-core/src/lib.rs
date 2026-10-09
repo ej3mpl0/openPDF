@@ -23,7 +23,10 @@ pub use render::{
     page_pixel_size, quantize_zoom, tile_grid, tile_rect, Engine, Priority, Raster, SearchHit,
     Tile, TileCache, TileEvent, TileKey, TileRequest, DEFAULT_CACHE_BYTES, TILE_SIZE,
 };
-pub use signer::{SignRequest, SignatureInfo, Signer, VisibleAppearance};
+pub use signer::{
+    CertificateInfo, CertificateUsage, CertificateValidity, SignRequest, SignatureInfo, Signer,
+    VisibleAppearance,
+};
 
 #[cfg(test)]
 pub(crate) mod test_support {

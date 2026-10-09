@@ -5,6 +5,7 @@ use lopdf::{Dictionary, Document as LopdfDocument, Object, ObjectId};
 
 use crate::document::Document;
 use crate::error::{Error, Result};
+use crate::signer::strip_signatures;
 
 /// Inclusive 0-based page range.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -155,6 +156,9 @@ pub fn merge(docs: &[Document]) -> Result<Document> {
     out.objects.insert(catalog_id, catalog_dict);
     out.max_id = out.objects.keys().map(|id| id.0).max().unwrap_or(1);
     out.trailer.set("Root", Object::Reference(catalog_id));
+    // Merge is a full rewrite; copied signature dictionaries would lock the
+    // new file while no longer matching any ByteRange.
+    strip_signatures(&mut out);
 
     Document::from_lopdf(out, None)
 }
@@ -226,6 +230,7 @@ fn extract_pages(doc: &Document, range: &PageRange) -> Result<Document> {
             dict.set("Parent", Object::Reference(pages_id));
         }
     }
+    strip_signatures(&mut src);
 
     Document::from_lopdf(src, None)
 }
@@ -262,5 +267,24 @@ mod tests {
         )
         .unwrap();
         assert_eq!(first_two[0].page_count(), 2);
+    }
+
+    #[test]
+    fn merge_of_signed_source_is_unsigned_and_editable() {
+        let signed_bytes =
+            crate::signer::append_stub_signature(&std::fs::read(corpus("hello.pdf")).unwrap())
+                .unwrap();
+        let signed = Document::from_bytes(signed_bytes, None).unwrap();
+        assert!(signed.is_signed());
+        let other = Document::open(corpus("two_page.pdf")).unwrap();
+        let mut merged = merge(&[signed, other]).unwrap();
+        assert!(!merged.is_signed());
+        assert!(!merged.is_read_only());
+        merged.rotate_page(0, 90).unwrap();
+        merged.save(std::env::temp_dir().join(format!(
+            "openpdf-merge-signed-{}.pdf",
+            std::process::id()
+        )))
+        .unwrap();
     }
 }

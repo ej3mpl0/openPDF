@@ -11,6 +11,8 @@ pub enum Error {
     EmptyDocument,
     Invalid(String),
     Sign(String),
+    /// The PDF already has a signature; `op` would invalidate it.
+    Signed { op: &'static str },
 }
 
 pub type Result<T> = std::result::Result<T, Error>;
@@ -27,6 +29,10 @@ impl fmt::Display for Error {
             Error::EmptyDocument => write!(f, "document has no pages"),
             Error::Invalid(m) => write!(f, "{m}"),
             Error::Sign(m) => write!(f, "sign: {m}"),
+            Error::Signed { op } => write!(
+                f,
+                "document is signed; {op} would invalidate the signature (incremental save only)"
+            ),
         }
     }
 }
@@ -63,5 +69,9 @@ impl Error {
 
     pub fn invalid(msg: impl Into<String>) -> Self {
         Error::Invalid(msg.into())
+    }
+
+    pub fn signed(op: &'static str) -> Self {
+        Error::Signed { op }
     }
 }

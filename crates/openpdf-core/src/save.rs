@@ -8,6 +8,8 @@ use crate::error::{Error, Result};
 
 impl Document {
     /// Rewrite the PDF (optimized "Save as"). Existing signatures are not preserved.
+    ///
+    /// Signed documents must use [`Document::save_incremental`] instead.
     pub fn save<P: AsRef<Path>>(&mut self, path: P) -> Result<()> {
         let bytes = self.to_bytes()?;
         std::fs::write(path, &bytes)?;
@@ -22,6 +24,9 @@ impl Document {
     }
 
     pub fn to_bytes(&self) -> Result<Vec<u8>> {
+        if self.is_signed() {
+            return Err(Error::signed("rewrite"));
+        }
         let mut doc = self.assembled_lopdf()?;
         let mut buf = Vec::new();
         doc.save_to(&mut buf)?;
@@ -47,7 +52,11 @@ impl Document {
     }
 
     pub fn write_to<W: Write>(&self, mut w: W) -> Result<()> {
-        w.write_all(&self.to_bytes()?)?;
+        if self.is_signed() {
+            w.write_all(&self.to_incremental_bytes()?)?;
+        } else {
+            w.write_all(&self.to_bytes()?)?;
+        }
         Ok(())
     }
 }
