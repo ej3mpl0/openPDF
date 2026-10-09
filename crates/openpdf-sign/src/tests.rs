@@ -2,7 +2,8 @@
 
 use std::fs;
 use std::path::{Path, PathBuf};
-use std::sync::{Mutex, OnceLock};
+use std::sync::atomic::{AtomicUsize, Ordering};
+use std::sync::{Arc, Mutex, OnceLock};
 use std::time::Duration;
 
 use cryptoki::context::{CInitializeArgs, CInitializeFlags, Pkcs11};
@@ -30,7 +31,7 @@ use crate::backend::{sign_pdf, KeyBackend, ListedCert};
 use crate::cades;
 use crate::cert::{unusable_reason, EcdsaHash, KeyKind};
 use crate::pin::StaticPinProvider;
-use crate::token::{Pkcs11Config, Pkcs11Signer};
+use crate::token::{Pkcs11Backend, Pkcs11Config, Pkcs11Signer};
 use crate::{default_signer, verify_pdf, CertificateUsage};
 
 const USER_PIN: &str = "1234";
@@ -425,11 +426,9 @@ fn list_certificates_does_not_ask_for_pin() {
             !certs.is_empty(),
             "SoftHSM token should expose the test certificate without a PIN"
         );
-        assert!(
-            certs
-                .iter()
-                .any(|c| c.subject.contains("OpenPDF Test Signer"))
-        );
+        assert!(certs
+            .iter()
+            .any(|c| c.subject.contains("OpenPDF Test Signer")));
         assert!(certs.iter().any(|c| c.subject.contains("OpenPDF EC Test")));
         let pin = certs
             .iter()
@@ -655,6 +654,73 @@ fn unknown_cert_id_fails() {
     };
 }
 
+/// Two C_Sign calls on one session. The second C_Login is
+/// `CKR_USER_ALREADY_LOGGED_IN` and must be treated as success.
+#[test]
+fn two_signatures_one_session_already_logged_in() {
+    let Some(()) = with_softhsm(|| {
+        let env = test_env();
+        let pins = Arc::new(AtomicUsize::new(0));
+        let pin = CountPin {
+            count: pins.clone(),
+            pin: USER_PIN,
+        };
+        let backend = Pkcs11Backend::new(Pkcs11Config::with_module(&env.module), Arc::new(pin))
+            .expect("backend");
+        let listed = backend.list().expect("list");
+        let cert = listed
+            .iter()
+            .find(|c| can_use(&c.info) && c.info.subject.contains("OpenPDF Test Signer"))
+            .expect("RSA SoftHSM test cert");
+        let der = cert.der.clone();
+        let name = cert.info.subject.clone();
+        let request = SignRequest {
+            cert_id: cert.id.clone(),
+            reason: Some("already-logged-in".into()),
+            location: None,
+            contact: None,
+            appearance: None,
+        };
+        let live = backend.open_live_session(&cert.id).expect("one session");
+        let pdf = fs::read(corpus("hello.pdf")).unwrap();
+        let first = crate::pades::sign_incremental(&pdf, &request, &name, |message| {
+            cades::sign_detached(message, &der, |tbs| live.sign_bytes(tbs))
+        })
+        .expect("first sign on live session");
+        assert!(first.starts_with(&pdf));
+        let first_infos = verify_pdf(&first).expect("verify first");
+        assert_eq!(first_infos.len(), 1, "{first_infos:?}");
+        assert_eq!(first_infos[0].valid, Some(true), "{first_infos:?}");
+        let second = crate::pades::sign_incremental(&first, &request, &name, |message| {
+            cades::sign_detached(message, &der, |tbs| live.sign_bytes(tbs))
+        })
+        .expect("second sign must accept CKR_USER_ALREADY_LOGGED_IN");
+        assert!(second.starts_with(&first));
+        let infos = verify_pdf(&second).expect("verify");
+        assert_eq!(infos.len(), 2, "{infos:?}");
+        assert!(infos.iter().all(|i| i.valid == Some(true)), "{infos:?}");
+        assert_eq!(
+            pins.load(Ordering::SeqCst),
+            2,
+            "login_user runs twice; the second C_Login is already-logged-in"
+        );
+    }) else {
+        return;
+    };
+}
+
+struct CountPin {
+    count: Arc<AtomicUsize>,
+    pin: &'static str,
+}
+
+impl PinProvider for CountPin {
+    fn request_pin(&self, _token_label: &str) -> openpdf_core::Result<SecretPin> {
+        self.count.fetch_add(1, Ordering::SeqCst);
+        Ok(SecretPin::new(self.pin))
+    }
+}
+
 fn can_use(c: &openpdf_core::CertificateInfo) -> bool {
     c.unusable.is_none() && (c.usage.is_empty() || c.usage.contains(&CertificateUsage::Signing))
 }
@@ -830,10 +896,7 @@ fn mock_backend_pades_incremental_and_verify() {
 
 #[test]
 fn cert_unusable_match_needs_wildcard() {
-    assert_eq!(
-        classify_unusable(&CertUnusable::AuthenticationOnly),
-        "auth"
-    );
+    assert_eq!(classify_unusable(&CertUnusable::AuthenticationOnly), "auth");
     assert_eq!(
         classify_unusable(&CertUnusable::Expired {
             not_after: "2020-01-01T00:00:00Z".into()
@@ -965,9 +1028,9 @@ fn mock_ec_cert(
     let spki = SubjectPublicKeyInfoOwned {
         algorithm: AlgorithmIdentifierOwned {
             oid: const_oid::ObjectIdentifier::new_unwrap("1.2.840.10045.2.1"),
-            parameters: Some(der::Any::from(
-                &const_oid::ObjectIdentifier::new_unwrap(curve_oid),
-            )),
+            parameters: Some(der::Any::from(&const_oid::ObjectIdentifier::new_unwrap(
+                curve_oid,
+            ))),
         },
         subject_public_key: BitString::from_bytes(sec1).expect("sec1"),
     };
@@ -1097,10 +1160,7 @@ fn assert_ecdsa_cms_roundtrip(backend: &MockEcdsaBackend, hash: EcdsaHash, cn_pa
     let check = cades::verify_detached(&cms, message);
     assert!(check.valid, "ECDSA {cn_part} CMS must verify");
     assert!(
-        check
-            .signer
-            .as_deref()
-            .is_some_and(|s| s.contains(cn_part)),
+        check.signer.as_deref().is_some_and(|s| s.contains(cn_part)),
         "signer: {:?}",
         check.signer
     );
@@ -1224,7 +1284,9 @@ fn sign_rejects_authentication_only_certificate() {
         )
         .unwrap_err();
         match err {
-            Error::Sign(msg) => assert_eq!(msg, describe_unusable(&CertUnusable::AuthenticationOnly)),
+            Error::Sign(msg) => {
+                assert_eq!(msg, describe_unusable(&CertUnusable::AuthenticationOnly))
+            }
             other => panic!("expected Sign, got {other:?}"),
         }
     });
@@ -1262,9 +1324,9 @@ fn softhsm_ecdsa_p256_sign_and_verify() {
 fn native_test_cert<'a>(
     certs: &'a [openpdf_core::CertificateInfo],
 ) -> Option<&'a openpdf_core::CertificateInfo> {
-    certs.iter().find(|c| {
-        c.unusable.is_none() && c.subject.contains("OpenPDF Test Signer")
-    })
+    certs
+        .iter()
+        .find(|c| c.unusable.is_none() && c.subject.contains("OpenPDF Test Signer"))
 }
 
 #[cfg_attr(not(any(windows, target_os = "macos")), allow(dead_code))]

@@ -207,16 +207,14 @@ impl Pkcs11Backend {
             .or_else(|_| module.ctx.open_ro_session(picked.slot))
             .map_err(pkcs11_err)?;
 
-        login_user(module, &session, picked.slot, &picked.token_label, &self.pin)?;
-
-        let key = find_private_key(&session, &picked.cka_id)?;
-        let cert = Certificate::from_der(&picked.der).map_err(|e| Error::Sign(e.to_string()))?;
-        let kind = key_kind(&cert)
-            .ok_or_else(|| Error::Sign(openpdf_core::tr("unsupported public key algorithm")))?;
-        let sig = match kind {
-            KeyKind::Rsa => pkcs11_rsa_sha256(&session, key, data),
-            KeyKind::Ecdsa { hash } => pkcs11_ecdsa(&session, key, data, hash),
-        };
+        login_user(
+            module,
+            &session,
+            picked.slot,
+            &picked.token_label,
+            &self.pin,
+        )?;
+        let sig = sign_with_session(&session, picked, data);
         let _ = session.logout();
         sig
     }
@@ -248,7 +246,9 @@ impl KeyBackend for Pkcs11Backend {
             return Err(Error::Sign(openpdf_core::describe_unusable(reason)));
         }
         if !can_use_for_pades(&picked.info.usage) {
-            return Err(Error::Sign(openpdf_core::tr("certificate is not a signing cert")));
+            return Err(Error::Sign(openpdf_core::tr(
+                "certificate is not a signing cert",
+            )));
         }
         self.sign_raw(&picked, data)
     }
@@ -450,20 +450,41 @@ fn login_user(
     }
     // Pinpad / protected path: C_Login with a NULL PIN. Never prompt, never send "".
     if info.protected_authentication_path() {
-        return session
-            .login(UserType::User, None)
-            .map_err(pkcs11_err);
+        return ck_login(session, None);
     }
     let secret = pin.request_pin(token_label)?;
     if secret.as_str().trim().is_empty() {
         return Err(Error::PinRequired);
     }
     let auth = AuthPin::new(secret.as_str().into());
-    let result = session
-        .login(UserType::User, Some(&auth))
-        .map_err(pkcs11_err);
+    let result = ck_login(session, Some(&auth));
     drop(secret);
     result
+}
+
+/// `CKR_USER_ALREADY_LOGGED_IN`: this session is already authenticated. Treat as
+/// success so a second `C_Login` (consecutive signatures) does not fail.
+fn ck_login(session: &Session, pin: Option<&AuthPin>) -> Result<()> {
+    login_from_ck(session.login(UserType::User, pin))
+}
+
+fn login_from_ck(result: cryptoki::error::Result<()>) -> Result<()> {
+    match result {
+        Ok(()) => Ok(()),
+        Err(CkError::Pkcs11(RvError::UserAlreadyLoggedIn, _)) => Ok(()),
+        Err(e) => Err(pkcs11_err(e)),
+    }
+}
+
+fn sign_with_session(session: &Session, picked: &PickedCert, data: &[u8]) -> Result<Vec<u8>> {
+    let key = find_private_key(session, &picked.cka_id)?;
+    let cert = Certificate::from_der(&picked.der).map_err(|e| Error::Sign(e.to_string()))?;
+    let kind = key_kind(&cert)
+        .ok_or_else(|| Error::Sign(openpdf_core::tr("unsupported public key algorithm")))?;
+    match kind {
+        KeyKind::Rsa => pkcs11_rsa_sha256(session, key, data),
+        KeyKind::Ecdsa { hash } => pkcs11_ecdsa(session, key, data, hash),
+    }
 }
 
 fn token_pin_status(info: &TokenInfo) -> TokenPinStatus {
@@ -481,4 +502,81 @@ fn slot_id(slot: Slot) -> u64 {
 
 fn trim_pkcs11_label(label: &str) -> String {
     label.trim().trim_end_matches('\0').trim().to_string()
+}
+
+/// One PKCS#11 session kept open so tests can sign twice without `C_Logout`.
+#[cfg(test)]
+pub(crate) struct LiveSignSession<'a> {
+    backend: &'a Pkcs11Backend,
+    session: Session,
+    picked: PickedCert,
+}
+
+#[cfg(test)]
+impl Pkcs11Backend {
+    pub(crate) fn open_live_session(&self, cert_id: &str) -> Result<LiveSignSession<'_>> {
+        let picked = self.pick(cert_id)?;
+        if let Some(reason) = &picked.info.unusable {
+            return Err(Error::Sign(openpdf_core::describe_unusable(reason)));
+        }
+        if !can_use_for_pades(&picked.info.usage) {
+            return Err(Error::Sign(openpdf_core::tr(
+                "certificate is not a signing cert",
+            )));
+        }
+        let module = self
+            .modules
+            .get(picked.module_index)
+            .ok_or_else(|| pkcs11_err("missing module"))?;
+        let session = module
+            .ctx
+            .open_rw_session(picked.slot)
+            .or_else(|_| module.ctx.open_ro_session(picked.slot))
+            .map_err(pkcs11_err)?;
+        Ok(LiveSignSession {
+            backend: self,
+            session,
+            picked,
+        })
+    }
+}
+
+#[cfg(test)]
+impl LiveSignSession<'_> {
+    /// Login (already-logged-in is success) then `C_Sign`. Leaves the session open.
+    pub(crate) fn sign_bytes(&self, data: &[u8]) -> Result<Vec<u8>> {
+        let module = self
+            .backend
+            .modules
+            .get(self.picked.module_index)
+            .ok_or_else(|| pkcs11_err("missing module"))?;
+        login_user(
+            module,
+            &self.session,
+            self.picked.slot,
+            &self.picked.token_label,
+            &self.backend.pin,
+        )?;
+        sign_with_session(&self.session, &self.picked, data)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use cryptoki::context::Function;
+
+    #[test]
+    fn already_logged_in_is_success() {
+        assert!(login_from_ck(Ok(())).is_ok());
+        assert!(login_from_ck(Err(CkError::Pkcs11(
+            RvError::UserAlreadyLoggedIn,
+            Function::Login,
+        )))
+        .is_ok());
+        assert!(login_from_ck(Err(
+            CkError::Pkcs11(RvError::PinIncorrect, Function::Login,)
+        ))
+        .is_err());
+    }
 }
