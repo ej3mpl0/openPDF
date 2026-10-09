@@ -1,5 +1,7 @@
 /target
 **/*.png
+**/__pycache__/
+*.pyc
 packaging/appimage/build/
 packaging/appimage/dist/
 packaging/flatpak/.cache/

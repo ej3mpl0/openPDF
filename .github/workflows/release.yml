@@ -1,0 +1,206 @@
+name: Release
+
+on:
+  push:
+    tags:
+      - "v*"
+
+concurrency:
+  group: release-${{ github.ref }}
+  cancel-in-progress: false
+
+permissions:
+  contents: write
+
+jobs:
+  linux-flatpak:
+    name: Linux Flatpak
+    runs-on: ubuntu-latest
+    container:
+      image: ghcr.io/flathub-infra/flatpak-github-actions:gnome-51
+      options: --privileged
+    defaults:
+      run:
+        shell: bash
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Import desktop metadata from gtk if needed
+        run: |
+          git config --global --add safe.directory "$GITHUB_WORKSPACE"
+          packaging/import-desktop-data.sh
+
+      - name: Prepare ostree repo
+        run: |
+          mkdir -p repo
+          ostree init --repo=repo --mode=archive-z2
+          ostree --repo=repo config set core.min-free-space-percent 0
+          ostree --repo=repo config set core.min-free-space-size 0MB
+
+      - name: Build Flatpak
+        uses: flatpak/flatpak-github-actions/flatpak-builder@v6
+        with:
+          bundle: io.github.ej3mpl0.openpdf.flatpak
+          manifest-path: packaging/flatpak/io.github.ej3mpl0.openpdf.yml
+          repo-dir: repo
+          cache: false
+          upload-artifact: false
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: release-linux-flatpak
+          path: io.github.ej3mpl0.openpdf.flatpak
+          if-no-files-found: error
+
+  linux-appimage:
+    name: Linux AppImage
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+        with:
+          prefix-key: release-linux-appimage
+
+      - name: Install GTK4, libadwaita, and AppImage tools
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends \
+            libgtk-4-dev libadwaita-1-dev pkg-config \
+            librsvg2-dev file desktop-file-utils dpkg-dev
+
+      - name: Import desktop metadata from gtk if needed
+        run: packaging/import-desktop-data.sh
+
+      - name: Build AppImage
+        run: packaging/appimage/build.sh
+        env:
+          APPIMAGE_EXTRACT_AND_RUN: "1"
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: release-linux-appimage
+          path: packaging/appimage/dist/*.AppImage
+          if-no-files-found: error
+
+  windows-cli:
+    name: Windows CLI
+    runs-on: windows-latest
+    defaults:
+      run:
+        shell: bash
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+        with:
+          prefix-key: release-windows-cli
+
+      - name: Install PDFium
+        run: .github/scripts/install-pdfium.sh
+
+      - name: Build CLI
+        run: cargo build --release -p openpdf-cli
+
+      - name: Pack portable zip
+        run: |
+          set -euo pipefail
+          ver="${GITHUB_REF_NAME#v}"
+          name="openpdf-${ver}-windows-x64"
+          mkdir -p "dist/$name"
+          cp target/release/openpdf.exe "dist/$name/"
+          cp "$PDFIUM_LIB" "dist/$name/pdfium.dll"
+          python3 - <<'PY'
+          import zipfile
+          from pathlib import Path
+          import os
+          ver = os.environ["GITHUB_REF_NAME"].removeprefix("v")
+          name = f"openpdf-{ver}-windows-x64"
+          root = Path("dist") / name
+          zpath = Path("dist") / f"{name}.zip"
+          with zipfile.ZipFile(zpath, "w", zipfile.ZIP_DEFLATED) as zf:
+              for path in root.rglob("*"):
+                  if path.is_file():
+                      zf.write(path, path.relative_to("dist"))
+          print(zpath)
+          PY
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: release-windows-cli
+          path: dist/openpdf-*-windows-x64.zip
+          if-no-files-found: error
+
+  macos-cli:
+    name: macOS CLI
+    runs-on: macos-latest
+    defaults:
+      run:
+        shell: bash
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+        with:
+          prefix-key: release-macos-cli
+
+      - name: Install PDFium
+        run: .github/scripts/install-pdfium.sh
+
+      - name: Build CLI
+        run: cargo build --release -p openpdf-cli
+
+      - name: Pack tar.gz
+        run: |
+          set -euo pipefail
+          ver="${GITHUB_REF_NAME#v}"
+          arch="$(uname -m)"
+          case "$arch" in
+            arm64) arch=arm64 ;;
+            x86_64) arch=x64 ;;
+          esac
+          stage="dist/openpdf-${ver}-macos-${arch}"
+          mkdir -p "$stage"
+          cp target/release/openpdf "$stage/"
+          cp "$PDFIUM_LIB" "$stage/libpdfium.dylib"
+          tar -C dist -czf "${stage}.tar.gz" "$(basename "$stage")"
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: release-macos-cli
+          path: dist/openpdf-*-macos-*.tar.gz
+          if-no-files-found: error
+
+  publish:
+    name: GitHub release
+    needs: [linux-flatpak, linux-appimage, windows-cli, macos-cli]
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          pattern: release-*
+          path: artifacts
+          merge-multiple: true
+
+      - name: Generate SHA256SUMS
+        run: |
+          set -euo pipefail
+          mkdir -p out
+          find artifacts -type f \( -name '*.flatpak' -o -name '*.AppImage' -o -name '*.zip' -o -name '*.tar.gz' \) -print | sort | while read -r f; do
+            cp "$f" "out/$(basename "$f")"
+          done
+          cd out
+          sha256sum * > SHA256SUMS
+          cat SHA256SUMS
+
+      - name: Create GitHub release
+        uses: softprops/action-gh-release@v2
+        with:
+          files: out/*
+          generate_release_notes: true
+          fail_on_unmatched_files: true

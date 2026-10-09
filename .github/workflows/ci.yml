@@ -1,26 +1,131 @@
 name: CI
+
 on: [push, pull_request]
+
+concurrency:
+  group: ci-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
 jobs:
   build:
-    runs-on: ubuntu-latest
+    name: ${{ matrix.os }}
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, windows-latest, macos-latest]
+    defaults:
+      run:
+        shell: bash
+    env:
+      CARGO_TERM_COLOR: always
+      OPENPDF_MEASURE_RAM_MIB: "250"
+      OPENPDF_MEASURE_STARTUP_MS: "8000"
     steps:
       - uses: actions/checkout@v4
+
       - uses: dtolnay/rust-toolchain@stable
+
+      - uses: Swatinem/rust-cache@v2
+        with:
+          prefix-key: ci-${{ matrix.os }}
+
+      - name: Start timer
+        run: echo "JOB_START=$(date +%s)" >> "$GITHUB_ENV"
+
       - name: Install PDFium
-        run: |
-          set -euo pipefail
-          curl -fsSL -o /tmp/pdfium.tgz \
-            "https://github.com/bblanchon/pdfium-binaries/releases/download/chromium%2F8035/pdfium-linux-x64.tgz"
-          mkdir -p "$HOME/pdfium"
-          tar -xzf /tmp/pdfium.tgz -C "$HOME/pdfium"
-          sudo cp "$HOME/pdfium/lib/libpdfium.so" /usr/local/lib/
-          sudo ldconfig
+        run: .github/scripts/install-pdfium.sh
+
       - name: Install SoftHSM2
+        if: runner.os == 'Linux'
         run: |
           sudo apt-get update
-          sudo apt-get install -y softhsm2
-      - run: cargo build --workspace --release
-      - run: cargo test --workspace
+          sudo apt-get install -y --no-install-recommends softhsm2
+
+      - name: Install GTK4 and libadwaita
+        if: runner.os == 'Linux'
+        run: |
+          sudo apt-get install -y --no-install-recommends \
+            libgtk-4-dev libadwaita-1-dev pkg-config
+
+      - name: Build core, CLI, and sign
+        run: cargo build --release -p openpdf-core -p openpdf-cli -p openpdf-sign
+
+      - name: Build GTK
+        if: runner.os == 'Linux'
+        run: cargo build --release -p openpdf-gtk
+
+      - name: Test core, CLI, and sign
+        run: |
+          set -euo pipefail
+          if [ "${{ runner.os }}" = Linux ]; then
+            cargo test --release -p openpdf-core -p openpdf-cli -p openpdf-sign
+          else
+            # GHA always sets CI=true. Sign's SoftHSM tests only search Linux
+            # .so paths and panic in CI when the module is missing — unset CI
+            # so those tests skip on Windows/macOS. PDFium tests still run
+            # when OPENPDF_PDFIUM is set.
+            env -u CI cargo test --release -p openpdf-core -p openpdf-cli -p openpdf-sign
+          fi
+
+      - name: Test GTK
+        if: runner.os == 'Linux'
+        run: cargo test --release -p openpdf-gtk
         env:
           CI: "true"
-          OPENPDF_PDFIUM: /usr/local/lib/libpdfium.so
+
+      - name: Measure
+        run: python3 .github/scripts/run-measure.py
+
+      - name: Record CI time
+        if: always()
+        run: |
+          set -euo pipefail
+          end=$(date +%s)
+          start="${JOB_START:-$end}"
+          dur=$((end - start))
+          mkdir -p ci-times
+          printf 'os=%s\nduration_s=%s\n' "${{ matrix.os }}" "$dur" > "ci-times/${{ matrix.os }}.txt"
+          {
+            echo "## ${{ matrix.os }}"
+            echo
+            echo "CI time: **${dur}s**"
+          } >> "$GITHUB_STEP_SUMMARY"
+
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: ci-time-${{ matrix.os }}
+          path: ci-times/${{ matrix.os }}.txt
+          if-no-files-found: error
+
+  times:
+    name: CI times
+    needs: build
+    if: always()
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          pattern: ci-time-*
+          path: ci-times
+          merge-multiple: true
+
+      - name: Summarize CI times per OS
+        run: |
+          set -euo pipefail
+          {
+            echo "## CI times per OS"
+            echo
+            echo "| OS | Seconds |"
+            echo "| --- | ---: |"
+            for f in ci-times/*.txt; do
+              [ -f "$f" ] || continue
+              os=$(sed -n 's/^os=//p' "$f")
+              dur=$(sed -n 's/^duration_s=//p' "$f")
+              echo "| \`$os\` | ${dur} |"
+            done
+          } >> "$GITHUB_STEP_SUMMARY"
