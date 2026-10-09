@@ -66,8 +66,11 @@ jobs:
         if: runner.os == 'Linux'
         run: cargo build --release -p openpdf-gtk
 
-      - name: Test core, CLI, and sign
-        run: cargo test --release -p openpdf-core -p openpdf-cli -p openpdf-sign
+      - name: Test core and CLI
+        run: cargo test --release -p openpdf-core -p openpdf-cli
+
+      - name: Test sign
+        run: cargo test --release -p openpdf-sign -- --test-threads=1
 
       - name: Test GTK
         if: runner.os == 'Linux'

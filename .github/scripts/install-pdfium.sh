@@ -65,8 +65,12 @@ if [[ "$os" == "Linux" ]] && command -v sudo >/dev/null && [[ -w /usr/local/lib 
   lib=/usr/local/lib/libpdfium.so
 fi
 
-echo "OPENPDF_PDFIUM=$lib"
+env_lib="$lib"
+if command -v cygpath >/dev/null; then
+  env_lib="$(cygpath -w "$lib")"
+fi
+echo "OPENPDF_PDFIUM=$env_lib"
 if [[ -n "${GITHUB_ENV:-}" ]]; then
-  echo "OPENPDF_PDFIUM=$lib" >> "$GITHUB_ENV"
-  echo "PDFIUM_LIB=$lib" >> "$GITHUB_ENV"
+  echo "OPENPDF_PDFIUM=$env_lib" >> "$GITHUB_ENV"
+  echo "PDFIUM_LIB=$env_lib" >> "$GITHUB_ENV"
 fi
