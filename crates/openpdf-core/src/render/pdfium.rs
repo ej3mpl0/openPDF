@@ -5,9 +5,20 @@ use pdfium_render::prelude::*;
 
 use crate::error::{Error, Result};
 
-/// Resolve and load `libpdfium` from a bundled path, `OPENPDF_PDFIUM`, or the system.
-pub fn bind_pdfium(bundled: Option<&Path>) -> Result<Pdfium> {
+/// Platform library file name (`libpdfium.so` / `pdfium.dll` / `libpdfium.dylib`).
+pub fn pdfium_library_name() -> &'static str {
+    if cfg!(windows) {
+        "pdfium.dll"
+    } else if cfg!(target_os = "macos") {
+        "libpdfium.dylib"
+    } else {
+        "libpdfium.so"
+    }
+}
+
+fn pdfium_search_paths(bundled: Option<&Path>) -> Vec<PathBuf> {
     let mut candidates: Vec<PathBuf> = Vec::new();
+    let lib = pdfium_library_name();
 
     if let Ok(p) = env::var("OPENPDF_PDFIUM") {
         if !p.is_empty() {
@@ -20,17 +31,44 @@ pub fn bind_pdfium(bundled: Option<&Path>) -> Result<Pdfium> {
     if let Ok(exe) = env::current_exe() {
         if let Some(dir) = exe.parent() {
             candidates.push(dir.to_path_buf());
-            candidates.push(dir.join("libpdfium.so"));
+            candidates.push(dir.join(lib));
+            #[cfg(target_os = "macos")]
+            {
+                candidates.push(dir.join("Frameworks"));
+                candidates.push(dir.join("../Frameworks"));
+                if let Some(contents) = dir.parent() {
+                    candidates.push(contents.join("Frameworks"));
+                    candidates.push(contents.join("Frameworks").join(lib));
+                }
+            }
         }
     }
     candidates.push(PathBuf::from("."));
-    candidates.push(PathBuf::from("libpdfium.so"));
-    candidates.push(PathBuf::from("/usr/local/lib"));
-    candidates.push(PathBuf::from("/usr/local/lib/libpdfium.so"));
-    candidates.push(PathBuf::from("/usr/lib"));
-    candidates.push(PathBuf::from("/usr/lib/libpdfium.so"));
-    candidates.push(PathBuf::from("/usr/lib/x86_64-linux-gnu"));
-    candidates.push(PathBuf::from("/usr/lib/x86_64-linux-gnu/libpdfium.so"));
+    candidates.push(PathBuf::from(lib));
+
+    #[cfg(target_os = "linux")]
+    {
+        candidates.push(PathBuf::from("/usr/local/lib"));
+        candidates.push(PathBuf::from("/usr/local/lib").join(lib));
+        candidates.push(PathBuf::from("/usr/lib"));
+        candidates.push(PathBuf::from("/usr/lib").join(lib));
+        candidates.push(PathBuf::from("/usr/lib/x86_64-linux-gnu"));
+        candidates.push(PathBuf::from("/usr/lib/x86_64-linux-gnu").join(lib));
+    }
+
+    #[cfg(windows)]
+    {
+        if let Ok(windir) = env::var("WINDIR") {
+            candidates.push(PathBuf::from(windir).join("System32").join(lib));
+        }
+    }
+
+    candidates
+}
+
+/// Resolve and load PDFium from a bundled path, `OPENPDF_PDFIUM`, or the system.
+pub fn bind_pdfium(bundled: Option<&Path>) -> Result<Pdfium> {
+    let candidates = pdfium_search_paths(bundled);
 
     let mut last = None;
     for c in candidates {
@@ -160,6 +198,23 @@ fn force_rgba(mut bytes: Vec<u8>, w: u32, h: u32) -> Vec<u8> {
     }
     bytes.resize(expected, 255);
     bytes
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn library_name_matches_os() {
+        let name = pdfium_library_name();
+        if cfg!(windows) {
+            assert_eq!(name, "pdfium.dll");
+        } else if cfg!(target_os = "macos") {
+            assert_eq!(name, "libpdfium.dylib");
+        } else {
+            assert_eq!(name, "libpdfium.so");
+        }
+    }
 }
 
 fn crop_rgba(src: &[u8], src_w: u32, src_h: u32, x: u32, y: u32, w: u32, h: u32) -> Vec<u8> {

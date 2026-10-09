@@ -51,7 +51,9 @@ pub enum InvalidKind {
     UnknownPermission {
         value: String,
     },
-    OcrUnavailable,
+    OcrUnavailable {
+        hint: String,
+    },
     OcrLanguageMissing {
         language: String,
         installed: String,
@@ -146,9 +148,9 @@ impl InvalidKind {
             InvalidKind::UnknownPermission { value } => {
                 tr_args("unknown permission: {value}", &[("value", value)])
             }
-            InvalidKind::OcrUnavailable => tr(
-                "OCR is unavailable (install tesseract-ocr or set OPENPDF_TESSERACT to the binary or libtesseract)",
-            ),
+            InvalidKind::OcrUnavailable { hint } => {
+                tr_args("OCR is unavailable ({hint})", &[("hint", hint)])
+            }
             InvalidKind::OcrLanguageMissing {
                 language,
                 installed,

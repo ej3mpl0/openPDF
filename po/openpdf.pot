@@ -415,7 +415,7 @@ msgstr ""
 msgid "crop box must be llx,lly,urx,ury"
 msgstr ""
 
-msgid "OCR is unavailable (install tesseract-ocr or set OPENPDF_TESSERACT to the binary or libtesseract)"
+msgid "OCR is unavailable ({hint})"
 msgstr ""
 
 msgid "OCR language {language} is not installed (have: {installed}). {hint}"
@@ -427,10 +427,10 @@ msgstr ""
 msgid "redaction box is inverted"
 msgstr ""
 
-msgid "Add an invisible searchable text layer (Tesseract)"
+msgid "Add an invisible searchable text layer"
 msgstr ""
 
-msgid "Tesseract language (eng, spa, …)"
+msgid "OCR language (eng, spa, …)"
 msgstr ""
 
 msgid "List installed OCR languages"

@@ -23,6 +23,7 @@ use crate::cades;
 use crate::pades;
 
 /// OpenSC (Spanish DNIe), p11-kit / NSS softoken (FNMT in a user NSS db), SoftHSM.
+#[cfg(target_os = "linux")]
 const DEFAULT_MODULES: &[&str] = &[
     "/usr/lib/x86_64-linux-gnu/opensc-pkcs11.so",
     "/usr/lib/x86_64-linux-gnu/pkcs11/opensc-pkcs11.so",
@@ -40,6 +41,26 @@ const DEFAULT_MODULES: &[&str] = &[
     "/usr/lib/x86_64-linux-gnu/softhsm/libsofthsm2.so",
     "/usr/lib/x86_64-linux-gnu/pkcs11/libsofthsm2.so",
 ];
+
+#[cfg(target_os = "macos")]
+const DEFAULT_MODULES: &[&str] = &[
+    "/opt/homebrew/lib/opensc-pkcs11.so",
+    "/usr/local/lib/opensc-pkcs11.so",
+    "/Library/OpenSC/lib/opensc-pkcs11.so",
+    "/opt/homebrew/lib/softhsm/libsofthsm2.so",
+    "/usr/local/lib/softhsm/libsofthsm2.so",
+];
+
+#[cfg(windows)]
+const DEFAULT_MODULES: &[&str] = &[
+    r"C:\Program Files\OpenSC Project\OpenSC\pkcs11\opensc-pkcs11.dll",
+    r"C:\Windows\System32\opensc-pkcs11.dll",
+    "opensc-pkcs11.dll",
+    "softhsm2.dll",
+];
+
+#[cfg(not(any(target_os = "linux", target_os = "macos", windows)))]
+const DEFAULT_MODULES: &[&str] = &[];
 
 /// Where to load PKCS#11 modules from.
 #[derive(Clone, Debug, Default)]

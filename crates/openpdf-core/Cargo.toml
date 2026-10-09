@@ -18,9 +18,18 @@ image = { version = "0.25", default-features = false, features = ["png", "jpeg"]
 getrandom = "0.3"
 zeroize = { version = "1", features = ["alloc"] }
 libloading = "0.8"
+directories = "5"
+sys-locale = "0.3"
+
+[target.'cfg(target_os = "macos")'.dependencies]
+libc = "0.2"
 
 [dev-dependencies]
 
 [[bench]]
 name = "perf"
 harness = false
+
+[[bin]]
+name = "openpdf-measure"
+path = "src/bin/measure.rs"

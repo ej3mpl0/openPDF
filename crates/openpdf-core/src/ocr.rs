@@ -1,5 +1,10 @@
-//! Optional Tesseract OCR. Never linked: the `tesseract` binary or `libtesseract`
-//! is resolved at runtime (`OPENPDF_TESSERACT`, PATH, Flatpak extensions).
+//! OCR text-layer writing lives in this crate. Recognition is [`OcrEngine`].
+//!
+//! The application binary constructs `Box<dyn OcrEngine>` (like [`crate::Signer`])
+//! and hands it to the UI / CLI. Linux default is Tesseract via a runtime
+//! `tesseract` binary or `libtesseract` (`OPENPDF_TESSERACT`, PATH, Flatpak
+//! `/app/extensions`). It is never linked. Windows.Media.Ocr and macOS Vision
+//! implement the same trait from platform crates later.
 
 use std::ffi::{c_char, c_void, CStr, CString};
 use std::path::{Path, PathBuf};
@@ -18,6 +23,8 @@ use crate::render::{Engine, Raster};
 pub enum OcrBackend {
     Binary,
     Library,
+    /// Platform crate (Windows.Media.Ocr, Vision, …).
+    Platform,
 }
 
 /// UI-facing OCR probe. `available == false` means every other tool still works.
@@ -38,7 +45,17 @@ impl OcrCapability {
     }
 }
 
-/// OCR settings. `language` is a Tesseract lang code (`eng`, `spa`, …).
+/// One recognized word. Box is in raster pixels, origin top-left.
+#[derive(Clone, Debug, PartialEq)]
+pub struct OcrWord {
+    pub text: String,
+    pub left: f32,
+    pub top: f32,
+    pub width: f32,
+    pub height: f32,
+}
+
+/// OCR settings. `language` is an engine lang code (`eng`, `spa`, …).
 #[derive(Clone, Debug)]
 pub struct OcrOptions {
     pub language: String,
@@ -54,25 +71,108 @@ impl Default for OcrOptions {
     }
 }
 
-/// Probe Tesseract without failing the rest of the crate.
-pub fn ocr_capability() -> OcrCapability {
-    match resolve_engine() {
-        None => OcrCapability::unavailable(),
-        Some(engine) => OcrCapability {
-            available: true,
-            backend: Some(engine.backend()),
-            languages: engine.list_languages(),
-        },
+/// Recognize a page raster. Text-layer writing stays in [`ocr`].
+///
+/// ```ignore
+/// let engine: Box<dyn openpdf_core::OcrEngine> = openpdf_core::default_ocr_engine();
+/// // or, from a platform crate:
+/// // let engine: Box<dyn openpdf_core::OcrEngine> = Box::new(windows_ocr::WindowsMediaOcr::new());
+/// ```
+pub trait OcrEngine: Send + Sync {
+    fn capability(&self) -> OcrCapability;
+    fn languages(&self) -> Vec<String>;
+    fn recognize(&self, raster: &Raster, language: &str) -> Result<Vec<OcrWord>>;
+}
+
+/// Stub used when no engine is configured (Windows / macOS until a platform
+/// crate supplies Windows.Media.Ocr or Vision).
+#[derive(Clone, Debug)]
+pub struct UnavailableOcr {
+    hint: String,
+}
+
+impl UnavailableOcr {
+    pub fn new(hint: impl Into<String>) -> Self {
+        Self { hint: hint.into() }
     }
 }
 
+impl OcrEngine for UnavailableOcr {
+    fn capability(&self) -> OcrCapability {
+        OcrCapability::unavailable()
+    }
+
+    fn languages(&self) -> Vec<String> {
+        Vec::new()
+    }
+
+    fn recognize(&self, _raster: &Raster, _language: &str) -> Result<Vec<OcrWord>> {
+        Err(Error::invalid(InvalidKind::OcrUnavailable {
+            hint: self.hint.clone(),
+        }))
+    }
+}
+
+/// Tesseract via `tesseract` / `libtesseract` (never linked). Linux default.
+pub struct TesseractOcr {
+    inner: TessEngine,
+}
+
+impl TesseractOcr {
+    pub fn probe() -> Option<Self> {
+        resolve_engine().map(|inner| Self { inner })
+    }
+}
+
+impl OcrEngine for TesseractOcr {
+    fn capability(&self) -> OcrCapability {
+        OcrCapability {
+            available: true,
+            backend: Some(self.inner.backend()),
+            languages: self.inner.list_languages(),
+        }
+    }
+
+    fn languages(&self) -> Vec<String> {
+        self.inner.list_languages()
+    }
+
+    fn recognize(&self, raster: &Raster, language: &str) -> Result<Vec<OcrWord>> {
+        self.inner.recognize(raster, language)
+    }
+}
+
+/// Linux: Tesseract if present. Other OS: Tesseract only when found (CLI),
+/// otherwise [`UnavailableOcr`] so a platform crate can supply the engine.
+pub fn default_ocr_engine() -> Box<dyn OcrEngine> {
+    if let Some(t) = TesseractOcr::probe() {
+        return Box::new(t);
+    }
+    Box::new(UnavailableOcr::new(ocr_install_hint()))
+}
+
+/// Probe the default engine without failing the rest of the crate.
+pub fn ocr_capability() -> OcrCapability {
+    default_ocr_engine().capability()
+}
+
 /// Add an invisible searchable text layer. Signed documents are refused.
-pub fn ocr(engine: &Engine, doc: &Document, opts: &OcrOptions) -> Result<Document> {
+pub fn ocr(
+    render: &Engine,
+    ocr_engine: &dyn OcrEngine,
+    doc: &Document,
+    opts: &OcrOptions,
+) -> Result<Document> {
     if doc.is_signed() {
         return Err(Error::signed(SignedOp::Edit));
     }
-    let tess = resolve_engine().ok_or_else(|| Error::invalid(InvalidKind::OcrUnavailable))?;
-    let langs = tess.list_languages();
+    let cap = ocr_engine.capability();
+    if !cap.available {
+        return Err(Error::invalid(InvalidKind::OcrUnavailable {
+            hint: ocr_install_hint(),
+        }));
+    }
+    let langs = ocr_engine.languages();
     if !langs.is_empty() && !langs.iter().any(|l| l == &opts.language) {
         return Err(Error::invalid(InvalidKind::OcrLanguageMissing {
             language: opts.language.clone(),
@@ -81,7 +181,7 @@ pub fn ocr(engine: &Engine, doc: &Document, opts: &OcrOptions) -> Result<Documen
         }));
     }
 
-    engine.bind(doc)?;
+    render.bind(doc)?;
     let mut inner = doc.assembled_lopdf()?;
     let page_map = inner.get_pages();
     let total = doc.page_count();
@@ -106,8 +206,8 @@ pub fn ocr(engine: &Engine, doc: &Document, opts: &OcrOptions) -> Result<Documen
             })?;
         ensure_font(&mut inner, page_id, font_id)?;
         let (pw, ph) = page_size(&inner, page_id).unwrap_or((612.0, 792.0));
-        let raster = engine.render_page(doc.id(), i, zoom)?;
-        let words = tess.recognize(&raster, &opts.language)?;
+        let raster = render.render_page(doc.id(), i, zoom)?;
+        let words = ocr_engine.recognize(&raster, &opts.language)?;
         if words.is_empty() {
             continue;
         }
@@ -122,20 +222,39 @@ pub fn ocr(engine: &Engine, doc: &Document, opts: &OcrOptions) -> Result<Documen
     Document::from_lopdf(inner, None)
 }
 
-fn language_install_hint(lang: &str) -> String {
-    let pkg = match lang {
-        "eng" => "tesseract-ocr".to_string(),
-        other => format!("tesseract-ocr-{other}"),
-    };
-    format!("Debian/Ubuntu: apt install {pkg}")
+/// How to install or supply OCR on this OS (`InvalidKind::OcrUnavailable`).
+pub fn ocr_install_hint() -> String {
+    if cfg!(windows) {
+        "install Tesseract (winget install UB-Mannheim.TesseractOCR), set OPENPDF_TESSERACT, or pass a Windows.Media.Ocr OcrEngine"
+            .into()
+    } else if cfg!(target_os = "macos") {
+        "install Tesseract (brew install tesseract), set OPENPDF_TESSERACT, or pass a Vision OcrEngine"
+            .into()
+    } else {
+        "install tesseract-ocr or set OPENPDF_TESSERACT to the binary or libtesseract".into()
+    }
 }
 
-struct Word {
-    text: String,
-    left: f32,
-    top: f32,
-    width: f32,
-    height: f32,
+fn language_install_hint(lang: &str) -> String {
+    if cfg!(windows) {
+        format!(
+            "add the {lang} traineddata next to TESSDATA_PREFIX or the Tesseract installer language pack"
+        )
+    } else if cfg!(target_os = "macos") {
+        "Homebrew: brew install tesseract tesseract-lang".into()
+    } else {
+        let pkg = match lang {
+            "eng" => "tesseract-ocr".to_string(),
+            other => format!("tesseract-ocr-{other}"),
+        };
+        format!("Debian/Ubuntu: apt install {pkg}")
+    }
+}
+
+fn ocr_unavailable() -> Error {
+    Error::invalid(InvalidKind::OcrUnavailable {
+        hint: ocr_install_hint(),
+    })
 }
 
 enum TessEngine {
@@ -164,7 +283,7 @@ impl TessEngine {
         }
     }
 
-    fn recognize(&self, raster: &Raster, lang: &str) -> Result<Vec<Word>> {
+    fn recognize(&self, raster: &Raster, lang: &str) -> Result<Vec<OcrWord>> {
         match self {
             TessEngine::Binary(bin) => recognize_binary(bin, raster, lang),
             TessEngine::Library { lib, tessdata } => {
@@ -174,35 +293,53 @@ impl TessEngine {
     }
 }
 
+fn tesseract_bin_name() -> &'static str {
+    if cfg!(windows) {
+        "tesseract.exe"
+    } else {
+        "tesseract"
+    }
+}
+
+fn tesseract_lib_names() -> &'static [&'static str] {
+    if cfg!(windows) {
+        &[
+            "libtesseract-5.dll",
+            "libtesseract-4.dll",
+            "tesseract54.dll",
+            "tesseract.dll",
+        ]
+    } else if cfg!(target_os = "macos") {
+        &[
+            "libtesseract.dylib",
+            "libtesseract.5.dylib",
+            "libtesseract.4.dylib",
+        ]
+    } else {
+        &["libtesseract.so.5", "libtesseract.so.4", "libtesseract.so"]
+    }
+}
+
 fn resolve_engine() -> Option<TessEngine> {
     if let Ok(raw) = std::env::var("OPENPDF_TESSERACT") {
         if let Some(found) = probe_path(Path::new(&raw)) {
             return Some(found);
         }
     }
-    for candidate in [
-        Path::new("/usr/bin/tesseract"),
-        Path::new("/usr/local/bin/tesseract"),
-        Path::new("/app/bin/tesseract"),
-    ] {
-        if is_executable(candidate) {
-            return Some(TessEngine::Binary(candidate.to_path_buf()));
+    for candidate in tesseract_bin_candidates() {
+        if is_executable(&candidate) {
+            return Some(TessEngine::Binary(candidate));
         }
     }
-    if let Some(bin) = which("tesseract") {
+    if let Some(bin) = which(tesseract_bin_name()).or_else(|| which("tesseract")) {
         return Some(TessEngine::Binary(bin));
     }
-    for root in [
-        Path::new("/app/extensions"),
-        Path::new("/usr/lib/x86_64-linux-gnu"),
-        Path::new("/usr/lib"),
-        Path::new("/usr/local/lib"),
-    ] {
-        if let Some(found) = probe_path(root) {
+    for root in tesseract_lib_roots() {
+        if let Some(found) = probe_path(&root) {
             return Some(found);
         }
     }
-    for name in ["libtesseract.so.5", "libtesseract.so.4", "libtesseract.so"] {
+    for name in tesseract_lib_names() {
         if let Ok(lib) = unsafe { libloading::Library::new(name) } {
             drop(lib);
             return Some(TessEngine::Library {
@@ -214,10 +351,78 @@ fn resolve_engine() -> Option<TessEngine> {
     None
 }
 
+fn tesseract_bin_candidates() -> Vec<PathBuf> {
+    let mut out = Vec::new();
+    #[cfg(target_os = "linux")]
+    {
+        out.push(PathBuf::from("/usr/bin/tesseract"));
+        out.push(PathBuf::from("/usr/local/bin/tesseract"));
+        out.push(PathBuf::from("/app/bin/tesseract"));
+    }
+    #[cfg(target_os = "macos")]
+    {
+        out.push(PathBuf::from("/opt/homebrew/bin/tesseract"));
+        out.push(PathBuf::from("/usr/local/bin/tesseract"));
+    }
+    #[cfg(windows)]
+    {
+        if let Ok(pf) = std::env::var("PROGRAMFILES") {
+            out.push(
+                PathBuf::from(pf)
+                    .join("Tesseract-OCR")
+                    .join("tesseract.exe"),
+            );
+        }
+        if let Ok(pf86) = std::env::var("PROGRAMFILES(X86)") {
+            out.push(
+                PathBuf::from(pf86)
+                    .join("Tesseract-OCR")
+                    .join("tesseract.exe"),
+            );
+        }
+        if let Ok(local) = std::env::var("LOCALAPPDATA") {
+            out.push(
+                PathBuf::from(local)
+                    .join("Programs")
+                    .join("Tesseract-OCR")
+                    .join("tesseract.exe"),
+            );
+        }
+    }
+    out
+}
+
+fn tesseract_lib_roots() -> Vec<PathBuf> {
+    let mut out = Vec::new();
+    #[cfg(target_os = "linux")]
+    {
+        out.push(PathBuf::from("/app/extensions"));
+        out.push(PathBuf::from("/usr/lib/x86_64-linux-gnu"));
+        out.push(PathBuf::from("/usr/lib"));
+        out.push(PathBuf::from("/usr/local/lib"));
+    }
+    #[cfg(target_os = "macos")]
+    {
+        out.push(PathBuf::from("/opt/homebrew/lib"));
+        out.push(PathBuf::from("/usr/local/lib"));
+    }
+    #[cfg(windows)]
+    {
+        if let Ok(pf) = std::env::var("PROGRAMFILES") {
+            out.push(PathBuf::from(pf).join("Tesseract-OCR"));
+        }
+    }
+    out
+}
+
 fn probe_path(path: &Path) -> Option<TessEngine> {
     if path.is_file() {
         let name = path.file_name().and_then(|n| n.to_str()).unwrap_or("");
-        if name.contains("libtesseract") || path.extension().is_some_and(|e| e == "so") {
+        let is_lib = name.contains("tesseract")
+            && path
+                .extension()
+                .is_some_and(|e| e == "so" || e == "dll" || e == "dylib" || name.contains(".so."));
+        if is_lib || name.contains("libtesseract") {
             return Some(TessEngine::Library {
                 lib: path.to_path_buf(),
                 tessdata: first_tessdata(),
@@ -228,11 +433,15 @@ fn probe_path(path: &Path) -> Option<TessEngine> {
         }
     }
     if path.is_dir() {
-        let bin = path.join("tesseract");
+        let bin = path.join(tesseract_bin_name());
         if is_executable(&bin) {
             return Some(TessEngine::Binary(bin));
         }
-        for name in ["libtesseract.so.5", "libtesseract.so.4", "libtesseract.so"] {
+        let plain = path.join("tesseract");
+        if plain != bin && is_executable(&plain) {
+            return Some(TessEngine::Binary(plain));
+        }
+        for name in tesseract_lib_names() {
             let lib = path.join(name);
             if lib.is_file() {
                 return Some(TessEngine::Library {
@@ -287,17 +496,30 @@ fn first_tessdata() -> Option<PathBuf> {
 }
 
 fn scan_default_tessdata_dir() -> Option<PathBuf> {
-    for dir in [
-        Path::new("/usr/share/tesseract-ocr/5/tessdata"),
-        Path::new("/usr/share/tesseract-ocr/4.00/tessdata"),
-        Path::new("/usr/share/tessdata"),
-        Path::new("/app/share/tessdata"),
-    ] {
-        if dir.is_dir() {
-            return Some(dir.to_path_buf());
+    let mut dirs = Vec::new();
+    #[cfg(target_os = "linux")]
+    {
+        dirs.extend([
+            PathBuf::from("/usr/share/tesseract-ocr/5/tessdata"),
+            PathBuf::from("/usr/share/tesseract-ocr/4.00/tessdata"),
+            PathBuf::from("/usr/share/tessdata"),
+            PathBuf::from("/app/share/tessdata"),
+        ]);
+    }
+    #[cfg(target_os = "macos")]
+    {
+        dirs.extend([
+            PathBuf::from("/opt/homebrew/share/tessdata"),
+            PathBuf::from("/usr/local/share/tessdata"),
+        ]);
+    }
+    #[cfg(windows)]
+    {
+        if let Ok(pf) = std::env::var("PROGRAMFILES") {
+            dirs.push(PathBuf::from(pf).join("Tesseract-OCR").join("tessdata"));
         }
     }
-    None
+    dirs.into_iter().find(|d| d.is_dir())
 }
 
 fn scan_default_tessdata() -> Vec<String> {
@@ -343,7 +565,7 @@ fn list_langs_binary(bin: &Path) -> Vec<String> {
     langs
 }
 
-fn recognize_binary(bin: &Path, raster: &Raster, lang: &str) -> Result<Vec<Word>> {
+fn recognize_binary(bin: &Path, raster: &Raster, lang: &str) -> Result<Vec<OcrWord>> {
     let dir = std::env::temp_dir().join(format!(
         "openpdf-ocr-{}-{}",
         std::process::id(),
@@ -370,7 +592,7 @@ fn recognize_binary(bin: &Path, raster: &Raster, lang: &str) -> Result<Vec<Word>
         .arg("tsv")
         .output();
     let _ = std::fs::remove_dir_all(&dir);
-    let out = out.map_err(|_| Error::invalid(InvalidKind::OcrUnavailable))?;
+    let out = out.map_err(|_| ocr_unavailable())?;
     if !out.status.success() {
         let err = String::from_utf8_lossy(&out.stderr);
         if err.contains("Error opening data file") || err.contains("Failed loading language") {
@@ -390,40 +612,39 @@ fn recognize_library(
     tessdata: Option<&Path>,
     raster: &Raster,
     lang: &str,
-) -> Result<Vec<Word>> {
+) -> Result<Vec<OcrWord>> {
     let rgb = rgba_to_rgb(raster);
-    let lib = unsafe { libloading::Library::new(lib_path) }
-        .map_err(|_| Error::invalid(InvalidKind::OcrUnavailable))?;
+    let lib = unsafe { libloading::Library::new(lib_path) }.map_err(|_| ocr_unavailable())?;
     unsafe {
         let create: libloading::Symbol<unsafe extern "C" fn() -> *mut c_void> = lib
             .get(b"TessBaseAPICreate\0")
-            .map_err(|_| Error::invalid(InvalidKind::OcrUnavailable))?;
+            .map_err(|_| ocr_unavailable())?;
         let init3: libloading::Symbol<
             unsafe extern "C" fn(*mut c_void, *const c_char, *const c_char) -> i32,
         > = lib
             .get(b"TessBaseAPIInit3\0")
-            .map_err(|_| Error::invalid(InvalidKind::OcrUnavailable))?;
+            .map_err(|_| ocr_unavailable())?;
         let set_image: libloading::Symbol<
             unsafe extern "C" fn(*mut c_void, *const u8, i32, i32, i32, i32),
         > = lib
             .get(b"TessBaseAPISetImage\0")
-            .map_err(|_| Error::invalid(InvalidKind::OcrUnavailable))?;
+            .map_err(|_| ocr_unavailable())?;
         let get_tsv: libloading::Symbol<unsafe extern "C" fn(*mut c_void, i32) -> *mut c_char> =
             lib.get(b"TessBaseAPIGetTSVText\0")
-                .map_err(|_| Error::invalid(InvalidKind::OcrUnavailable))?;
+                .map_err(|_| ocr_unavailable())?;
         let end: libloading::Symbol<unsafe extern "C" fn(*mut c_void)> = lib
             .get(b"TessBaseAPIEnd\0")
-            .map_err(|_| Error::invalid(InvalidKind::OcrUnavailable))?;
+            .map_err(|_| ocr_unavailable())?;
         let delete: libloading::Symbol<unsafe extern "C" fn(*mut c_void)> = lib
             .get(b"TessBaseAPIDelete\0")
-            .map_err(|_| Error::invalid(InvalidKind::OcrUnavailable))?;
+            .map_err(|_| ocr_unavailable())?;
         let delete_text: libloading::Symbol<unsafe extern "C" fn(*mut c_char)> = lib
             .get(b"TessDeleteText\0")
-            .map_err(|_| Error::invalid(InvalidKind::OcrUnavailable))?;
+            .map_err(|_| ocr_unavailable())?;
 
         let api = create();
         if api.is_null() {
-            return Err(Error::invalid(InvalidKind::OcrUnavailable));
+            return Err(ocr_unavailable());
         }
         let lang_c = CString::new(lang).map_err(|e| Error::structure(e.to_string()))?;
         let data_c = tessdata.and_then(|p| CString::new(p.to_string_lossy().as_bytes()).ok());
@@ -471,7 +692,7 @@ fn rgba_to_rgb(raster: &Raster) -> Vec<u8> {
     rgb
 }
 
-fn parse_tsv(tsv: &str) -> Vec<Word> {
+fn parse_tsv(tsv: &str) -> Vec<OcrWord> {
     let mut words = Vec::new();
     for (i, line) in tsv.lines().enumerate() {
         if i == 0 {
@@ -500,7 +721,7 @@ fn parse_tsv(tsv: &str) -> Vec<Word> {
         if width <= 0.0 || height <= 0.0 {
             continue;
         }
-        words.push(Word {
+        words.push(OcrWord {
             text: text.to_string(),
             left,
             top,
@@ -511,7 +732,7 @@ fn parse_tsv(tsv: &str) -> Vec<Word> {
     words
 }
 
-fn invisible_text_ops(words: &[Word], iw: u32, ih: u32, pw: f32, ph: f32) -> Vec<Operation> {
+fn invisible_text_ops(words: &[OcrWord], iw: u32, ih: u32, pw: f32, ph: f32) -> Vec<Operation> {
     let sx = pw / iw.max(1) as f32;
     let sy = ph / ih.max(1) as f32;
     let mut ops = vec![
@@ -655,6 +876,32 @@ mod tests {
     use crate::signer::append_stub_signature;
     use crate::test_support::corpus;
 
+    struct FakeOcr;
+
+    impl OcrEngine for FakeOcr {
+        fn capability(&self) -> OcrCapability {
+            OcrCapability {
+                available: true,
+                backend: Some(OcrBackend::Platform),
+                languages: vec!["eng".into()],
+            }
+        }
+
+        fn languages(&self) -> Vec<String> {
+            vec!["eng".into()]
+        }
+
+        fn recognize(&self, _raster: &Raster, _language: &str) -> Result<Vec<OcrWord>> {
+            Ok(vec![OcrWord {
+                text: "Hello".into(),
+                left: 10.0,
+                top: 20.0,
+                width: 40.0,
+                height: 12.0,
+            }])
+        }
+    }
+
     #[test]
     fn cargo_toml_does_not_link_tesseract() {
         let toml = include_str!("../Cargo.toml");
@@ -670,10 +917,35 @@ mod tests {
         let cap = ocr_capability();
         if !cap.available {
             assert!(cap.backend.is_none());
+            let err = Error::invalid(InvalidKind::OcrUnavailable {
+                hint: ocr_install_hint(),
+            });
             assert!(matches!(
-                Error::invalid(InvalidKind::OcrUnavailable),
-                Error::Invalid(InvalidKind::OcrUnavailable)
+                err,
+                Error::Invalid(InvalidKind::OcrUnavailable { .. })
             ));
+        }
+    }
+
+    #[test]
+    fn unavailable_engine_carries_hint() {
+        let eng = UnavailableOcr::new(ocr_install_hint());
+        assert!(!eng.capability().available);
+        let err = eng
+            .recognize(
+                &Raster {
+                    width: 1,
+                    height: 1,
+                    rgba: vec![0, 0, 0, 255],
+                },
+                "eng",
+            )
+            .unwrap_err();
+        match err {
+            Error::Invalid(InvalidKind::OcrUnavailable { hint }) => {
+                assert!(!hint.is_empty());
+            }
+            other => panic!("unexpected {other:?}"),
         }
     }
 
@@ -688,23 +960,46 @@ mod tests {
         let bytes = append_stub_signature(&std::fs::read(corpus("hello.pdf")).unwrap()).unwrap();
         let signed = Document::from_bytes(bytes, None).unwrap();
         assert!(matches!(
-            ocr(&engine, &signed, &OcrOptions::default()),
+            ocr(&engine, &FakeOcr, &signed, &OcrOptions::default()),
             Err(Error::Signed { op: SignedOp::Edit })
         ));
+    }
+
+    #[test]
+    fn ocr_writes_invisible_layer_from_engine() {
+        let Some(engine) = Engine::new().ok() else {
+            if std::env::var("CI").is_ok() {
+                panic!("PDFium required in CI");
+            }
+            return;
+        };
+        let doc = engine.open(corpus("hello.pdf")).unwrap();
+        let out = ocr(&engine, &FakeOcr, &doc, &OcrOptions::default()).unwrap();
+        assert_eq!(out.page_count(), 1);
+        let inner = out.assembled_lopdf().unwrap();
+        let id = *inner.get_pages().get(&1).unwrap();
+        let bytes = inner.get_page_content(id).unwrap();
+        let decoded = Content::decode(&bytes).unwrap();
+        assert!(
+            decoded.operations.iter().any(|op| op.operator == "Tr"
+                && op.operands.first().and_then(|o| o.as_i64().ok()) == Some(3)),
+            "expected invisible text rendering mode"
+        );
     }
 
     #[test]
     fn ocr_adds_text_layer_when_tesseract_present() {
         let cap = ocr_capability();
         if !cap.available {
-            if std::env::var("CI").is_ok() {
-                panic!("tesseract-ocr is required in CI");
+            if std::env::var("CI").is_ok() && cfg!(target_os = "linux") {
+                panic!("tesseract-ocr is required in Linux CI");
             }
             return;
         }
         let engine = Engine::new().expect("pdfium");
         let doc = engine.open(corpus("hello.pdf")).unwrap();
-        let out = ocr(&engine, &doc, &OcrOptions::default()).unwrap();
+        let tess = default_ocr_engine();
+        let out = ocr(&engine, tess.as_ref(), &doc, &OcrOptions::default()).unwrap();
         assert_eq!(out.page_count(), 1);
         let inner = out.assembled_lopdf().unwrap();
         let id = *inner.get_pages().get(&1).unwrap();
@@ -730,7 +1025,7 @@ mod tests {
 
     #[test]
     fn invisible_text_scales_horizontally_to_word_width() {
-        let words = [Word {
+        let words = [OcrWord {
             text: "Hello".into(),
             left: 10.0,
             top: 20.0,
