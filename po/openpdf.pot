@@ -414,3 +414,66 @@ msgstr ""
 
 msgid "crop box must be llx,lly,urx,ury"
 msgstr ""
+
+msgid "OCR is unavailable (install tesseract-ocr or set OPENPDF_TESSERACT to the binary or libtesseract)"
+msgstr ""
+
+msgid "OCR language {language} is not installed (have: {installed}). {hint}"
+msgstr ""
+
+msgid "no redaction boxes"
+msgstr ""
+
+msgid "redaction box is inverted"
+msgstr ""
+
+msgid "Add an invisible searchable text layer (Tesseract)"
+msgstr ""
+
+msgid "Tesseract language (eng, spa, …)"
+msgstr ""
+
+msgid "List installed OCR languages"
+msgstr ""
+
+msgid "Permanently remove content in a box (true redaction)"
+msgstr ""
+
+msgid "Redaction box page,llx,lly,urx,ury (page is 1-based)"
+msgstr ""
+
+msgid "Compare two PDFs (text + per-page pixels)"
+msgstr ""
+
+msgid "First PDF"
+msgstr ""
+
+msgid "Second PDF"
+msgstr ""
+
+msgid "redaction box must be page,llx,lly,urx,ury"
+msgstr ""
+
+msgid "pages: {left} vs {right}"
+msgstr ""
+
+msgid "text equal"
+msgstr ""
+
+msgid "text differs"
+msgstr ""
+
+msgid "pixels equal"
+msgstr ""
+
+msgid "pixels differ ({changed}/{total})"
+msgstr ""
+
+msgid "page {n}: {text}; {pixels}"
+msgstr ""
+
+msgid "identical"
+msgstr ""
+
+msgid "differ"
+msgstr ""

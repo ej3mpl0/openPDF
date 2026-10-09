@@ -17,6 +17,7 @@ thiserror = "2"
 image = { version = "0.25", default-features = false, features = ["png", "jpeg"] }
 getrandom = "0.3"
 zeroize = { version = "1", features = ["alloc"] }
+libloading = "0.8"
 
 [dev-dependencies]
 

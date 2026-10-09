@@ -18,7 +18,7 @@ jobs:
       - name: Install SoftHSM2
         run: |
           sudo apt-get update
-          sudo apt-get install -y softhsm2
+          sudo apt-get install -y softhsm2 tesseract-ocr
       - run: cargo build --workspace --release
       - run: cargo test --workspace
         env:

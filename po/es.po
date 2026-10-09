@@ -414,3 +414,66 @@ msgstr "--at empieza en 1"
 
 msgid "crop box must be llx,lly,urx,ury"
 msgstr "el recorte debe ser llx,lly,urx,ury"
+
+msgid "OCR is unavailable (install tesseract-ocr or set OPENPDF_TESSERACT to the binary or libtesseract)"
+msgstr "OCR no está disponible (instale tesseract-ocr o defina OPENPDF_TESSERACT al binario o libtesseract)"
+
+msgid "OCR language {language} is not installed (have: {installed}). {hint}"
+msgstr "el idioma de OCR {language} no está instalado (hay: {installed}). {hint}"
+
+msgid "no redaction boxes"
+msgstr "no hay recuadros de redacción"
+
+msgid "redaction box is inverted"
+msgstr "el recuadro de redacción está invertido"
+
+msgid "Add an invisible searchable text layer (Tesseract)"
+msgstr "Añadir una capa de texto invisible y buscable (Tesseract)"
+
+msgid "Tesseract language (eng, spa, …)"
+msgstr "idioma de Tesseract (eng, spa, …)"
+
+msgid "List installed OCR languages"
+msgstr "Listar idiomas de OCR instalados"
+
+msgid "Permanently remove content in a box (true redaction)"
+msgstr "Quitar de forma permanente el contenido de un recuadro (redacción real)"
+
+msgid "Redaction box page,llx,lly,urx,ury (page is 1-based)"
+msgstr "Recuadro de redacción page,llx,lly,urx,ury (página desde 1)"
+
+msgid "Compare two PDFs (text + per-page pixels)"
+msgstr "Comparar dos PDF (texto + píxeles por página)"
+
+msgid "First PDF"
+msgstr "Primer PDF"
+
+msgid "Second PDF"
+msgstr "Segundo PDF"
+
+msgid "redaction box must be page,llx,lly,urx,ury"
+msgstr "el recuadro de redacción debe ser page,llx,lly,urx,ury"
+
+msgid "pages: {left} vs {right}"
+msgstr "páginas: {left} frente a {right}"
+
+msgid "text equal"
+msgstr "texto igual"
+
+msgid "text differs"
+msgstr "el texto difiere"
+
+msgid "pixels equal"
+msgstr "píxeles iguales"
+
+msgid "pixels differ ({changed}/{total})"
+msgstr "los píxeles difieren ({changed}/{total})"
+
+msgid "page {n}: {text}; {pixels}"
+msgstr "página {n}: {text}; {pixels}"
+
+msgid "identical"
+msgstr "idénticos"
+
+msgid "differ"
+msgstr "diferentes"

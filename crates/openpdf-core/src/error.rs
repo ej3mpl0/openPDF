@@ -44,6 +44,14 @@ pub enum InvalidKind {
     NoInputImages,
     EmptyOverlayText,
     UnknownPermission { value: String },
+    OcrUnavailable,
+    OcrLanguageMissing {
+        language: String,
+        installed: String,
+        hint: String,
+    },
+    NoRedactionBoxes,
+    RedactionInverted,
 }
 
 /// Destructive operation blocked on a signed document.
@@ -131,6 +139,23 @@ impl InvalidKind {
             InvalidKind::UnknownPermission { value } => {
                 tr_args("unknown permission: {value}", &[("value", value)])
             }
+            InvalidKind::OcrUnavailable => tr(
+                "OCR is unavailable (install tesseract-ocr or set OPENPDF_TESSERACT to the binary or libtesseract)",
+            ),
+            InvalidKind::OcrLanguageMissing {
+                language,
+                installed,
+                hint,
+            } => tr_args(
+                "OCR language {language} is not installed (have: {installed}). {hint}",
+                &[
+                    ("language", language),
+                    ("installed", installed),
+                    ("hint", hint),
+                ],
+            ),
+            InvalidKind::NoRedactionBoxes => tr("no redaction boxes"),
+            InvalidKind::RedactionInverted => tr("redaction box is inverted"),
         }
     }
 }

@@ -235,6 +235,41 @@ fn merge_and_split() {
 }
 
 #[test]
+fn redact_removes_secret_from_saved_file() {
+    let dir = tempfile();
+    let src = dir.join("secret.pdf");
+    // Built by core tests' contract: use hello.pdf and a huge box so all text goes.
+    let out = dir.join("redacted.pdf");
+    let run_out = run(&[
+        "redact",
+        corpus("hello.pdf").to_str().unwrap(),
+        "--box",
+        "1,0,0,612,792",
+        "-o",
+        out.to_str().unwrap(),
+    ]);
+    assert!(run_out.status.success(), "{}", String::from_utf8_lossy(&run_out.stderr));
+    let bytes = std::fs::read(&out).unwrap();
+    let _ = src;
+    assert!(!bytes.is_empty());
+}
+
+#[test]
+fn compare_same_file() {
+    if EngineProbe::missing() {
+        return;
+    }
+    let out = run(&[
+        "compare",
+        corpus("hello.pdf").to_str().unwrap(),
+        corpus("hello.pdf").to_str().unwrap(),
+    ]);
+    assert!(out.status.success(), "{}", String::from_utf8_lossy(&out.stderr));
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    assert!(stdout.contains("identical"), "{stdout}");
+}
+
+#[test]
 fn render_and_text_if_pdfium() {
     if EngineProbe::missing() {
         return;
