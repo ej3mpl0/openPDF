@@ -137,8 +137,12 @@ jobs:
           if-no-files-found: error
 
   macos-cli:
-    name: macOS CLI
-    runs-on: macos-latest
+    name: macOS CLI (${{ matrix.os }})
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [macos-latest, macos-13]
     defaults:
       run:
         shell: bash
@@ -147,7 +151,7 @@ jobs:
       - uses: dtolnay/rust-toolchain@stable
       - uses: Swatinem/rust-cache@v2
         with:
-          prefix-key: release-macos-cli
+          prefix-key: release-macos-cli-${{ matrix.os }}
 
       - name: Install PDFium
         run: .github/scripts/install-pdfium.sh
@@ -172,7 +176,7 @@ jobs:
 
       - uses: actions/upload-artifact@v4
         with:
-          name: release-macos-cli
+          name: release-macos-cli-${{ matrix.os }}
           path: dist/openpdf-*-macos-*.tar.gz
           if-no-files-found: error
 

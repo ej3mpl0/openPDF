@@ -101,6 +101,15 @@ modules:
         sha256: 2e6db042dd2cff2d5247023dbec6c7ebb800042ce83c835d6468d45229669bd4
         archive-type: tar-gzip
         strip-components: 0
+        only-arches:
+          - x86_64
+      - type: archive
+        url: https://github.com/bblanchon/pdfium-binaries/releases/download/chromium%2F8035/pdfium-linux-arm64.tgz
+        sha256: 10bb7728a5268593a31c2024e0e57ea26b73b7a54195054f43d2ad0869d55a48
+        archive-type: tar-gzip
+        strip-components: 0
+        only-arches:
+          - aarch64
 
   - name: openpdf
     buildsystem: simple

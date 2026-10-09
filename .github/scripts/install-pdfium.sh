@@ -13,8 +13,13 @@ os="$(uname -s)"
 arch="$(uname -m)"
 case "$os" in
   Linux)
-    archive="pdfium-linux-x64.tgz"
-    sha="$PDFIUM_SHA256_LINUX_X64"
+    if [[ "$arch" == "aarch64" || "$arch" == "arm64" ]]; then
+      archive="pdfium-linux-arm64.tgz"
+      sha="$PDFIUM_SHA256_LINUX_ARM64"
+    else
+      archive="pdfium-linux-x64.tgz"
+      sha="$PDFIUM_SHA256_LINUX_X64"
+    fi
     lib_name="libpdfium.so"
     ;;
   Darwin)
@@ -59,8 +64,8 @@ if [[ -z "$lib" ]]; then
   exit 1
 fi
 
-if [[ "$os" == "Linux" ]] && command -v sudo >/dev/null && [[ -w /usr/local/lib || -d /usr/local/lib ]]; then
-  sudo cp "$lib" /usr/local/lib/libpdfium.so
+if [[ "$os" == "Linux" ]] && command -v sudo >/dev/null; then
+  sudo install -Dm0755 "$lib" /usr/local/lib/libpdfium.so
   sudo ldconfig || true
   lib=/usr/local/lib/libpdfium.so
 fi

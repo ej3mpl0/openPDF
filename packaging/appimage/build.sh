@@ -21,33 +21,37 @@ DIST_DIR="${OPENPDF_APPIMAGE_DIST_DIR:-$ROOT/packaging/appimage/dist}"
 TOOLS_DIR="${OPENPDF_APPIMAGE_TOOLS_DIR:-$BUILD_DIR/tools}"
 PDFIUM_DIR="$BUILD_DIR/pdfium"
 
-LINUXDEPLOY_URL="https://github.com/linuxdeploy/linuxdeploy/releases/download/continuous/linuxdeploy-${ARCH}.AppImage"
-GTK_PLUGIN_URL="https://raw.githubusercontent.com/linuxdeploy/linuxdeploy-plugin-gtk/master/linuxdeploy-plugin-gtk.sh"
+LINUXDEPLOY_URL="https://github.com/linuxdeploy/linuxdeploy/releases/download/${LINUXDEPLOY_TAG}/linuxdeploy-${ARCH}.AppImage"
+GTK_PLUGIN_URL="https://raw.githubusercontent.com/linuxdeploy/linuxdeploy-plugin-gtk/${LINUXDEPLOY_PLUGIN_GTK_COMMIT}/linuxdeploy-plugin-gtk.sh"
 
 export APPIMAGE_EXTRACT_AND_RUN=1
 export ARCH
 
 mkdir -p "$BUILD_DIR" "$DIST_DIR" "$TOOLS_DIR" "$PDFIUM_DIR"
 
-download() {
-  local url="$1" dest="$2"
-  if [[ ! -f "$dest" ]]; then
+download_verify() {
+  local url="$1" dest="$2" sha="$3"
+  local got=""
+  if [[ -f "$dest" ]]; then
+    got="$(sha256sum "$dest" | awk '{print $1}')"
+  fi
+  if [[ "$got" != "$sha" ]]; then
     curl -fsSL -o "$dest" "$url"
+    got="$(sha256sum "$dest" | awk '{print $1}')"
+  fi
+  if [[ "$got" != "$sha" ]]; then
+    echo "checksum mismatch for $(basename "$dest"): expected $sha got $got" >&2
+    exit 1
   fi
 }
 
-download "$LINUXDEPLOY_URL" "$TOOLS_DIR/linuxdeploy-${ARCH}.AppImage"
-download "$GTK_PLUGIN_URL" "$TOOLS_DIR/linuxdeploy-plugin-gtk.sh"
+download_verify "$LINUXDEPLOY_URL" "$TOOLS_DIR/linuxdeploy-${ARCH}.AppImage" "$LINUXDEPLOY_SHA256_X86_64"
+download_verify "$GTK_PLUGIN_URL" "$TOOLS_DIR/linuxdeploy-plugin-gtk.sh" "$LINUXDEPLOY_PLUGIN_GTK_SHA256"
 chmod +x "$TOOLS_DIR/linuxdeploy-${ARCH}.AppImage" "$TOOLS_DIR/linuxdeploy-plugin-gtk.sh"
 
 if [[ ! -f "$PDFIUM_DIR/lib/libpdfium.so" ]]; then
   archive="$BUILD_DIR/$PDFIUM_ARCHIVE"
-  download "$PDFIUM_URL" "$archive"
-  got="$(sha256sum "$archive" | awk '{print $1}')"
-  if [[ "$got" != "$PDFIUM_SHA256" ]]; then
-    echo "PDFium checksum mismatch: expected $PDFIUM_SHA256 got $got" >&2
-    exit 1
-  fi
+  download_verify "$PDFIUM_URL" "$archive" "$PDFIUM_SHA256"
   tar -xzf "$archive" -C "$PDFIUM_DIR"
 fi
 
