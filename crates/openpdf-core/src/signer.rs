@@ -2,6 +2,7 @@ use lopdf::{Dictionary, Document as LopdfDocument, Object};
 
 use crate::document::Document;
 use crate::error::{Error, InvalidKind, Result};
+use crate::i18n::{tr, tr_args};
 
 /// Visible appearance for a certificate signature. Coordinates are PDF points.
 #[derive(Clone, Debug, Default)]
@@ -42,8 +43,9 @@ pub struct CertificateInfo {
 
 /// Options passed from the UI to a [`Signer`] implementation (PKCS#11 lives in `openpdf-sign`).
 ///
-/// The PIN is collected and used **only** inside the signer backend. It must never
-/// appear on this struct, on [`Signer`], or in any other core/UI API.
+/// The PIN is collected through [`crate::PinProvider`] in the UI and used only
+/// inside the signer backend. It must never appear on this struct, on
+/// [`Signer`], or on [`crate::Document`].
 #[derive(Clone, Debug, Default)]
 pub struct SignRequest {
     /// Token certificate id from [`Signer::list_certificates`].
@@ -66,13 +68,102 @@ pub struct SignatureInfo {
 /// Certificate / PKCS#11 signing is implemented in `openpdf-sign`.
 /// GTK and the signing crate talk only through this trait — never to each other.
 ///
-/// PIN entry, PKCS#11 login, and raw key handles stay inside the implementor.
+/// The application binary constructs the backend and hands it to the UI:
+///
+/// ```ignore
+/// let pin = /* UI type that implements PinProvider */;
+/// let signer: Box<dyn openpdf_core::Signer> = Box::new(
+///     openpdf_sign::Pkcs11Signer::new(openpdf_sign::Pkcs11Config::default(), pin)?,
+/// );
+/// // pass `signer` into UI modules that depend only on openpdf-core
+/// ```
+///
+/// PIN entry is [`crate::PinProvider`] (implemented by the UI). PKCS#11 login
+/// and raw key handles stay inside the `openpdf-sign` implementor.
 pub trait Signer: Send + Sync {
     /// Certificates available on the token. A DNIe returns several; the UI picks by `id`.
     fn list_certificates(&self) -> Result<Vec<CertificateInfo>>;
 
     fn sign(&self, pdf: &[u8], request: &SignRequest) -> Result<Vec<u8>>;
     fn verify(&self, pdf: &[u8]) -> Result<Vec<SignatureInfo>>;
+}
+
+/// User-facing PIN prompt for a token (translated).
+pub fn pin_prompt_text(token_label: &str) -> String {
+    tr_args("Enter PIN for token \"{token}\"", &[("token", token_label)])
+}
+
+/// Translated label for a certificate usage.
+pub fn usage_label(usage: &CertificateUsage) -> String {
+    match usage {
+        CertificateUsage::Signing => tr("Signing"),
+        CertificateUsage::Authentication => tr("Authentication"),
+        CertificateUsage::Encryption => tr("Encryption"),
+        CertificateUsage::Other(detail) => tr_args("Other ({detail})", &[("detail", detail)]),
+    }
+}
+
+/// One-line certificate description for a picker (translated).
+pub fn describe_certificate(info: &CertificateInfo) -> String {
+    let usages = if info.usage.is_empty() {
+        tr("unspecified usage")
+    } else {
+        info.usage
+            .iter()
+            .map(usage_label)
+            .collect::<Vec<_>>()
+            .join(", ")
+    };
+    let validity = match (&info.validity.not_before, &info.validity.not_after) {
+        (Some(a), Some(b)) => tr_args(
+            "valid {not_before} to {not_after}",
+            &[("not_before", a), ("not_after", b)],
+        ),
+        _ => tr("validity unknown"),
+    };
+    tr_args(
+        "{subject} — {usage} — {validity}",
+        &[
+            ("subject", &info.subject),
+            ("usage", &usages),
+            ("validity", &validity),
+        ],
+    )
+}
+
+/// User-facing verify line for one signature dictionary (translated).
+pub fn format_verify_result(info: &SignatureInfo) -> String {
+    let mut parts = Vec::new();
+    if let Some(name) = &info.name {
+        parts.push(tr_args("Signer: {name}", &[("name", name)]));
+    }
+    if let Some(reason) = &info.reason {
+        parts.push(tr_args("Reason: {reason}", &[("reason", reason)]));
+    }
+    if let Some(location) = &info.location {
+        parts.push(tr_args("Location: {location}", &[("location", location)]));
+    }
+    parts.push(match info.valid {
+        Some(true) => tr("Valid"),
+        Some(false) => tr("Invalid"),
+        None => tr("Validity unknown"),
+    });
+    if parts.len() == 1 && info.name.is_none() {
+        parts.insert(0, tr("Signature"));
+    }
+    parts.join("; ")
+}
+
+/// Format every signature, or a “none found” line.
+pub fn format_verify_results(infos: &[SignatureInfo]) -> String {
+    if infos.is_empty() {
+        return tr("No signatures found");
+    }
+    infos
+        .iter()
+        .map(format_verify_result)
+        .collect::<Vec<_>>()
+        .join("\n")
 }
 
 impl Document {
@@ -149,10 +240,7 @@ pub(crate) fn append_stub_signature(pdf: &[u8]) -> Result<Vec<u8>> {
     let mut dict = Dictionary::new();
     dict.set("Type", Object::Name(b"Sig".to_vec()));
     dict.set("Filter", Object::Name(b"Adobe.PPKLite".to_vec()));
-    dict.set(
-        "SubFilter",
-        Object::Name(b"adbe.pkcs7.detached".to_vec()),
-    );
+    dict.set("SubFilter", Object::Name(b"adbe.pkcs7.detached".to_vec()));
     dict.set(
         "ByteRange",
         Object::Array(vec![0.into(), 0.into(), 0.into(), 0.into()]),
@@ -167,8 +255,23 @@ pub(crate) fn append_stub_signature(pdf: &[u8]) -> Result<Vec<u8>> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::sync::Mutex;
+
     use crate::error::Error;
+    use crate::i18n::{set_locale, Catalog};
     use crate::test_support::corpus;
+
+    fn es_catalog() -> Catalog {
+        Catalog::parse(include_str!("../../../po/es.po"))
+    }
+
+    fn with_locale(tag: &str, f: impl FnOnce()) {
+        static LOCK: Mutex<()> = Mutex::new(());
+        let _g = LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        set_locale(tag);
+        f();
+        set_locale("en");
+    }
 
     fn dnie_certs() -> Vec<CertificateInfo> {
         vec![
@@ -326,5 +429,111 @@ mod tests {
         doc.apply_signer(&signer, &signing_request()).unwrap();
         assert!(doc.original_bytes().starts_with(&after_first));
         assert!(doc.is_signed());
+    }
+
+    #[test]
+    fn gtk_manifest_does_not_depend_on_sign() {
+        let manifest =
+            std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../openpdf-gtk/Cargo.toml");
+        let src = std::fs::read_to_string(manifest).unwrap();
+        assert!(
+            !src.contains("openpdf-sign"),
+            "openpdf-gtk must depend only on openpdf-core"
+        );
+    }
+
+    #[test]
+    fn pin_prompt_and_usage_follow_catalog() {
+        with_locale("en", || {
+            assert_eq!(
+                pin_prompt_text("openpdf-test"),
+                "Enter PIN for token \"openpdf-test\""
+            );
+            assert_eq!(usage_label(&CertificateUsage::Signing), "Signing");
+        });
+        with_locale("es_ES.UTF-8", || {
+            let cat = es_catalog();
+            assert_eq!(
+                pin_prompt_text("DNIe"),
+                cat.translate("Enter PIN for token \"{token}\"")
+                    .replace("{token}", "DNIe")
+            );
+            assert_eq!(
+                usage_label(&CertificateUsage::Signing),
+                cat.translate("Signing")
+            );
+        });
+    }
+
+    #[test]
+    fn describe_certificate_follows_catalog() {
+        let info = CertificateInfo {
+            id: "1".into(),
+            subject: "CN=Test".into(),
+            issuer: "CN=CA".into(),
+            validity: CertificateValidity {
+                not_before: Some("2020-01-01T00:00:00Z".into()),
+                not_after: Some("2030-01-01T00:00:00Z".into()),
+            },
+            usage: vec![CertificateUsage::Signing],
+        };
+        with_locale("en", || {
+            assert_eq!(
+                describe_certificate(&info),
+                "CN=Test — Signing — valid 2020-01-01T00:00:00Z to 2030-01-01T00:00:00Z"
+            );
+        });
+        with_locale("es", || {
+            let cat = es_catalog();
+            let usage = cat.translate("Signing");
+            let validity = cat
+                .translate("valid {not_before} to {not_after}")
+                .replace("{not_before}", "2020-01-01T00:00:00Z")
+                .replace("{not_after}", "2030-01-01T00:00:00Z");
+            let expected = cat
+                .translate("{subject} — {usage} — {validity}")
+                .replace("{subject}", "CN=Test")
+                .replace("{usage}", usage)
+                .replace("{validity}", &validity);
+            assert_eq!(describe_certificate(&info), expected);
+            assert_ne!(
+                expected,
+                "CN=Test — Signing — valid 2020-01-01T00:00:00Z to 2030-01-01T00:00:00Z"
+            );
+        });
+    }
+
+    #[test]
+    fn verify_result_follows_catalog() {
+        let info = SignatureInfo {
+            name: Some("Ana".into()),
+            reason: Some("agree".into()),
+            location: Some("Madrid".into()),
+            valid: Some(true),
+        };
+        with_locale("en", || {
+            assert_eq!(
+                format_verify_result(&info),
+                "Signer: Ana; Reason: agree; Location: Madrid; Valid"
+            );
+            assert_eq!(format_verify_results(&[]), "No signatures found");
+        });
+        with_locale("es", || {
+            let cat = es_catalog();
+            let expected = [
+                cat.translate("Signer: {name}").replace("{name}", "Ana"),
+                cat.translate("Reason: {reason}")
+                    .replace("{reason}", "agree"),
+                cat.translate("Location: {location}")
+                    .replace("{location}", "Madrid"),
+                cat.translate("Valid").to_string(),
+            ]
+            .join("; ");
+            assert_eq!(format_verify_result(&info), expected);
+            assert_eq!(
+                format_verify_results(&[]),
+                cat.translate("No signatures found")
+            );
+        });
     }
 }

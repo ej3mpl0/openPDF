@@ -9,6 +9,7 @@ description = "PDF document, render, text, and structure core for openPDF"
 lopdf = "0.36.0"
 pdfium-render = "0.9.4"
 thiserror = "2"
+zeroize = { version = "1", features = ["alloc"] }
 
 [dev-dependencies]
 image = { version = "0.25", default-features = false, features = ["png"] }

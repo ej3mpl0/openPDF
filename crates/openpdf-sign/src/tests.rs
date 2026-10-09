@@ -13,15 +13,17 @@ use cryptoki::session::UserType;
 use cryptoki::types::AuthPin;
 use der::asn1::{BitString, UintRef};
 use der::{Encode, Sequence};
-use openpdf_core::{Document, Error, SignRequest, Signer, VisibleAppearance};
+use openpdf_core::{
+    describe_certificate, format_verify_result, format_verify_results, pin_prompt_text, tr,
+    Document, Error, PinProvider, SecretPin, SignRequest, Signer, VisibleAppearance,
+};
 use x509_cert::name::Name;
 use x509_cert::serial_number::SerialNumber;
 use x509_cert::spki::{AlgorithmIdentifierOwned, SubjectPublicKeyInfoOwned};
 use x509_cert::time::Validity;
 use x509_cert::{Certificate, TbsCertificate, Version};
 
-use crate::i18n::{describe_certificate, format_verify_results, pin_prompt_text};
-use crate::pin::{PinProvider, SecretPin, StaticPinProvider};
+use crate::pin::StaticPinProvider;
 use crate::token::{Pkcs11Config, Pkcs11Signer};
 use crate::{verify_pdf, CertificateUsage};
 
@@ -279,10 +281,7 @@ fn secret_pin_is_zeroizing() {
 fn verify_unsigned_corpus() {
     let pdf = fs::read(corpus("hello.pdf")).unwrap();
     assert!(verify_pdf(&pdf).unwrap().is_empty());
-    assert_eq!(
-        format_verify_results(&[]),
-        crate::gettext("No signatures found")
-    );
+    assert_eq!(format_verify_results(&[]), tr("No signatures found"));
 }
 
 #[test]
@@ -340,8 +339,8 @@ fn sign_and_verify_corpus_keeps_prefix() {
             "name: {:?}",
             infos[0].name
         );
-        let line = crate::format_verify_result(&infos[0]);
-        assert!(line.contains(&crate::gettext("Valid")), "{line}");
+        let line = format_verify_result(&infos[0]);
+        assert!(line.contains(&tr("Valid")), "{line}");
 
         let mut doc = Document::from_bytes(signed.clone(), None).unwrap();
         assert!(doc.is_signed());

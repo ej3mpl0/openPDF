@@ -2,12 +2,14 @@
 
 Native Linux PDF app. Rust + GTK4/libadwaita, render with pdfium-render (BSD). MuPDF is not used.
 
-- `openpdf-core`: document, tiles, text, undo, merge/split, `Signer`
+- `openpdf-core`: document, tiles, text, undo, merge/split, `Signer`, `PinProvider`, sign UI strings
 - `openpdf-cli`: `openpdf info|render|text|merge|split`
-- `openpdf-gtk`: UI
-- `openpdf-sign`: PKCS#11 signing (DNIe, FNMT)
+- `openpdf-gtk`: UI (depends only on core)
+- `openpdf-sign`: PKCS#11 / PAdES backend (depends only on core)
 
-Rule: gtk and sign depend on core, never on each other.
+Rule: gtk and sign depend on core, never on each other. The application
+binary constructs `Box<dyn Signer>` from `openpdf-sign` (with a UI
+`PinProvider`) and hands that trait object to the GTK UI.
 
 PDFium is loaded at runtime (`OPENPDF_PDFIUM`, next to the binary, or the system).
 

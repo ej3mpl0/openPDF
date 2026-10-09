@@ -12,17 +12,15 @@ use cryptoki::slot::Slot;
 use cryptoki::types::AuthPin;
 use der::Decode;
 use openpdf_core::{
-    CertificateInfo, CertificateUsage, CertificateValidity, Error, InvalidKind, Result,
-    SignRequest, SignatureInfo, Signer,
+    tr_args, CertificateInfo, CertificateUsage, CertificateValidity, Error, InvalidKind,
+    PinProvider, Result, SecretPin, SignRequest, SignatureInfo, Signer,
 };
 use sha2::{Digest, Sha256};
 use x509_cert::ext::pkix::KeyUsage;
 use x509_cert::Certificate;
 
 use crate::cades;
-use crate::i18n::gettext_f;
 use crate::pades;
-use crate::pin::{PinProvider, SecretPin};
 
 /// OpenSC (Spanish DNIe), p11-kit / NSS softoken (FNMT in a user NSS db), SoftHSM.
 const DEFAULT_MODULES: &[&str] = &[
@@ -118,7 +116,7 @@ impl Pkcs11Signer {
                 return Ok(info);
             }
         }
-        Err(Error::Sign(gettext_f(
+        Err(Error::Sign(tr_args(
             "unknown certificate id {id}",
             &[("id", wanted)],
         )))
@@ -252,7 +250,7 @@ fn resolve_module_paths(config: &Pkcs11Config) -> Vec<PathBuf> {
 
 fn load_module(path: &Path) -> Result<LoadedModule> {
     let ctx = Pkcs11::new(path).map_err(|e| {
-        Error::Sign(gettext_f(
+        Error::Sign(tr_args(
             "Could not load PKCS#11 module {path}: {error}",
             &[
                 ("path", &path.display().to_string()),
@@ -264,7 +262,7 @@ fn load_module(path: &Path) -> Result<LoadedModule> {
         Ok(()) => {}
         Err(CkError::Pkcs11(RvError::CryptokiAlreadyInitialized, _)) => {}
         Err(e) => {
-            return Err(Error::Sign(gettext_f(
+            return Err(Error::Sign(tr_args(
                 "Could not load PKCS#11 module {path}: {error}",
                 &[
                     ("path", &path.display().to_string()),
@@ -442,7 +440,7 @@ fn pkcs11_rsa_sha256(session: &Session, key: ObjectHandle, data: &[u8]) -> Resul
 }
 
 fn pkcs11_err(e: impl ToString) -> Error {
-    Error::Sign(gettext_f(
+    Error::Sign(tr_args(
         "PKCS#11 error: {error}",
         &[("error", &e.to_string())],
     ))

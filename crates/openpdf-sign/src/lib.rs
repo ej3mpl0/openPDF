@@ -1,26 +1,23 @@
 //! PKCS#11 PAdES-B-B signatures for openPDF.
 //!
-//! GTK and this crate talk only through [`openpdf_core::Signer`]. The PIN is
-//! requested via [`PinProvider`] and zeroized after login; it never crosses
-//! `openpdf-core`.
+//! This crate implements [`openpdf_core::Signer`]. The GTK UI must not depend
+//! on it: the application binary constructs `Box<dyn Signer>` here and hands
+//! that trait object to UI code that only sees `openpdf-core`.
+//!
+//! The PIN is requested via [`openpdf_core::PinProvider`] (implemented by the
+//! UI) and zeroized after login. Core never stores it on [`SignRequest`].
 
 mod cades;
-mod i18n;
 mod pades;
 mod pin;
 mod token;
 
-pub use i18n::{
-    describe_certificate, format_verify_result, format_verify_results, gettext, gettext_f,
-    pin_prompt_text, usage_label,
-};
-pub use openpdf_core::{init_i18n, set_locale, tr, tr_args};
-pub use pin::{PinProvider, SecretPin, StaticPinProvider};
+pub use pin::StaticPinProvider;
 pub use token::{verify_pdf, Pkcs11Config, Pkcs11Signer};
 
 pub use openpdf_core::{
-    CertificateInfo, CertificateUsage, CertificateValidity, SignRequest, SignatureInfo, Signer,
-    VisibleAppearance,
+    init_i18n, set_locale, tr, tr_args, CertificateInfo, CertificateUsage, CertificateValidity,
+    PinProvider, SecretPin, SignRequest, SignatureInfo, Signer, VisibleAppearance,
 };
 
 #[cfg(test)]

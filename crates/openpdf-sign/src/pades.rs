@@ -3,11 +3,10 @@
 use std::io::Write;
 
 use lopdf::{Dictionary, Document, Object, ObjectId};
-use openpdf_core::{Error, Result, SignRequest, SignatureInfo, VisibleAppearance};
+use openpdf_core::{tr_args, Error, Result, SignRequest, SignatureInfo, VisibleAppearance};
 use sha2::{Digest, Sha256};
 
 use crate::cades;
-use crate::i18n::gettext_f;
 
 const CONTENTS_LEN: usize = 8192;
 const BR_WIDTH: usize = 10;
@@ -322,7 +321,7 @@ fn write_appearance(
     font.set("BaseFont", Object::Name(b"Helvetica".to_vec()));
     write_lopdf_object(out, xref, font_id, &Object::Dictionary(font))?;
 
-    let label = gettext_f("Signed by {name}", &[("name", name)]);
+    let label = tr_args("Signed by {name}", &[("name", name)]);
     let content = format!(
         "q 0.95 0.95 0.9 rg 0 0 {w:.2} {h:.2} re f 0 0 0 RG 0.5 w 0 0 {w:.2} {h:.2} re S \
          BT /Hev 8 Tf 4 6 Td {} Tj ET Q\n",
@@ -597,7 +596,7 @@ fn pick_page(doc: &Document, appearance: Option<&VisibleAppearance>) -> Result<O
     let pages = doc.get_pages();
     let index = appearance.map(|a| a.page).unwrap_or(0);
     pages.get(&(index + 1)).copied().ok_or_else(|| {
-        Error::Sign(gettext_f(
+        Error::Sign(tr_args(
             "page {page} not found",
             &[("page", &index.to_string())],
         ))
