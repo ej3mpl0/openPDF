@@ -69,17 +69,6 @@ pub struct OcrImage {
     pub rgba: Vec<u8>,
 }
 
-impl OcrImage {
-    pub fn from_raster(raster: Raster) -> Self {
-        Self {
-            width: raster.width,
-            height: raster.height,
-            stride: raster.width.saturating_mul(4),
-            rgba: raster.rgba,
-        }
-    }
-}
-
 /// Simple OCR failure. Mapped to [`Error`] inside [`ocr`]; keep this enum
 /// free of `io::Error` / lifetimes so Swift and C# can implement the trait.
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -141,10 +130,14 @@ impl Default for OcrOptions {
 pub trait OcrEngine: Send + Sync {
     fn capability(&self) -> OcrCapability;
     fn languages(&self) -> Vec<String>;
+    /// Owned scalars and buffers only (UniFFI callback: no `&[u8]`, no `&str`).
     fn recognize(
         &self,
-        image: OcrImage,
-        language: String,
+        width: u32,
+        height: u32,
+        stride: u32,
+        rgba: Vec<u8>,
+        languages: Vec<String>,
     ) -> std::result::Result<Vec<OcrWord>, OcrError>;
 }
 
@@ -172,8 +165,11 @@ impl OcrEngine for UnavailableOcr {
 
     fn recognize(
         &self,
-        _image: OcrImage,
-        _language: String,
+        _width: u32,
+        _height: u32,
+        _stride: u32,
+        _rgba: Vec<u8>,
+        _languages: Vec<String>,
     ) -> std::result::Result<Vec<OcrWord>, OcrError> {
         Err(OcrError::Unavailable {
             hint: self.hint.clone(),
@@ -210,10 +206,26 @@ impl OcrEngine for TesseractOcr {
 
     fn recognize(
         &self,
-        image: OcrImage,
-        language: String,
+        width: u32,
+        height: u32,
+        stride: u32,
+        rgba: Vec<u8>,
+        languages: Vec<String>,
     ) -> std::result::Result<Vec<OcrWord>, OcrError> {
-        self.inner.recognize(&image, &language)
+        let lang = if languages.is_empty() {
+            "eng".into()
+        } else {
+            languages.join("+")
+        };
+        self.inner.recognize(
+            &OcrImage {
+                width,
+                height,
+                stride,
+                rgba,
+            },
+            &lang,
+        )
     }
 }
 
@@ -287,8 +299,15 @@ pub fn ocr(
         let raster = render.render_page(doc.id(), i, zoom)?;
         let width = raster.width;
         let height = raster.height;
+        let stride = width.saturating_mul(4);
         let words = ocr_engine
-            .recognize(OcrImage::from_raster(raster), opts.language.clone())
+            .recognize(
+                width,
+                height,
+                stride,
+                raster.rgba,
+                vec![opts.language.clone()],
+            )
             .map_err(Error::from)?;
         if words.is_empty() {
             continue;
@@ -1029,8 +1048,11 @@ mod tests {
 
         fn recognize(
             &self,
-            _image: OcrImage,
-            _language: String,
+            _width: u32,
+            _height: u32,
+            _stride: u32,
+            _rgba: Vec<u8>,
+            _languages: Vec<String>,
         ) -> std::result::Result<Vec<OcrWord>, OcrError> {
             Ok(vec![OcrWord {
                 text: "Hello".into(),
@@ -1073,15 +1095,7 @@ mod tests {
         let eng = UnavailableOcr::new(ocr_install_hint());
         assert!(!eng.capability().available);
         let err = eng
-            .recognize(
-                OcrImage {
-                    width: 1,
-                    height: 1,
-                    stride: 4,
-                    rgba: vec![0, 0, 0, 255],
-                },
-                "eng".into(),
-            )
+            .recognize(1, 1, 4, vec![0, 0, 0, 255], vec!["eng".into()])
             .unwrap_err();
         match err {
             OcrError::Unavailable { hint } => {
