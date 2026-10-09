@@ -32,6 +32,27 @@ fn run_locale(locale: &str, args: &[&str]) -> std::process::Output {
         .expect("run openpdf")
 }
 
+fn run_language(language: &str, lang: &str, args: &[&str]) -> std::process::Output {
+    Command::new(bin())
+        .args(args)
+        .env_remove("LC_ALL")
+        .env_remove("LC_MESSAGES")
+        .env("LANG", lang)
+        .env("LANGUAGE", language)
+        .output()
+        .expect("run openpdf")
+}
+
+fn pages_msgid() -> &'static str {
+    "pages: {count}"
+}
+
+fn spanish_pages_line() -> String {
+    es_catalog()
+        .translate(pages_msgid())
+        .replace("{count}", "2")
+}
+
 #[test]
 fn info_two_page() {
     let out = run(&["info", corpus("two_page.pdf").to_str().unwrap()]);
@@ -78,6 +99,40 @@ fn help_follows_locale() {
     assert_ne!(translated, about);
     assert!(es_out.contains(&translated), "{es_out}");
     assert!(!es_out.contains(about), "{es_out}");
+}
+
+#[test]
+fn info_language_es_en() {
+    let file = corpus("two_page.pdf");
+    let out = run_language("es:en", "en_US.UTF-8", &["info", file.to_str().unwrap()]);
+    assert!(out.status.success(), "{}", String::from_utf8_lossy(&out.stderr));
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    let pages = spanish_pages_line();
+    assert_ne!(pages, "pages: 2");
+    assert!(stdout.contains(&pages), "{stdout}");
+    assert!(!stdout.contains("pages: 2"), "{stdout}");
+}
+
+#[test]
+fn info_language_fr_es() {
+    let file = corpus("two_page.pdf");
+    let out = run_language("fr:es", "en_US.UTF-8", &["info", file.to_str().unwrap()]);
+    assert!(out.status.success(), "{}", String::from_utf8_lossy(&out.stderr));
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    let pages = spanish_pages_line();
+    assert!(stdout.contains(&pages), "{stdout}");
+    assert!(!stdout.contains("pages: 2"), "{stdout}");
+}
+
+#[test]
+fn info_language_ignored_when_lang_is_c() {
+    let file = corpus("two_page.pdf");
+    let out = run_language("es:en", "C", &["info", file.to_str().unwrap()]);
+    assert!(out.status.success(), "{}", String::from_utf8_lossy(&out.stderr));
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    assert!(stdout.contains("pages: 2"), "{stdout}");
+    let pages = spanish_pages_line();
+    assert!(!stdout.contains(&pages), "{stdout}");
 }
 
 #[test]

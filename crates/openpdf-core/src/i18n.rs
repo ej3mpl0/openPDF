@@ -1,7 +1,9 @@
 //! Gettext-compatible catalogs (`.po`) shared with the GTK UI.
 //!
 //! English lives in source as `msgid`. Translations live under `po/{lang}.po`.
-//! `LANG` / `LC_MESSAGES` / `LANGUAGE` select the language; English is the fallback.
+//! Locale follows GNU gettext: `LANGUAGE` (colon list) first, then `LC_ALL` /
+//! `LC_MESSAGES` / `LANG`. `LANGUAGE` is ignored when that LC locale is `C` or
+//! `POSIX`. English is the fallback.
 
 use std::collections::HashMap;
 use std::env;
@@ -128,49 +130,109 @@ static STATE: LazyLock<Mutex<State>> = LazyLock::new(|| {
     })
 });
 
-/// Read `LC_ALL` / `LC_MESSAGES` / `LANG` / `LANGUAGE` and load that catalog.
+/// Read GNU gettext locale variables and load that catalog.
 pub fn init() {
     set_locale(&detect_locale());
 }
 
 pub fn detect_locale() -> String {
-    for var in ["LC_ALL", "LC_MESSAGES", "LANG", "LANGUAGE"] {
-        if let Ok(val) = env::var(var) {
-            if let Some(tag) = first_language(&val) {
+    detect_locale_from(
+        env::var("LANGUAGE").ok().as_deref(),
+        env::var("LC_ALL").ok().as_deref(),
+        env::var("LC_MESSAGES").ok().as_deref(),
+        env::var("LANG").ok().as_deref(),
+    )
+}
+
+fn detect_locale_from(
+    language: Option<&str>,
+    lc_all: Option<&str>,
+    lc_messages: Option<&str>,
+    lang: Option<&str>,
+) -> String {
+    let lc = [lc_all, lc_messages, lang]
+        .into_iter()
+        .flatten()
+        .map(str::trim)
+        .find(|v| !v.is_empty());
+    // Unset LC_* / LANG is C, so LANGUAGE must not apply.
+    let c_locale = lc.map(is_c_or_posix).unwrap_or(true);
+
+    if !c_locale {
+        if let Some(list) = language {
+            if let Some(tag) = first_available_language(list) {
                 return tag;
             }
+        }
+    }
+    if let Some(val) = lc {
+        if let Some(tag) = first_language(val) {
+            return tag;
         }
     }
     "en".into()
 }
 
-fn first_language(val: &str) -> Option<String> {
-    for part in val.split(':') {
-        let part = part.trim();
-        if part.is_empty() || part == "C" || part == "POSIX" {
-            continue;
-        }
-        let tag = part.split('.').next().unwrap_or(part);
-        let tag = tag.split('@').next().unwrap_or(tag);
-        if !tag.is_empty() {
-            return Some(tag.replace('-', "_"));
-        }
+fn is_c_or_posix(val: &str) -> bool {
+    let first = val
+        .split(':')
+        .map(str::trim)
+        .find(|part| !part.is_empty())
+        .unwrap_or("");
+    if first.is_empty() {
+        return false;
     }
-    None
+    let tag = first.split('.').next().unwrap_or(first);
+    let tag = tag.split('@').next().unwrap_or(tag);
+    tag == "C" || tag == "POSIX"
 }
 
-/// Force a locale (`es`, `es_ES`, `en`). Used by tests and the CLI.
+fn language_tags(val: &str) -> Vec<String> {
+    val.split(':').filter_map(normalize_tag).collect()
+}
+
+fn normalize_tag(part: &str) -> Option<String> {
+    let part = part.trim();
+    if part.is_empty() {
+        return None;
+    }
+    let tag = part.split('.').next().unwrap_or(part);
+    let tag = tag.split('@').next().unwrap_or(tag);
+    if tag.is_empty() || tag == "C" || tag == "POSIX" {
+        return None;
+    }
+    Some(tag.replace('-', "_"))
+}
+
+fn first_language(val: &str) -> Option<String> {
+    language_tags(val).into_iter().next()
+}
+
+fn first_available_language(val: &str) -> Option<String> {
+    language_tags(val)
+        .into_iter()
+        .find(|tag| catalog_available(tag))
+}
+
+fn catalog_available(tag: &str) -> bool {
+    if is_english(tag) {
+        return true;
+    }
+    locale_fallbacks(tag)
+        .iter()
+        .any(|code| read_po_file(code).is_some() || embedded_po(code).is_some())
+}
+
+/// Force a locale (`es`, `es_ES`, `en`, or a `LANGUAGE`-style list). Used by tests and the CLI.
 pub fn set_locale(tag: &str) {
-    let locale = normalize_locale(tag);
+    let locale = first_available_language(tag)
+        .or_else(|| first_language(tag))
+        .unwrap_or_else(|| "en".into());
     let catalog = load_catalog(&locale);
     if let Ok(mut st) = STATE.lock() {
         st.locale = locale;
         st.catalog = catalog;
     }
-}
-
-fn normalize_locale(tag: &str) -> String {
-    first_language(tag).unwrap_or_else(|| "en".into())
 }
 
 pub fn current_locale() -> String {
@@ -456,6 +518,61 @@ msgstr "HELLO"
         assert_eq!(first_language("es_ES.UTF-8").as_deref(), Some("es_ES"));
         assert_eq!(first_language("C").as_deref(), None);
         assert_eq!(first_language("es:en").as_deref(), Some("es"));
+        assert!(is_c_or_posix("C"));
+        assert!(is_c_or_posix("C.UTF-8"));
+        assert!(is_c_or_posix("POSIX"));
+        assert!(!is_c_or_posix("es_ES.UTF-8"));
+    }
+
+    #[test]
+    fn language_priority_es_en() {
+        let tag = detect_locale_from(Some("es:en"), None, None, Some("en_US.UTF-8"));
+        assert_eq!(tag, "es");
+        set_locale(&tag);
+        let english = "document has no pages";
+        assert_ne!(tr(english), english);
+        assert_eq!(
+            tr(english),
+            Catalog::parse(include_str!("../../../po/es.po")).translate(english)
+        );
+        set_locale("en");
+    }
+
+    #[test]
+    fn language_priority_fr_es() {
+        let tag = detect_locale_from(Some("fr:es"), None, None, Some("en_US.UTF-8"));
+        assert_eq!(tag, "es");
+        set_locale(&tag);
+        let english = "document has no pages";
+        assert_eq!(
+            tr(english),
+            Catalog::parse(include_str!("../../../po/es.po")).translate(english)
+        );
+        set_locale("en");
+    }
+
+    #[test]
+    fn language_ignored_when_lang_is_c() {
+        let tag = detect_locale_from(Some("es:en"), None, None, Some("C"));
+        assert_eq!(tag, "en");
+        let posix = detect_locale_from(Some("es:en"), None, None, Some("POSIX"));
+        assert_eq!(posix, "en");
+        let lc_all_c = detect_locale_from(Some("es"), Some("C"), None, Some("es_ES.UTF-8"));
+        assert_eq!(lc_all_c, "en");
+        set_locale(&tag);
+        assert_eq!(tr("document has no pages"), "document has no pages");
+    }
+
+    #[test]
+    fn language_wins_over_lc_when_locale_is_not_c() {
+        assert_eq!(
+            detect_locale_from(Some("es"), Some("de_DE.UTF-8"), None, None),
+            "es"
+        );
+        assert_eq!(
+            detect_locale_from(None, Some("es_ES.UTF-8"), None, None),
+            "es_ES"
+        );
     }
 
     #[test]

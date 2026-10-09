@@ -19,7 +19,7 @@ User-facing strings are gettext-compatible. English `msgid`s live in source; tra
 - `po/es.po` — Spanish
 - `po/LINGUAS` — installed languages
 
-Locale comes from `LC_ALL` / `LC_MESSAGES` / `LANG` / `LANGUAGE`. Missing keys and `C`/`POSIX` fall back to English.
+Locale follows GNU gettext: `LANGUAGE` (colon-separated priority list) first, then `LC_ALL` / `LC_MESSAGES` / `LANG`. `LANGUAGE` is ignored when the effective LC locale is `C` or `POSIX`. Missing keys fall back to English.
 
 ```rust
 openpdf_core::init_i18n();
