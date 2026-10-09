@@ -19,7 +19,7 @@ use lopdf::{Dictionary, Object, ObjectId, StringFormat};
 use crate::document::Document;
 use crate::error::{Error, InvalidKind, Result, SignedOp};
 use crate::ops::PageRange;
-use crate::render::{Engine, Raster};
+use crate::render::Engine;
 
 /// How Tesseract was found (for the UI capability query).
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
