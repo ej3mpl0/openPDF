@@ -72,9 +72,7 @@ pub struct SignatureInfo {
 ///
 /// ```ignore
 /// let pin = /* UI type that implements PinProvider */;
-/// let signer: Box<dyn openpdf_core::Signer> = Box::new(
-///     openpdf_sign::Pkcs11Signer::new(openpdf_sign::Pkcs11Config::default(), pin)?,
-/// );
+/// let signer: Box<dyn openpdf_core::Signer> = openpdf_sign::default_signer(pin)?;
 /// // pass `signer` into UI modules that depend only on openpdf-core
 /// ```
 ///

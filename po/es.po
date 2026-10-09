@@ -414,3 +414,33 @@ msgstr "--at empieza en 1"
 
 msgid "crop box must be llx,lly,urx,ury"
 msgstr "el recorte debe ser llx,lly,urx,ury"
+
+msgid "Windows certificate store error: {error}"
+msgstr "error del almacén de certificados de Windows: {error}"
+
+msgid "Could not open the Windows certificate store"
+msgstr "no se pudo abrir el almacén de certificados de Windows"
+
+msgid "Windows CNG error: {error}"
+msgstr "error CNG de Windows: {error}"
+
+msgid "NCryptSignHash failed"
+msgstr "NCryptSignHash ha fallado"
+
+msgid "certificate has no usable private key"
+msgstr "el certificado no tiene una clave privada utilizable"
+
+msgid "Keychain error: {error}"
+msgstr "error del llavero: {error}"
+
+msgid "Could not search the Keychain for identities: {error}"
+msgstr "no se pudieron buscar identidades en el llavero: {error}"
+
+msgid "SecKeyCreateSignature failed: {error}"
+msgstr "SecKeyCreateSignature ha fallado: {error}"
+
+msgid "unsupported public key algorithm"
+msgstr "algoritmo de clave pública no admitido"
+
+msgid "no signing certificates found"
+msgstr "no se encontraron certificados de firma"

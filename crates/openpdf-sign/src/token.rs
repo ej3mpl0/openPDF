@@ -1,8 +1,8 @@
 //! PKCS#11 module loading, certificate listing (no PIN), and login-on-sign.
 
 use std::path::{Path, PathBuf};
+use std::sync::Arc;
 
-use const_oid::AssociatedOid;
 use cryptoki::context::{CInitializeArgs, CInitializeFlags, Pkcs11};
 use cryptoki::error::{Error as CkError, RvError};
 use cryptoki::mechanism::Mechanism;
@@ -12,17 +12,19 @@ use cryptoki::slot::Slot;
 use cryptoki::types::AuthPin;
 use der::Decode;
 use openpdf_core::{
-    tr_args, CertificateInfo, CertificateUsage, CertificateValidity, Error, InvalidKind,
-    PinProvider, Result, SecretPin, SignRequest, SignatureInfo, Signer,
+    tr_args, CertificateInfo, Error, PinProvider, Result, SecretPin, SignRequest, SignatureInfo,
+    Signer,
 };
 use sha2::{Digest, Sha256};
-use x509_cert::ext::pkix::KeyUsage;
 use x509_cert::Certificate;
 
-use crate::cades;
+use crate::backend::{list_certificates, sign_pdf, KeyBackend, ListedCert};
+use crate::cert::{self, can_sign_pkcs11, KeyKind};
 use crate::pades;
 
 /// OpenSC (Spanish DNIe), p11-kit / NSS softoken (FNMT in a user NSS db), SoftHSM.
+/// OpenSC and p11-kit also ship on Windows and macOS.
+#[cfg(not(any(windows, target_os = "macos")))]
 const DEFAULT_MODULES: &[&str] = &[
     "/usr/lib/x86_64-linux-gnu/opensc-pkcs11.so",
     "/usr/lib/x86_64-linux-gnu/pkcs11/opensc-pkcs11.so",
@@ -39,6 +41,25 @@ const DEFAULT_MODULES: &[&str] = &[
     "/usr/lib/softhsm/libsofthsm2.so",
     "/usr/lib/x86_64-linux-gnu/softhsm/libsofthsm2.so",
     "/usr/lib/x86_64-linux-gnu/pkcs11/libsofthsm2.so",
+];
+
+#[cfg(windows)]
+const DEFAULT_MODULES: &[&str] = &[
+    r"C:\Program Files\OpenSC Project\OpenSC\pkcs11\opensc-pkcs11.dll",
+    r"C:\Program Files (x86)\OpenSC Project\OpenSC\pkcs11\opensc-pkcs11.dll",
+    r"C:\Windows\System32\opensc-pkcs11.dll",
+    r"C:\Windows\SysWOW64\opensc-pkcs11.dll",
+];
+
+#[cfg(target_os = "macos")]
+const DEFAULT_MODULES: &[&str] = &[
+    "/opt/homebrew/lib/opensc-pkcs11.so",
+    "/opt/homebrew/lib/pkcs11/opensc-pkcs11.so",
+    "/usr/local/lib/opensc-pkcs11.so",
+    "/usr/local/lib/pkcs11/opensc-pkcs11.so",
+    "/Library/OpenSC/lib/opensc-pkcs11.so",
+    "/opt/homebrew/lib/pkcs11/p11-kit-proxy.dylib",
+    "/usr/local/lib/pkcs11/p11-kit-proxy.dylib",
 ];
 
 /// Where to load PKCS#11 modules from.
@@ -60,8 +81,12 @@ impl Pkcs11Config {
 ///
 /// PIN entry happens only through [`PinProvider`] inside [`Signer::sign`].
 pub struct Pkcs11Signer {
+    backend: Pkcs11Backend,
+}
+
+pub(crate) struct Pkcs11Backend {
     modules: Vec<LoadedModule>,
-    pin: Box<dyn PinProvider>,
+    pin: Arc<dyn PinProvider>,
 }
 
 struct LoadedModule {
@@ -80,6 +105,14 @@ struct PickedCert {
 
 impl Pkcs11Signer {
     pub fn new(config: Pkcs11Config, pin: impl PinProvider + 'static) -> Result<Self> {
+        Ok(Self {
+            backend: Pkcs11Backend::new(config, Arc::new(pin))?,
+        })
+    }
+}
+
+impl Pkcs11Backend {
+    pub(crate) fn new(config: Pkcs11Config, pin: Arc<dyn PinProvider>) -> Result<Self> {
         let paths = resolve_module_paths(&config);
         let mut modules = Vec::new();
         let mut last_err = None;
@@ -100,16 +133,16 @@ impl Pkcs11Signer {
                 )
             }));
         }
-        Ok(Self {
-            modules,
-            pin: Box::new(pin),
-        })
+        Ok(Self { modules, pin })
     }
 
     fn pick(&self, cert_id: &str) -> Result<PickedCert> {
         let wanted = cert_id.trim();
         if wanted.is_empty() {
-            return Err(Error::invalid(InvalidKind::CertIdRequired));
+            return Err(Error::Sign(tr_args(
+                "unknown certificate id {id}",
+                &[("id", wanted)],
+            )));
         }
         for info in self.enumerate_certs()? {
             if info.info.id == wanted {
@@ -164,7 +197,7 @@ impl Pkcs11Signer {
         Ok(out)
     }
 
-    fn sign_cms(&self, message: &[u8], picked: &PickedCert) -> Result<Vec<u8>> {
+    fn sign_raw(&self, picked: &PickedCert, data: &[u8]) -> Result<Vec<u8>> {
         let module = self
             .modules
             .get(picked.module_index)
@@ -185,36 +218,52 @@ impl Pkcs11Signer {
         drop(pin);
 
         let key = find_private_key(&session, &picked.cka_id)?;
-        let cms = cades::sign_detached(message, &picked.der, |data| {
-            pkcs11_rsa_sha256(&session, key, data)
-        });
+        let sig = pkcs11_rsa_sha256(&session, key, data);
         let _ = session.logout();
-        cms
+        sig
+    }
+}
+
+impl KeyBackend for Pkcs11Backend {
+    fn list(&self) -> Result<Vec<ListedCert>> {
+        Ok(self
+            .enumerate_certs()?
+            .into_iter()
+            .map(|p| ListedCert {
+                id: p.info.id.clone(),
+                der: p.der,
+                info: p.info,
+                kind: KeyKind::Rsa,
+            })
+            .collect())
+    }
+
+    fn sign_bytes(&self, cert_id: &str, data: &[u8]) -> Result<Vec<u8>> {
+        let picked = self.pick(cert_id)?;
+        if !can_sign_pkcs11(&picked.info.usage) {
+            return Err(Error::Sign("certificate is not a signing cert".into()));
+        }
+        self.sign_raw(&picked, data)
     }
 }
 
 impl Signer for Pkcs11Signer {
     fn list_certificates(&self) -> Result<Vec<CertificateInfo>> {
-        Ok(self
-            .enumerate_certs()?
-            .into_iter()
-            .map(|c| c.info)
-            .collect())
+        list_certificates(&self.backend)
     }
 
     fn sign(&self, pdf: &[u8], request: &SignRequest) -> Result<Vec<u8>> {
-        if request.cert_id.trim().is_empty() {
-            return Err(Error::invalid(InvalidKind::CertIdRequired));
+        if let Ok(listed) = self.backend.list() {
+            if let Some(c) = listed
+                .iter()
+                .find(|c| c.info.id == request.cert_id.trim())
+            {
+                if !can_sign_pkcs11(&c.info.usage) {
+                    return Err(Error::Sign("certificate is not a signing cert".into()));
+                }
+            }
         }
-        let picked = self.pick(&request.cert_id)?;
-        if !can_sign(&picked.info.usage) {
-            return Err(Error::Sign("certificate is not a signing cert".into()));
-        }
-        let cert = Certificate::from_der(&picked.der).map_err(|e| Error::Sign(e.to_string()))?;
-        let name = common_name_or_subject(&cert);
-        pades::sign_incremental(pdf, request, &name, |message| {
-            self.sign_cms(message, &picked)
-        })
+        sign_pdf(&self.backend, pdf, request)
     }
 
     fn verify(&self, pdf: &[u8]) -> Result<Vec<SignatureInfo>> {
@@ -324,79 +373,7 @@ fn cert_info(
     } else {
         format!("{}:{key}", slot_id(slot))
     };
-    CertificateInfo {
-        id,
-        subject: cert.tbs_certificate.subject.to_string(),
-        issuer: cert.tbs_certificate.issuer.to_string(),
-        validity: CertificateValidity {
-            not_before: time_rfc3339(&cert.tbs_certificate.validity.not_before),
-            not_after: time_rfc3339(&cert.tbs_certificate.validity.not_after),
-        },
-        usage: key_usage(cert),
-    }
-}
-
-fn key_usage(cert: &Certificate) -> Vec<CertificateUsage> {
-    let Some(exts) = &cert.tbs_certificate.extensions else {
-        return Vec::new();
-    };
-    for ext in exts.iter() {
-        if ext.extn_id != KeyUsage::OID {
-            continue;
-        }
-        let Ok(ku) = KeyUsage::from_der(ext.extn_value.as_bytes()) else {
-            continue;
-        };
-        let mut usage = Vec::new();
-        if ku.non_repudiation() {
-            usage.push(CertificateUsage::Signing);
-        }
-        if ku.digital_signature() && !ku.non_repudiation() {
-            usage.push(CertificateUsage::Authentication);
-        } else if ku.digital_signature() && ku.non_repudiation() {
-            if !usage.contains(&CertificateUsage::Signing) {
-                usage.push(CertificateUsage::Signing);
-            }
-        }
-        if ku.key_encipherment() || ku.data_encipherment() {
-            usage.push(CertificateUsage::Encryption);
-        }
-        if usage.is_empty() {
-            usage.push(CertificateUsage::Other("keyUsage".into()));
-        }
-        return usage;
-    }
-    Vec::new()
-}
-
-fn can_sign(usage: &[CertificateUsage]) -> bool {
-    usage.is_empty() || usage.contains(&CertificateUsage::Signing)
-}
-
-fn time_rfc3339(t: &x509_cert::time::Time) -> Option<String> {
-    let secs = t.to_unix_duration().as_secs();
-    let (y, m, d, h, min, s) = pades::civil_utc(secs);
-    Some(format!("{y:04}-{m:02}-{d:02}T{h:02}:{min:02}:{s:02}Z"))
-}
-
-fn common_name_or_subject(cert: &Certificate) -> String {
-    let subject = &cert.tbs_certificate.subject;
-    for rdn in subject.0.iter() {
-        for ava in rdn.0.iter() {
-            if ava.oid == const_oid::db::rfc4519::COMMON_NAME {
-                if let Ok(s) = ava.value.decode_as::<der::asn1::Utf8StringRef<'_>>() {
-                    return s.to_string();
-                }
-                if let Ok(s) = ava.value.decode_as::<der::asn1::PrintableStringRef<'_>>() {
-                    return s.to_string();
-                }
-                if let Ok(s) = ava.value.decode_as::<der::asn1::Ia5StringRef<'_>>() {
-                    return s.to_string();
-                }
-            }
-        }
-    }
-    subject.to_string()
+    cert::info_from_cert(cert, der, id)
 }
 
 fn attr_bytes(session: &Session, handle: ObjectHandle, ty: AttributeType) -> Option<Vec<u8>> {

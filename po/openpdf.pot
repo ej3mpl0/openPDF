@@ -414,3 +414,33 @@ msgstr ""
 
 msgid "crop box must be llx,lly,urx,ury"
 msgstr ""
+
+msgid "Windows certificate store error: {error}"
+msgstr ""
+
+msgid "Could not open the Windows certificate store"
+msgstr ""
+
+msgid "Windows CNG error: {error}"
+msgstr ""
+
+msgid "NCryptSignHash failed"
+msgstr ""
+
+msgid "certificate has no usable private key"
+msgstr ""
+
+msgid "Keychain error: {error}"
+msgstr ""
+
+msgid "Could not search the Keychain for identities: {error}"
+msgstr ""
+
+msgid "SecKeyCreateSignature failed: {error}"
+msgstr ""
+
+msgid "unsupported public key algorithm"
+msgstr ""
+
+msgid "no signing certificates found"
+msgstr ""

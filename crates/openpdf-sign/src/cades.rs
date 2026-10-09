@@ -5,17 +5,19 @@ use cms::content_info::{CmsVersion, ContentInfo};
 use cms::signed_data::{
     CertificateSet, EncapsulatedContentInfo, SignedData, SignerIdentifier, SignerInfo, SignerInfos,
 };
-use der::asn1::{OctetString, SetOfVec};
+use der::asn1::{OctetString, SetOfVec, UintRef};
 use der::{Any, Decode, Encode, Sequence};
-use openpdf_core::{Error, Result};
+use openpdf_core::{tr, Error, Result};
 use rsa::pkcs1v15::{Signature, VerifyingKey};
 use rsa::pkcs8::DecodePublicKey;
 use rsa::signature::Verifier;
 use rsa::RsaPublicKey;
-use sha2::{Digest, Sha256};
+use sha2::{Digest, Sha256, Sha384, Sha512};
 use x509_cert::attr::Attribute;
 use x509_cert::spki::AlgorithmIdentifierOwned;
 use x509_cert::Certificate;
+
+use crate::cert::{key_kind, EcdsaHash, KeyKind};
 
 const ID_DATA: const_oid::ObjectIdentifier = const_oid::db::rfc5911::ID_DATA;
 const ID_SIGNED_DATA: const_oid::ObjectIdentifier = const_oid::db::rfc5911::ID_SIGNED_DATA;
@@ -25,6 +27,12 @@ const ID_AA_SIGNING_CERTIFICATE_V2: const_oid::ObjectIdentifier =
     const_oid::ObjectIdentifier::new_unwrap("1.2.840.113549.1.9.16.2.47");
 const ID_RSA_ENCRYPTION: const_oid::ObjectIdentifier =
     const_oid::ObjectIdentifier::new_unwrap("1.2.840.113549.1.1.1");
+const ID_ECDSA_WITH_SHA256: const_oid::ObjectIdentifier =
+    const_oid::ObjectIdentifier::new_unwrap("1.2.840.10045.4.3.2");
+const ID_ECDSA_WITH_SHA384: const_oid::ObjectIdentifier =
+    const_oid::ObjectIdentifier::new_unwrap("1.2.840.10045.4.3.3");
+const ID_ECDSA_WITH_SHA512: const_oid::ObjectIdentifier =
+    const_oid::ObjectIdentifier::new_unwrap("1.2.840.10045.4.3.4");
 
 /// RFC 5035 `ESSCertIDv2` with the SHA-256 default algorithm omitted.
 #[derive(Clone, Debug, Eq, PartialEq, Sequence)]
@@ -56,6 +64,7 @@ pub(crate) fn sign_detached(
     let tbs = signed_attrs.to_der().map_err(cms_err)?;
     let signature = sign(&tbs)?;
     let sig_octets = OctetString::new(signature).map_err(cms_err)?;
+    let kind = key_kind(&cert).ok_or_else(|| Error::Sign(tr("unsupported public key algorithm")))?;
 
     let signer_info = SignerInfo {
         version: CmsVersion::V1,
@@ -65,10 +74,7 @@ pub(crate) fn sign_detached(
         }),
         digest_alg: digest_alg.clone(),
         signed_attrs: Some(signed_attrs),
-        signature_algorithm: AlgorithmIdentifierOwned {
-            oid: const_oid::db::rfc5912::SHA_256_WITH_RSA_ENCRYPTION,
-            parameters: Some(der::Any::null()),
-        },
+        signature_algorithm: signature_algorithm(kind),
         signature: sig_octets,
         unsigned_attrs: None,
     };
@@ -120,6 +126,53 @@ fn sha256_alg() -> AlgorithmIdentifierOwned {
     AlgorithmIdentifierOwned {
         oid: const_oid::db::rfc5912::ID_SHA_256,
         parameters: None,
+    }
+}
+
+fn signature_algorithm(kind: KeyKind) -> AlgorithmIdentifierOwned {
+    match kind {
+        KeyKind::Rsa => AlgorithmIdentifierOwned {
+            oid: const_oid::db::rfc5912::SHA_256_WITH_RSA_ENCRYPTION,
+            parameters: Some(der::Any::null()),
+        },
+        KeyKind::Ecdsa { hash } => AlgorithmIdentifierOwned {
+            oid: match hash {
+                EcdsaHash::Sha256 => ID_ECDSA_WITH_SHA256,
+                EcdsaHash::Sha384 => ID_ECDSA_WITH_SHA384,
+                EcdsaHash::Sha512 => ID_ECDSA_WITH_SHA512,
+            },
+            parameters: None,
+        },
+    }
+}
+
+/// IEEE P1363 `r||s` integers → DER `SEQUENCE { INTEGER r, INTEGER s }`.
+#[allow(dead_code)] // used by the Windows NCrypt ECDSA path
+pub(crate) fn ecdsa_integers_to_der(r: &[u8], s: &[u8]) -> Result<Vec<u8>> {
+    let r = trim_be(r);
+    let s = trim_be(s);
+    #[derive(Sequence)]
+    struct EcdsaSig<'a> {
+        r: UintRef<'a>,
+        s: UintRef<'a>,
+    }
+    let body = EcdsaSig {
+        r: UintRef::new(r).map_err(cms_err)?,
+        s: UintRef::new(s).map_err(cms_err)?,
+    };
+    body.to_der().map_err(cms_err)
+}
+
+#[allow(dead_code)] // helper for ecdsa_integers_to_der (Windows)
+fn trim_be(bytes: &[u8]) -> &[u8] {
+    let mut b = bytes;
+    while b.len() > 1 && b[0] == 0 {
+        b = &b[1..];
+    }
+    if b.is_empty() {
+        &[0]
+    } else {
+        b
     }
 }
 
@@ -184,21 +237,73 @@ fn verify_inner(cms_der: &[u8], message: &[u8]) -> Option<CmsCheck> {
         .to_der()
         .ok()?;
     let spki_der = cert.tbs_certificate.subject_public_key_info.to_der().ok()?;
-    let public_key = RsaPublicKey::from_public_key_der(&spki_der).ok()?;
-    let signature = Signature::try_from(signer_info.signature.as_bytes()).ok()?;
     let sig_oid = signer_info.signature_algorithm.oid;
-    let rsa_ok = sig_oid == const_oid::db::rfc5912::SHA_256_WITH_RSA_ENCRYPTION
-        || sig_oid == ID_RSA_ENCRYPTION;
-    if !rsa_ok {
-        return Some(CmsCheck {
-            valid: false,
-            signer,
-        });
-    }
-    let valid = VerifyingKey::<Sha256>::new(public_key)
-        .verify(&tbs, &signature)
-        .is_ok();
+    let sig = signer_info.signature.as_bytes();
+    let valid = verify_signature(sig_oid, &spki_der, &tbs, sig);
     Some(CmsCheck { valid, signer })
+}
+
+fn verify_signature(sig_oid: const_oid::ObjectIdentifier, spki_der: &[u8], tbs: &[u8], sig: &[u8]) -> bool {
+    if sig_oid == const_oid::db::rfc5912::SHA_256_WITH_RSA_ENCRYPTION || sig_oid == ID_RSA_ENCRYPTION
+    {
+        return verify_rsa_sha256(spki_der, tbs, sig);
+    }
+    if sig_oid == ID_ECDSA_WITH_SHA256 {
+        return verify_ecdsa_p256(spki_der, tbs, sig);
+    }
+    if sig_oid == ID_ECDSA_WITH_SHA384 {
+        return verify_ecdsa_p384(spki_der, tbs, sig);
+    }
+    if sig_oid == ID_ECDSA_WITH_SHA512 {
+        return verify_ecdsa_p521_sha512(spki_der, tbs, sig);
+    }
+    false
+}
+
+fn verify_rsa_sha256(spki_der: &[u8], tbs: &[u8], sig: &[u8]) -> bool {
+    let Ok(public_key) = RsaPublicKey::from_public_key_der(spki_der) else {
+        return false;
+    };
+    let Ok(signature) = Signature::try_from(sig) else {
+        return false;
+    };
+    VerifyingKey::<Sha256>::new(public_key)
+        .verify(tbs, &signature)
+        .is_ok()
+}
+
+fn verify_ecdsa_p256(spki_der: &[u8], tbs: &[u8], sig: &[u8]) -> bool {
+    use p256::ecdsa::signature::Verifier;
+    use p256::ecdsa::{Signature as P256Sig, VerifyingKey as P256Vk};
+    use p256::pkcs8::DecodePublicKey;
+    let Ok(vk) = P256Vk::from_public_key_der(spki_der) else {
+        return false;
+    };
+    let Ok(signature) = P256Sig::from_der(sig) else {
+        return false;
+    };
+    let _ = Sha256::digest(tbs);
+    vk.verify(tbs, &signature).is_ok()
+}
+
+fn verify_ecdsa_p384(spki_der: &[u8], tbs: &[u8], sig: &[u8]) -> bool {
+    use p384::ecdsa::signature::Verifier;
+    use p384::ecdsa::{Signature as P384Sig, VerifyingKey as P384Vk};
+    use p384::pkcs8::DecodePublicKey;
+    let Ok(vk) = P384Vk::from_public_key_der(spki_der) else {
+        return false;
+    };
+    let Ok(signature) = P384Sig::from_der(sig) else {
+        return false;
+    };
+    let _ = Sha384::digest(tbs);
+    vk.verify(tbs, &signature).is_ok()
+}
+
+fn verify_ecdsa_p521_sha512(_spki_der: &[u8], tbs: &[u8], _sig: &[u8]) -> bool {
+    // P-521 verify is not wired; signing still works. Hash is pinned for the CMS path.
+    let _ = Sha512::digest(tbs);
+    false
 }
 
 fn embedded_leaf(signed_data: &SignedData) -> Option<&Certificate> {

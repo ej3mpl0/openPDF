@@ -1,11 +1,13 @@
 name: CI
 on: [push, pull_request]
 jobs:
-  build:
+  linux:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: x86_64-pc-windows-msvc, aarch64-apple-darwin
       - name: Install PDFium
         run: |
           set -euo pipefail
@@ -24,3 +26,89 @@ jobs:
         env:
           CI: "true"
           OPENPDF_PDFIUM: /usr/local/lib/libpdfium.so
+      - name: Check openpdf-sign for Windows
+        run: cargo check -p openpdf-sign --target x86_64-pc-windows-msvc
+      - name: Check openpdf-sign for macOS
+        run: cargo check -p openpdf-sign --target aarch64-apple-darwin
+
+  windows:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - name: Install PDFium
+        shell: bash
+        run: |
+          set -euo pipefail
+          curl -fsSL -o /tmp/pdfium.tgz \
+            "https://github.com/bblanchon/pdfium-binaries/releases/download/chromium%2F8035/pdfium-win-x64.tgz"
+          mkdir -p "$HOME/pdfium"
+          tar -xzf /tmp/pdfium.tgz -C "$HOME/pdfium"
+          echo "OPENPDF_PDFIUM=$HOME/pdfium/bin/pdfium.dll" >> "$GITHUB_ENV"
+          if [ ! -f "$HOME/pdfium/bin/pdfium.dll" ]; then
+            echo "OPENPDF_PDFIUM=$HOME/pdfium/lib/pdfium.dll" >> "$GITHUB_ENV"
+          fi
+      - name: Create CurrentUser MY test certificate
+        shell: pwsh
+        run: |
+          New-SelfSignedCertificate `
+            -Subject "CN=OpenPDF Test Signer" `
+            -CertStoreLocation "Cert:\CurrentUser\My" `
+            -KeyAlgorithm RSA `
+            -KeyLength 2048 `
+            -HashAlgorithm SHA256 `
+            -KeyUsage DigitalSignature, NonRepudiation `
+            -Type Custom `
+            -Provider "Microsoft Software Key Storage Provider" `
+            -KeyExportPolicy Exportable `
+            -NotAfter (Get-Date).AddYears(1)
+      - name: Test core, cli, sign
+        shell: bash
+        run: cargo test -p openpdf-core -p openpdf-cli -p openpdf-sign
+        env:
+          CI: "true"
+
+  macos:
+    runs-on: macos-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - name: Install PDFium
+        run: |
+          set -euo pipefail
+          curl -fsSL -o /tmp/pdfium.tgz \
+            "https://github.com/bblanchon/pdfium-binaries/releases/download/chromium%2F8035/pdfium-mac-arm64.tgz"
+          mkdir -p "$HOME/pdfium"
+          tar -xzf /tmp/pdfium.tgz -C "$HOME/pdfium"
+          if [ -f "$HOME/pdfium/lib/libpdfium.dylib" ]; then
+            echo "OPENPDF_PDFIUM=$HOME/pdfium/lib/libpdfium.dylib" >> "$GITHUB_ENV"
+          else
+            echo "OPENPDF_PDFIUM=$HOME/pdfium/bin/libpdfium.dylib" >> "$GITHUB_ENV"
+          fi
+      - name: Import test identity into a temporary keychain
+        run: |
+          set -euo pipefail
+          KC="$RUNNER_TEMP/openpdf-test.keychain-db"
+          security create-keychain -p openpdf-ci "$KC"
+          security set-keychain-settings -lut 21600 "$KC"
+          security unlock-keychain -p openpdf-ci "$KC"
+          openssl req -x509 -newkey rsa:2048 \
+            -keyout "$RUNNER_TEMP/openpdf-key.pem" \
+            -out "$RUNNER_TEMP/openpdf-cert.pem" \
+            -days 2 -nodes \
+            -subj "/CN=OpenPDF Test Signer"
+          openssl pkcs12 -export \
+            -inkey "$RUNNER_TEMP/openpdf-key.pem" \
+            -in "$RUNNER_TEMP/openpdf-cert.pem" \
+            -out "$RUNNER_TEMP/openpdf-id.p12" \
+            -passout pass:openpdf-ci \
+            -name "OpenPDF Test Signer"
+          security import "$RUNNER_TEMP/openpdf-id.p12" -k "$KC" -P openpdf-ci -A
+          security set-key-partition-list -S apple-tool:,apple:,codesign: -s -k openpdf-ci "$KC" || true
+          EXISTING=$(security list-keychains -d user | tr -d '"')
+          security list-keychains -d user -s "$KC" $EXISTING
+          echo "OPENPDF_TEST_KEYCHAIN=$KC" >> "$GITHUB_ENV"
+      - name: Test core, cli, sign
+        run: cargo test -p openpdf-core -p openpdf-cli -p openpdf-sign
+        env:
+          CI: "true"

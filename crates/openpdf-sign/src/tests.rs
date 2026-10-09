@@ -12,7 +12,7 @@ use cryptoki::object::{Attribute, AttributeType, CertificateType, ObjectClass};
 use cryptoki::session::UserType;
 use cryptoki::types::AuthPin;
 use der::asn1::{BitString, UintRef};
-use der::{Encode, Sequence};
+use der::{Decode, Encode, Sequence};
 use openpdf_core::test_support::with_locale;
 use openpdf_core::{
     describe_certificate, format_verify_result, format_verify_results, pin_prompt_text, tr,
@@ -24,9 +24,12 @@ use x509_cert::spki::{AlgorithmIdentifierOwned, SubjectPublicKeyInfoOwned};
 use x509_cert::time::Validity;
 use x509_cert::{Certificate, TbsCertificate, Version};
 
+use crate::backend::{sign_pdf, KeyBackend, ListedCert};
+use crate::cades;
+use crate::cert::KeyKind;
 use crate::pin::StaticPinProvider;
 use crate::token::{Pkcs11Config, Pkcs11Signer};
-use crate::{verify_pdf, CertificateUsage};
+use crate::{default_signer, verify_pdf, CertificateUsage};
 
 const USER_PIN: &str = "1234";
 const SO_PIN: &str = "12345678";
@@ -51,7 +54,7 @@ fn softhsm_module() -> Option<PathBuf> {
 fn require_softhsm() -> PathBuf {
     match softhsm_module() {
         Some(p) => p,
-        None if std::env::var_os("CI").is_some() => {
+        None if std::env::var_os("CI").is_some() && cfg!(target_os = "linux") => {
             panic!("SoftHSM2 is required in CI (apt install softhsm2)")
         }
         None => panic!("skip-not-soft: no libsofthsm2.so"),
@@ -415,4 +418,209 @@ fn unknown_cert_id_fails() {
 
 fn can_use(c: &openpdf_core::CertificateInfo) -> bool {
     c.usage.is_empty() || c.usage.contains(&CertificateUsage::Signing)
+}
+
+struct MockRsaBackend {
+    id: String,
+    der: Vec<u8>,
+    key: rsa::RsaPrivateKey,
+}
+
+impl KeyBackend for MockRsaBackend {
+    fn list(&self) -> openpdf_core::Result<Vec<ListedCert>> {
+        let cert = x509_cert::Certificate::from_der(&self.der).expect("mock cert");
+        Ok(vec![ListedCert {
+            id: self.id.clone(),
+            der: self.der.clone(),
+            info: crate::cert::info_from_cert(&cert, &self.der, self.id.clone()),
+            kind: KeyKind::Rsa,
+        }])
+    }
+
+    fn sign_bytes(&self, cert_id: &str, data: &[u8]) -> openpdf_core::Result<Vec<u8>> {
+        assert_eq!(cert_id, self.id);
+        use rsa::signature::SignatureEncoding;
+        let signing_key = rsa::pkcs1v15::SigningKey::<sha2::Sha256>::new(self.key.clone());
+        Ok(rsa::signature::Signer::sign(&signing_key, data).to_vec())
+    }
+}
+
+fn mock_rsa_backend() -> MockRsaBackend {
+    use der::asn1::BitString;
+    use der::Encode;
+    use rsa::pkcs8::EncodePublicKey;
+    use rsa::signature::{SignatureEncoding, Signer};
+    use rsa::{RsaPrivateKey, RsaPublicKey};
+    use std::time::Duration;
+    use x509_cert::name::Name;
+    use x509_cert::serial_number::SerialNumber;
+    use x509_cert::spki::{AlgorithmIdentifierOwned, SubjectPublicKeyInfoOwned};
+    use x509_cert::time::Validity;
+    use x509_cert::{Certificate, TbsCertificate, Version};
+
+    let mut rng = rand::rngs::OsRng;
+    let key = RsaPrivateKey::new(&mut rng, 2048).expect("rsa key");
+    let public = RsaPublicKey::from(&key);
+    let spki_der = public.to_public_key_der().expect("spki");
+    let spki = SubjectPublicKeyInfoOwned::from_der(spki_der.as_bytes()).expect("spki parse");
+    let name: Name = "CN=OpenPDF Mock Signer".parse().expect("name");
+    let validity = Validity::from_now(Duration::from_secs(365 * 86400)).expect("validity");
+    let sig_alg = AlgorithmIdentifierOwned {
+        oid: const_oid::db::rfc5912::SHA_256_WITH_RSA_ENCRYPTION,
+        parameters: Some(der::Any::null()),
+    };
+    let tbs = TbsCertificate {
+        version: Version::V3,
+        serial_number: SerialNumber::from(1u32),
+        signature: sig_alg.clone(),
+        issuer: name.clone(),
+        validity,
+        subject: name,
+        subject_public_key_info: spki,
+        issuer_unique_id: None,
+        subject_unique_id: None,
+        extensions: None,
+    };
+    let tbs_der = tbs.to_der().expect("tbs");
+    let signing_key = rsa::pkcs1v15::SigningKey::<sha2::Sha256>::new(key.clone());
+    let sig = signing_key.sign(&tbs_der);
+    let cert = Certificate {
+        tbs_certificate: tbs,
+        signature_algorithm: sig_alg,
+        signature: BitString::from_bytes(&sig.to_bytes()).expect("sig bits"),
+    };
+    MockRsaBackend {
+        id: "mock".into(),
+        der: cert.to_der().expect("cert der"),
+        key,
+    }
+}
+
+#[test]
+fn mock_backend_shared_cms_roundtrip() {
+    let backend = mock_rsa_backend();
+    let listed = backend.list().unwrap();
+    assert_eq!(listed.len(), 1);
+    assert_eq!(listed[0].kind, KeyKind::Rsa);
+    let message = b"openpdf-sign mock CMS message";
+    let cms = cades::sign_detached(message, &listed[0].der, |tbs| {
+        backend.sign_bytes(&listed[0].id, tbs)
+    })
+    .expect("cms");
+    let check = cades::verify_detached(&cms, message);
+    assert!(check.valid, "mock CMS must verify");
+    assert!(
+        check
+            .signer
+            .as_deref()
+            .is_some_and(|s| s.contains("OpenPDF Mock")),
+        "signer: {:?}",
+        check.signer
+    );
+    let bad = cades::verify_detached(&cms, b"tampered");
+    assert!(!bad.valid);
+}
+
+#[test]
+fn mock_backend_pades_incremental_and_verify() {
+    let backend = mock_rsa_backend();
+    let original = fs::read(corpus("hello.pdf")).unwrap();
+    let request = SignRequest {
+        cert_id: "mock".into(),
+        reason: Some("mock cms".into()),
+        location: Some("unit".into()),
+        contact: None,
+        appearance: None,
+    };
+    let signed = sign_pdf(&backend, &original, &request).expect("sign");
+    assert!(
+        signed.starts_with(&original),
+        "incremental update must leave earlier bytes unchanged"
+    );
+    let infos = verify_pdf(&signed).unwrap();
+    assert_eq!(infos.len(), 1);
+    assert_eq!(infos[0].valid, Some(true));
+    assert_eq!(infos[0].reason.as_deref(), Some("mock cms"));
+}
+
+#[cfg_attr(not(any(windows, target_os = "macos")), allow(dead_code))]
+fn native_test_cert<'a>(
+    certs: &'a [openpdf_core::CertificateInfo],
+) -> Option<&'a openpdf_core::CertificateInfo> {
+    certs
+        .iter()
+        .find(|c| c.subject.contains("OpenPDF Test Signer"))
+}
+
+#[cfg_attr(not(any(windows, target_os = "macos")), allow(dead_code))]
+fn native_sign_and_verify(signer: &dyn Signer) {
+    let certs = signer.list_certificates().expect("list native certs");
+    let Some(cert) = native_test_cert(&certs) else {
+        if std::env::var_os("CI").is_some() {
+            panic!("CI must provision CN=OpenPDF Test Signer in the native store");
+        }
+        eprintln!("skipping native store sign test: no OpenPDF Test Signer certificate");
+        return;
+    };
+    let original = fs::read(corpus("hello.pdf")).unwrap();
+    let request = SignRequest {
+        cert_id: cert.id.clone(),
+        reason: Some("native store test".into()),
+        location: Some("CI".into()),
+        contact: None,
+        appearance: None,
+    };
+    let signed = signer.sign(&original, &request).expect("native sign");
+    assert!(signed.starts_with(&original));
+    let infos = signer.verify(&signed).expect("native verify");
+    assert_eq!(infos.len(), 1);
+    assert_eq!(infos[0].valid, Some(true));
+    assert_eq!(infos[0].reason.as_deref(), Some("native store test"));
+}
+
+#[cfg(windows)]
+#[test]
+fn windows_cng_sign_and_verify() {
+    let signer = crate::WindowsStoreSigner::new().expect("Windows MY store");
+    native_sign_and_verify(&signer);
+    let combined = default_signer(StaticPinProvider::new("unused")).expect("default_signer");
+    assert!(
+        combined
+            .list_certificates()
+            .unwrap()
+            .iter()
+            .any(|c| c.id.starts_with("cng:") && c.subject.contains("OpenPDF Test Signer"))
+            || std::env::var_os("CI").is_none()
+    );
+}
+
+#[cfg(target_os = "macos")]
+#[test]
+fn macos_keychain_sign_and_verify() {
+    let signer = crate::KeychainSigner::new();
+    native_sign_and_verify(&signer);
+    let combined = default_signer(StaticPinProvider::new("unused")).expect("default_signer");
+    let certs = combined.list_certificates().unwrap();
+    if native_test_cert(&certs).is_none() && std::env::var_os("CI").is_some() {
+        panic!("default_signer did not list the Keychain test identity");
+    }
+}
+
+#[cfg(not(any(windows, target_os = "macos")))]
+#[test]
+fn default_signer_is_pkcs11_on_linux() {
+    let Some(()) = with_softhsm(|| {
+        let env = test_env();
+        let prev = std::env::var_os("OPENPDF_PKCS11_MODULE");
+        std::env::set_var("OPENPDF_PKCS11_MODULE", &env.module);
+        let signer = default_signer(StaticPinProvider::new(USER_PIN)).expect("default_signer");
+        let certs = signer.list_certificates().expect("list");
+        match prev {
+            Some(v) => std::env::set_var("OPENPDF_PKCS11_MODULE", v),
+            None => std::env::remove_var("OPENPDF_PKCS11_MODULE"),
+        }
+        assert!(certs.iter().any(|c| c.subject.contains("OpenPDF Test")));
+    }) else {
+        return;
+    };
 }
