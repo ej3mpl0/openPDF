@@ -204,8 +204,10 @@ impl DocumentView {
     }
 
     /// Count cached tiles for the current page viewport and the thumbnail strip.
+    ///
+    /// Does not `poll()` — draining the render queue here would mark
+    /// `ui_all_visible` in the same draw as `ui_first_tile`.
     pub fn tile_ready(&self) -> TileReady {
-        let _ = self.shared.doc.poll();
         let visible = page_tile_keys(self);
         let thumbs = thumb_tile_keys(self);
         TileReady {
@@ -560,11 +562,20 @@ fn schedule_tile_pump(view: Rc<DocumentView>) {
         glib::idle_add_local_full(
             glib::Priority::HIGH,
             clone!(@strong view => move || {
+                let first_painted = crate::measure::ui_first_tile_painted_ms() > 0;
                 if view.shared.doc.poll_one() {
                     view.pages_area.queue_draw();
                     view.thumbs_area.queue_draw();
                     let again = view.clone();
-                    glib::timeout_add_local_once(std::time::Duration::ZERO, move || {
+                    // After the first tile, yield so GTK can paint it before
+                    // the rest of the queue is ingested. That keeps
+                    // ui_first_tile clearly below ui_all_visible.
+                    let wait = if first_painted {
+                        std::time::Duration::ZERO
+                    } else {
+                        std::time::Duration::from_millis(1)
+                    };
+                    glib::timeout_add_local_once(wait, move || {
                         tick(again);
                     });
                     glib::ControlFlow::Break

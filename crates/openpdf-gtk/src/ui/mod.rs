@@ -14,16 +14,17 @@ use crate::measure::{
     self, peak_rss_bytes, BudgetReport, DEFAULT_MEASURE_PAGES, MAX_MEASURE_WAIT_MS,
 };
 use crate::settings::{Settings, Theme};
-use crate::sign::UnavailableSigner;
+use crate::sign::{NoopVerifier, UnavailableSigner};
 use gtk::gio::ApplicationFlags;
 use gtk::glib;
 use gtk::prelude::*;
 use gtk4 as gtk;
 use libadwaita as adw;
-use openpdf_core::Signer;
+use openpdf_core::{Signer, Verifier};
 
-pub fn run(initial: Option<PathBuf>, signer: Box<dyn Signer>) {
+pub fn run(initial: Option<PathBuf>, signer: Box<dyn Signer>, verifier: Box<dyn Verifier>) {
     let signer = Arc::<dyn Signer>::from(signer);
+    let verifier = Arc::<dyn Verifier>::from(verifier);
     let app = adw::Application::builder()
         .application_id(crate::APP_ID)
         .build();
@@ -42,7 +43,7 @@ pub fn run(initial: Option<PathBuf>, signer: Box<dyn Signer>) {
         settings.apply_locale();
         apply_theme(settings.theme);
         install_accels(app);
-        let win = window::OpenPdfWindow::new(app, settings, signer.clone());
+        let win = window::OpenPdfWindow::new(app, settings, signer.clone(), verifier.clone());
         win.present();
         if let Some(path) = initial.clone() {
             let win = win.clone();
@@ -120,7 +121,12 @@ pub fn run_measure(pages: usize) -> i32 {
         settings.apply_locale();
         apply_theme(settings.theme);
         install_accels(app);
-        let win = window::OpenPdfWindow::new(app, settings, Arc::new(UnavailableSigner));
+        let win = window::OpenPdfWindow::new(
+            app,
+            settings,
+            Arc::new(UnavailableSigner),
+            Arc::new(NoopVerifier),
+        );
         let ui_window_build_ms = measure::process_elapsed_ms();
         win.present();
         let ui_window_present_ms = measure::process_elapsed_ms();
@@ -210,9 +216,11 @@ fn watch_measure(
                 view.prepare_measure_viewport();
                 laid_out.set(true);
             }
-            let dirty = view.opened().poll();
+            // Do not poll() here — draining the render queue would put every
+            // tile in cache before the first draw and collapse first_tile
+            // onto all_visible. The tile pump delivers one arrival at a time.
             let ready = view.tile_ready();
-            if dirty || measure::ui_all_visible_painted_ms() == 0 {
+            if measure::ui_all_visible_painted_ms() == 0 {
                 view.ensure_laid_out();
                 view.queue_repaint();
             }
