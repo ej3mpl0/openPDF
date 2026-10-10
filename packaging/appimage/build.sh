@@ -101,6 +101,29 @@ fi
 install -Dm0644 "$icon_src" "$APPDIR/usr/share/icons/hicolor/scalable/apps/${ICON_NAME}.svg"
 install -Dm0644 "$icon_src" "$APPDIR/usr/share/icons/hicolor/scalable/apps/${APP_ID}.svg"
 
+# Ship the Adwaita icon theme: linuxdeploy-plugin-gtk sets XDG_DATA_DIRS to
+# $APPDIR/usr/share first but does not copy icon themes, so hosts without
+# adwaita-icon-theme (KDE, minimal distros) would show image-missing.
+adwaita_archive="$BUILD_DIR/adwaita-icon-theme-${ADWAITA_ICON_THEME_VERSION}.tar.xz"
+download_verify "$ADWAITA_ICON_THEME_URL" "$adwaita_archive" "$ADWAITA_ICON_THEME_SHA256"
+rm -rf "$BUILD_DIR/adwaita-src" "$APPDIR/usr/share/icons/Adwaita"
+mkdir -p "$BUILD_DIR/adwaita-src" "$APPDIR/usr/share/icons/Adwaita"
+tar -xJf "$adwaita_archive" -C "$BUILD_DIR/adwaita-src" --strip-components=1
+cp -a "$BUILD_DIR/adwaita-src/Adwaita/index.theme" "$BUILD_DIR/adwaita-src/Adwaita/symbolic" \
+  "$BUILD_DIR/adwaita-src/Adwaita/scalable" "$APPDIR/usr/share/icons/Adwaita/"
+if command -v gtk4-update-icon-cache >/dev/null; then
+  gtk4-update-icon-cache -q -t -f "$APPDIR/usr/share/icons/Adwaita"
+  gtk4-update-icon-cache -q -t -f "$APPDIR/usr/share/icons/hicolor"
+fi
+"$ROOT/packaging/check-icons.sh" "$APPDIR/usr/share/icons"
+
+# Symbolic icons are SVG: the gdk-pixbuf SVG loader (librsvg2-common) must be
+# on the build host so linuxdeploy-plugin-gtk bundles it.
+if ! find /usr/lib -path '*gdk-pixbuf-2.0*' -name 'libpixbufloader*svg*.so' | grep -q .; then
+  echo "gdk-pixbuf SVG loader missing on build host (install librsvg2-common)" >&2
+  exit 1
+fi
+
 cat > "$APPDIR/apprun-hooks/openpdf-pdfium.sh" <<'EOF'
 # Bundled PDFium; same search order as openpdf-core honors OPENPDF_PDFIUM first.
 export OPENPDF_PDFIUM="${APPDIR}/usr/lib/libpdfium.so"
@@ -138,6 +161,11 @@ done
   "${extra_libs[@]}" \
   --plugin gtk \
   --output appimage
+
+if ! find "$APPDIR" -name 'libpixbufloader*svg*.so' | grep -q .; then
+  echo "AppImage is missing the gdk-pixbuf SVG loader" >&2
+  exit 1
+fi
 
 echo "AppImage: $OUTPUT"
 ls -lh "$OUTPUT"

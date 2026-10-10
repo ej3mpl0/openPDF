@@ -29,3 +29,9 @@ LINUXDEPLOY_TAG="1-alpha-20251107-1"
 LINUXDEPLOY_SHA256_X86_64="c20cd71e3a4e3b80c3483cef793cda3f4e990aca14014d23c544ca3ce1270b4d"
 LINUXDEPLOY_PLUGIN_GTK_COMMIT="3b67a1d1c1b0c8268f57f2bce40fe2d33d409cea"
 LINUXDEPLOY_PLUGIN_GTK_SHA256="b0f4cbc684a0103a9651f0955b635eaea0096b3a66c0f5a2c2aa337960375171"
+
+# Adwaita icon theme bundled into the AppImage (non-GNOME hosts may lack it).
+# 51.0 matches the org.gnome.Platform 51 runtime used by the Flatpak manifest.
+ADWAITA_ICON_THEME_VERSION="51.0"
+ADWAITA_ICON_THEME_URL="https://download.gnome.org/sources/adwaita-icon-theme/51/adwaita-icon-theme-51.0.tar.xz"
+ADWAITA_ICON_THEME_SHA256="ba561cf3c96305a47179fa5605856ad695c9238ea07f7093aebd9ba80c4e323b"
