@@ -754,3 +754,9 @@ msgstr ""
 
 msgid "PIN must be requested off the GTK thread"
 msgstr ""
+
+msgid "OCR needs Tesseract. Install tesseract-ocr (and language data) or set OPENPDF_TESSERACT."
+msgstr ""
+
+msgid "OCR language {language} is not installed. Installed: {installed}. {hint}"
+msgstr ""
