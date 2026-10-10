@@ -517,6 +517,13 @@ impl Engine {
         }
     }
 
+    /// Drop tiles whose zoom is not in `keep` (current main / preview / thumbs).
+    pub fn retain_cache_zooms(&self, keep: &[u32]) {
+        if let Ok(mut c) = self.worker.cache.lock() {
+            c.retain_zooms(keep);
+        }
+    }
+
     pub fn cache_cap(&self) -> Option<usize> {
         Some(self.worker.cache.lock().ok()?.cap())
     }

@@ -319,6 +319,23 @@ impl TileCache {
         }
     }
 
+    pub fn retain_zooms(&mut self, keep: &[u32]) {
+        let drop_keys: Vec<TileKey> = self
+            .map
+            .keys()
+            .filter(|k| !keep.contains(&k.zoom_milli))
+            .copied()
+            .collect();
+        for key in drop_keys {
+            if let Some(old) = self.map.remove(&key) {
+                self.bytes = self.bytes.saturating_sub(old.byte_len());
+            }
+            if let Some(pos) = self.order.iter().position(|k| k == &key) {
+                self.order.remove(pos);
+            }
+        }
+    }
+
     pub fn clear(&mut self) {
         self.map.clear();
         self.order.clear();

@@ -748,7 +748,7 @@ pub fn format_rss_breakdown_from_parts_full(
 static RSS_BREAKDOWN: OnceLock<String> = OnceLock::new();
 static HEAP_KB_BEFORE_DOC: OnceLock<u64> = OnceLock::new();
 static MEASURE_DOC_FILE_BYTES: OnceLock<u64> = OnceLock::new();
-static GTK_TILE_BUFFERS: Mutex<Vec<(usize, usize)>> = Mutex::new(Vec::new());
+static GTK_TILE_BUFFERS: Mutex<Vec<(usize, usize, u32)>> = Mutex::new(Vec::new());
 static TILE_REQUEST_ALLOCS: Mutex<Vec<(i32, i32)>> = Mutex::new(Vec::new());
 
 /// Record the page-scroll allocation at each real `request_tiles`.
@@ -802,11 +802,18 @@ pub fn pdfium_mapping_kb_from_smaps(smaps: &str) -> u64 {
 }
 
 /// Record a tile buffer (`Arc` pointer) held by a GTK `MemoryTexture`.
-pub fn register_tile_buffer(ptr: usize, bytes: usize) {
+pub fn register_tile_buffer(ptr: usize, bytes: usize, zoom_milli: u32) {
     if let Ok(mut v) = GTK_TILE_BUFFERS.lock() {
-        if !v.iter().any(|(p, _)| *p == ptr) {
-            v.push((ptr, bytes));
+        if !v.iter().any(|(p, _, _)| *p == ptr) {
+            v.push((ptr, bytes, zoom_milli));
         }
+    }
+}
+
+/// Drop registered buffers whose zoom is not current main / preview / thumbs.
+pub fn retain_tile_buffers_zooms(keep: &[u32]) {
+    if let Ok(mut v) = GTK_TILE_BUFFERS.lock() {
+        v.retain(|(_, _, z)| keep.contains(z));
     }
 }
 
@@ -815,7 +822,7 @@ fn gtk_tile_buffers_for_test() -> Vec<(usize, usize)> {
     GTK_TILE_BUFFERS
         .lock()
         .ok()
-        .map(|g| g.clone())
+        .map(|g| g.iter().map(|(p, b, _)| (*p, *b)).collect::<Vec<_>>())
         .unwrap_or_default()
 }
 
@@ -833,7 +840,7 @@ pub fn ours_tiles_kb() -> u64 {
     let gtk = GTK_TILE_BUFFERS
         .lock()
         .ok()
-        .map(|g| g.clone())
+        .map(|g| g.iter().map(|(p, b, _)| (*p, *b)).collect::<Vec<_>>())
         .unwrap_or_default();
     (unique_tile_bytes(&engine, &gtk) / 1024) as u64
 }
@@ -1718,7 +1725,7 @@ Pss:                  32 kB
 
         let mut engine = TileCache::new(64 * 1024);
         engine.insert(Arc::clone(&tile));
-        register_tile_buffer(ptr, bytes);
+        register_tile_buffer(ptr, bytes, 1000);
 
         let engine_ids = engine.buffer_idents();
         assert_eq!(engine_ids, vec![(ptr, bytes)]);

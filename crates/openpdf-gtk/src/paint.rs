@@ -206,6 +206,25 @@ impl TextureCache {
             .sum()
     }
 
+    /// Keep current main-view zoom, its preview, and thumbs. Drop other zooms.
+    pub fn retain_zooms(&mut self, keep: &[u32]) {
+        let drop_keys: Vec<TileKey> = self
+            .map
+            .keys()
+            .filter(|k| !keep.contains(&k.zoom_milli))
+            .copied()
+            .collect();
+        for key in drop_keys {
+            if let Some(old) = self.map.remove(&key) {
+                self.bytes = self.bytes.saturating_sub(texture_byte_len(&old));
+            }
+            if let Some(pos) = self.order.iter().position(|k| k == &key) {
+                self.order.remove(pos);
+            }
+        }
+        publish_texture_bytes(self.bytes);
+    }
+
     pub fn set_max_bytes(&mut self, max_bytes: usize) {
         self.max_bytes = max_bytes.max(1);
         self.evict();

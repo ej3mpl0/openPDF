@@ -415,6 +415,10 @@ impl Session {
         self.engine.set_cache_bytes(bytes);
     }
 
+    pub fn retain_cache_zooms(&self, keep: &[u32]) {
+        self.engine.retain_cache_zooms(keep);
+    }
+
     pub fn poll(&self) -> bool {
         let mut dirty = false;
         while self.poll_one() {
@@ -538,6 +542,12 @@ impl MockView {
     pub fn set_cache_bytes(&self, bytes: usize) {
         if let Ok(mut cache) = self.cache.lock() {
             cache.set_max_bytes(bytes);
+        }
+    }
+
+    pub fn retain_cache_zooms(&self, keep: &[u32]) {
+        if let Ok(mut cache) = self.cache.lock() {
+            cache.retain_zooms(keep);
         }
     }
 
@@ -771,6 +781,13 @@ impl Opened {
         match self {
             Self::Core(s) => s.set_cache_bytes(bytes),
             Self::Mock(s) => s.set_cache_bytes(bytes),
+        }
+    }
+
+    pub fn retain_cache_zooms(&self, keep: &[u32]) {
+        match self {
+            Self::Core(s) => s.retain_cache_zooms(keep),
+            Self::Mock(s) => s.retain_cache_zooms(keep),
         }
     }
 

@@ -26,6 +26,10 @@ const PADDING: f64 = 18.0;
 const GAP: f64 = 14.0;
 const THUMB_WIDTH: f64 = 96.0;
 
+fn allocation_is_real(width: i32, height: i32) -> bool {
+    width > 1 && height > 1
+}
+
 struct Shared {
     doc: Rc<Opened>,
     current_page: Cell<u32>,
@@ -181,8 +185,12 @@ impl DocumentView {
         self.thumbs_area.queue_draw();
     }
 
+    fn page_allocation_is_real(&self) -> bool {
+        allocation_is_real(self.pages_scroll.width(), self.pages_scroll.height())
+    }
+
     fn issue_tile_request(&self, keys: &[TileKey], priority: Priority) {
-        if keys.is_empty() {
+        if keys.is_empty() || !self.page_allocation_is_real() {
             return;
         }
         crate::measure::note_tile_request_alloc(
@@ -192,19 +200,27 @@ impl DocumentView {
         self.shared.doc.request_tiles(keys, priority);
     }
 
+    fn drop_stale_main_view_zooms(&self, zoom: f64) {
+        let sizes = self.shared.doc.pages();
+        let main = crate::tiles::quantize_zoom(zoom);
+        let preview = (main / 4).max(50);
+        let thumb = crate::tiles::quantize_zoom(THUMB_WIDTH / page_width_or_a4(&sizes));
+        let keep = [main, preview, thumb];
+        self.shared.textures.borrow_mut().retain_zooms(&keep);
+        self.shared.doc.retain_cache_zooms(&keep);
+        crate::measure::retain_tile_buffers_zooms(&keep);
+        self.shared.last_visible.borrow_mut().clear();
+    }
+
     /// Kick the top-left visible tile as soon as the document is open, without
     /// waiting for the 30 ms relayout timer or the first draw.
     pub fn request_first_tile(&self) {
-        let keys = page_tile_keys(self);
-        let key = keys.first().copied().unwrap_or_else(|| {
-            TileKey::new(
-                0,
-                self.shared.zoom.get().max(1.0),
-                0,
-                0,
-                self.shared.tile_size.get(),
-            )
-        });
+        if !self.page_allocation_is_real() {
+            return;
+        }
+        let Some(key) = page_tile_keys(self).first().copied() else {
+            return;
+        };
         self.issue_tile_request(&[key], Priority::Visible);
         if let Some(ready) = self.shared.doc.poll_ready() {
             ingest_arrived_texture(self, &ready);
@@ -314,19 +330,24 @@ impl DocumentView {
         if sizes.is_empty() {
             return;
         }
-        let mut zoom = self.shared.zoom.get();
+        let old_zoom = self.shared.zoom.get();
+        let mut zoom = old_zoom;
+        let real_alloc = self.page_allocation_is_real();
         match self.shared.zoom_mode.get() {
-            ZoomMode::FitWidth => {
+            ZoomMode::FitWidth if real_alloc => {
                 zoom = ((alloc_w - PADDING * 2.0) / sizes[0].width).max(0.1);
             }
-            ZoomMode::FitPage => {
+            ZoomMode::FitPage if real_alloc => {
                 let zw = (alloc_w - PADDING * 2.0) / sizes[0].width;
                 let zh = (alloc_h - PADDING * 2.0) / sizes[0].height;
                 zoom = zw.min(zh).max(0.1);
             }
-            ZoomMode::Percent => {}
+            ZoomMode::FitWidth | ZoomMode::FitPage | ZoomMode::Percent => {}
         }
         self.shared.zoom.set(zoom);
+        if crate::tiles::quantize_zoom(old_zoom) != crate::tiles::quantize_zoom(zoom) {
+            self.drop_stale_main_view_zooms(zoom);
+        }
         let layout = match self.shared.layout_mode.get() {
             PageLayoutMode::Continuous => layout_continuous(&sizes, zoom, alloc_w, PADDING, GAP),
             PageLayoutMode::Single => layout_single(
@@ -1038,7 +1059,7 @@ fn ingest_arrived_texture_shared(shared: &Shared, key: &TileKey) {
     else {
         return;
     };
-    crate::measure::register_tile_buffer(ptr, bytes);
+    crate::measure::register_tile_buffer(ptr, bytes, key.zoom_milli);
     let tex: gdk::Texture = tex.upcast();
     shared.textures.borrow_mut().insert(*key, tex);
 }
@@ -1249,6 +1270,10 @@ mod tests {
             settings.zoom_percent = 100;
             settings.show_thumbnails = false;
             let view = build(opened, &settings, crate::Lang::En);
+            let win = gtk::Window::new();
+            win.set_child(Some(view.widget()));
+            win.present();
+            view.allocate_scrolls(256, 256, 96, 96);
             view.ensure_laid_out();
             view.request_first_tile();
             let t0 = std::time::Instant::now();
@@ -1274,6 +1299,7 @@ mod tests {
                 0,
                 "snapshot must reuse textures; creating per frame was the 2071 ms first_tile"
             );
+            win.close();
         }) else {
             let _ = std::fs::remove_file(&path);
             eprintln!("texture reuse: skipped (no GTK display)");

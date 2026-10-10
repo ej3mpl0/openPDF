@@ -90,6 +90,24 @@ impl TileCache {
         self.map.insert(tile.key, tile);
     }
 
+    /// Keep tiles whose `zoom_q` is in `keep`. Used when FitWidth settles.
+    pub fn retain_zooms(&mut self, keep: &[u32]) {
+        let drop_keys: Vec<TileKey> = self
+            .map
+            .keys()
+            .filter(|k| !keep.contains(&k.zoom_q))
+            .copied()
+            .collect();
+        for key in drop_keys {
+            if let Some(old) = self.map.remove(&key) {
+                self.used = self.used.saturating_sub(old.byte_len());
+            }
+            if let Some(pos) = self.order.iter().position(|k| *k == key) {
+                self.order.remove(pos);
+            }
+        }
+    }
+
     pub fn invalidate_doc(&mut self, doc: DocumentId) {
         let keys: Vec<TileKey> = self.map.keys().filter(|k| k.doc == doc).copied().collect();
         for key in keys {
@@ -168,6 +186,76 @@ mod tests {
         cache.insert(tile(2, 0, 4));
         cache.invalidate_doc(DocumentId(1));
         assert_eq!(cache.len(), 1);
+    }
+
+    #[test]
+    fn retain_zooms_keeps_listed_only() {
+        let mut cache = TileCache::new(64);
+        cache.insert(Arc::new(Tile {
+            key: TileKey {
+                doc: DocumentId(1),
+                page: 0,
+                zoom_q: 1333,
+                x: 0,
+                y: 0,
+            },
+            width: 1,
+            height: 1,
+            rgba: vec![0; 4],
+        }));
+        cache.insert(Arc::new(Tile {
+            key: TileKey {
+                doc: DocumentId(1),
+                page: 0,
+                zoom_q: 1592,
+                x: 0,
+                y: 0,
+            },
+            width: 1,
+            height: 1,
+            rgba: vec![0; 4],
+        }));
+        cache.insert(Arc::new(Tile {
+            key: TileKey {
+                doc: DocumentId(1),
+                page: 0,
+                zoom_q: 157,
+                x: 0,
+                y: 0,
+            },
+            width: 1,
+            height: 1,
+            rgba: vec![0; 4],
+        }));
+        cache.retain_zooms(&[1592, 398, 157]);
+        assert_eq!(cache.len(), 2);
+        assert!(cache
+            .get(&TileKey {
+                doc: DocumentId(1),
+                page: 0,
+                zoom_q: 1333,
+                x: 0,
+                y: 0,
+            })
+            .is_none());
+        assert!(cache
+            .get(&TileKey {
+                doc: DocumentId(1),
+                page: 0,
+                zoom_q: 1592,
+                x: 0,
+                y: 0,
+            })
+            .is_some());
+        assert!(cache
+            .get(&TileKey {
+                doc: DocumentId(1),
+                page: 0,
+                zoom_q: 157,
+                x: 0,
+                y: 0,
+            })
+            .is_some());
     }
 
     #[test]
