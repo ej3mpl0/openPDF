@@ -444,3 +444,6 @@ msgstr "el hueco del ByteRange de la firma no coincide exactamente con el Conten
 
 msgid "signature ByteRange does not end at the end of the signed revision"
 msgstr "el ByteRange de la firma no termina al final de la revisión firmada"
+
+msgid "Warning: the document was modified after signing; what you see may not be what was signed (signature is cryptographically correct)"
+msgstr "Aviso: el documento se modificó después de firmarlo; lo que ves puede no ser lo que se firmó (la firma es criptográficamente correcta)"

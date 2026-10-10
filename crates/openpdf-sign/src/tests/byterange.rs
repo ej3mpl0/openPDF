@@ -61,11 +61,12 @@ fn with_byte_range(pdf: &[u8], values: &[i64]) -> Vec<u8> {
     out
 }
 
+/// Malformed ByteRange: verification still succeeds, the signature is
+/// invalid and carries the structured reason.
 fn byte_range_err(pdf: &[u8]) -> ByteRangeError {
-    match verify_pdf(pdf) {
-        Err(Error::ByteRange(kind)) => kind,
-        other => panic!("expected a ByteRange error, got {other:?}"),
-    }
+    let info = only_info(pdf);
+    assert_eq!(info.valid, Some(false));
+    info.invalid_reason.expect("invalid_reason")
 }
 
 /// Append one incremental update: `objects` as dictionaries, `raw` as
@@ -345,6 +346,137 @@ fn second_signature_is_later_signature() {
         let mut mods: Vec<_> = infos.iter().map(|i| i.modified_after).collect();
         mods.sort_by_key(|m| m.is_some());
         assert_eq!(mods, vec![None, Some(LaterModification::LaterSignature)]);
+    }) else {
+        return;
+    };
+}
+
+#[test]
+fn broken_second_signature_keeps_first_valid() {
+    let Some(()) = with_softhsm(|| {
+        let second = sign_bytes(&signed_fixture());
+        let [_, b, c, d] = byte_range(&second); // last ByteRange = second signature
+        let broken = with_byte_range(&second, &[1, b - 1, c, d]);
+        let infos = verify_pdf(&broken).expect("verify must not fail as a whole");
+        assert_eq!(infos.len(), 2);
+        let bad: Vec<_> = infos
+            .iter()
+            .filter(|i| i.invalid_reason.is_some())
+            .collect();
+        let good: Vec<_> = infos
+            .iter()
+            .filter(|i| i.invalid_reason.is_none())
+            .collect();
+        assert_eq!(bad.len(), 1);
+        assert_eq!(bad[0].valid, Some(false));
+        assert_eq!(
+            bad[0].invalid_reason,
+            Some(ByteRangeError::FirstOffsetNotZero { offset: 1 })
+        );
+        assert_eq!(good.len(), 1);
+        assert_eq!(good[0].valid, Some(true));
+    }) else {
+        return;
+    };
+}
+
+/// One page with an AcroForm text field "name" that has a visible appearance.
+fn form_fixture() -> Vec<u8> {
+    use lopdf::{dictionary, Stream};
+    let mut doc = LoDocument::with_version("1.7");
+    let pages_id = doc.new_object_id();
+    let font_id = doc.add_object(dictionary! {
+        "Type" => "Font", "Subtype" => "Type1", "BaseFont" => "Helvetica",
+    });
+    let ap_id = doc.add_object(Stream::new(
+        dictionary! {
+            "Type" => "XObject", "Subtype" => "Form",
+            "BBox" => vec![0.into(), 0.into(), 200.into(), 30.into()],
+            "Resources" => dictionary! { "Font" => dictionary! { "Helv" => font_id } },
+        },
+        b"/Tx BMC BT /Helv 12 Tf 2 10 Td (Ana) Tj ET EMC".to_vec(),
+    ));
+    let field_id = doc.new_object_id();
+    let content_id = doc.add_object(Stream::new(
+        dictionary! {},
+        b"BT /F1 18 Tf 72 720 Td (I agree to pay) Tj ET".to_vec(),
+    ));
+    let page_id = doc.add_object(dictionary! {
+        "Type" => "Page", "Parent" => pages_id,
+        "MediaBox" => vec![0.into(), 0.into(), 612.into(), 792.into()],
+        "Contents" => content_id,
+        "Resources" => dictionary! { "Font" => dictionary! { "F1" => font_id } },
+        "Annots" => vec![field_id.into()],
+    });
+    doc.objects.insert(
+        field_id,
+        Object::Dictionary(dictionary! {
+            "Type" => "Annot", "Subtype" => "Widget", "FT" => "Tx",
+            "T" => Object::string_literal("name"), "V" => Object::string_literal("Ana"),
+            "Rect" => vec![72.into(), 650.into(), 272.into(), 680.into()],
+            "F" => 4, "P" => page_id, "DA" => Object::string_literal("/Helv 12 Tf 0 g"),
+            "AP" => dictionary! { "N" => ap_id },
+        }),
+    );
+    doc.objects.insert(
+        pages_id,
+        Object::Dictionary(dictionary! {
+            "Type" => "Pages", "Kids" => vec![page_id.into()], "Count" => 1,
+        }),
+    );
+    let acro_id = doc.add_object(dictionary! {
+        "Fields" => vec![field_id.into()],
+        "DA" => Object::string_literal("/Helv 12 Tf 0 g"),
+        "DR" => dictionary! { "Font" => dictionary! { "Helv" => font_id } },
+    });
+    let catalog_id = doc.add_object(dictionary! {
+        "Type" => "Catalog", "Pages" => pages_id, "AcroForm" => acro_id,
+    });
+    doc.trailer.set("Root", catalog_id);
+    let mut out = Vec::new();
+    doc.save_to(&mut out).unwrap();
+    out
+}
+
+#[test]
+fn later_form_value_and_appearance_change_is_other() {
+    let Some(()) = with_softhsm(|| {
+        let signed = sign_bytes(&form_fixture());
+        let info = only_info(&signed);
+        assert_eq!(info.valid, Some(true));
+        assert_eq!(info.modified_after, None);
+
+        let doc = LoDocument::load_mem(&signed).unwrap();
+        let (field_id, field) = doc
+            .objects
+            .iter()
+            .find(|(_, o)| {
+                o.as_dict()
+                    .is_ok_and(|d| matches!(d.get(b"FT"), Ok(Object::Name(n)) if n == b"Tx"))
+            })
+            .map(|(id, o)| (*id, o.as_dict().unwrap().clone()))
+            .unwrap();
+        let new_ap = next_object_id(&doc);
+        let content = "/Tx BMC BT /Helv 12 Tf 2 10 Td (Mallory) Tj ET EMC";
+        let raw = vec![(
+            new_ap,
+            format!(
+                "<< /Type /XObject /Subtype /Form /BBox [0 0 200 30] /Length {} >>\nstream\n{content}\nendstream",
+                content.len()
+            ),
+        )];
+        let mut changed = field;
+        changed.set("V", Object::string_literal("Mallory"));
+        let mut ap = Dictionary::new();
+        ap.set("N", Object::Reference((new_ap, 0)));
+        changed.set("AP", Object::Dictionary(ap));
+        let tampered = append_update(&signed, &[(field_id.0, Object::Dictionary(changed))], &raw);
+        let info = only_info(&tampered);
+        assert_eq!(info.valid, Some(true), "signed revision bytes are intact");
+        assert_eq!(info.modified_after, Some(LaterModification::Other));
+        with_locale("en", || {
+            assert!(format_verify_result(&info).starts_with("Warning:"));
+        });
     }) else {
         return;
     };

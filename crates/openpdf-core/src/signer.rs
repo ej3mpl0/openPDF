@@ -66,6 +66,9 @@ pub struct SignatureInfo {
     /// What was appended after the signed revision. `None`: the signature
     /// covers the whole file.
     pub modified_after: Option<LaterModification>,
+    /// Set when the signature was rejected for a malformed /ByteRange
+    /// (`valid` is then `Some(false)`).
+    pub invalid_reason: Option<ByteRangeError>,
 }
 
 /// Incremental updates appended after a signed revision.
@@ -207,6 +210,16 @@ pub fn describe_certificate(info: &CertificateInfo) -> String {
 /// User-facing verify line for one signature dictionary (translated).
 pub fn format_verify_result(info: &SignatureInfo) -> String {
     let mut parts = Vec::new();
+    let tampered = info.modified_after == Some(LaterModification::Other);
+    if tampered {
+        // Lead with the warning; never start with "Valid".
+        parts.push(match info.valid {
+            Some(true) => tr(
+                "Warning: the document was modified after signing; what you see may not be what was signed (signature is cryptographically correct)",
+            ),
+            _ => LaterModification::Other.to_locale_string(),
+        });
+    }
     if let Some(name) = &info.name {
         parts.push(tr_args("Signer: {name}", &[("name", name)]));
     }
@@ -216,12 +229,16 @@ pub fn format_verify_result(info: &SignatureInfo) -> String {
     if let Some(location) = &info.location {
         parts.push(tr_args("Location: {location}", &[("location", location)]));
     }
-    parts.push(match info.valid {
-        Some(true) => tr("Valid"),
-        Some(false) => tr("Invalid"),
-        None => tr("Validity unknown"),
-    });
-    if let Some(m) = info.modified_after {
+    match info.valid {
+        Some(true) if tampered => {}
+        Some(true) => parts.push(tr("Valid")),
+        Some(false) => parts.push(tr("Invalid")),
+        None => parts.push(tr("Validity unknown")),
+    }
+    if let Some(reason) = &info.invalid_reason {
+        parts.push(reason.to_locale_string());
+    }
+    if let Some(m) = info.modified_after.filter(|_| !tampered) {
         parts.push(m.to_locale_string());
     }
     if parts.len() == 1 {
@@ -571,6 +588,36 @@ mod tests {
     }
 
     #[test]
+    fn tampered_result_leads_with_warning() {
+        let info = SignatureInfo {
+            name: Some("Ana".into()),
+            valid: Some(true),
+            modified_after: Some(LaterModification::Other),
+            ..SignatureInfo::default()
+        };
+        for lang in ["en", "es"] {
+            with_locale(lang, || {
+                let line = format_verify_result(&info);
+                let warning = tr("Warning: the document was modified after signing; what you see may not be what was signed (signature is cryptographically correct)");
+                assert!(line.starts_with(&warning), "{line}");
+                assert!(!line.contains(&tr("Valid")), "{line}");
+                assert!(line.contains("Ana"), "{line}");
+            });
+        }
+        let ok = SignatureInfo {
+            valid: Some(true),
+            modified_after: Some(LaterModification::Annotations),
+            ..SignatureInfo::default()
+        };
+        with_locale("en", || {
+            assert_eq!(
+                format_verify_result(&ok),
+                "Valid; Comments were added after signing"
+            );
+        });
+    }
+
+    #[test]
     fn verify_result_follows_catalog() {
         let info = SignatureInfo {
             name: Some("Ana".into()),
@@ -578,6 +625,7 @@ mod tests {
             location: Some("Madrid".into()),
             valid: Some(true),
             modified_after: None,
+            invalid_reason: None,
         };
         with_locale("en", || {
             assert_eq!(

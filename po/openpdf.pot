@@ -444,3 +444,6 @@ msgstr ""
 
 msgid "signature ByteRange does not end at the end of the signed revision"
 msgstr ""
+
+msgid "Warning: the document was modified after signing; what you see may not be what was signed (signature is cryptographically correct)"
+msgstr ""

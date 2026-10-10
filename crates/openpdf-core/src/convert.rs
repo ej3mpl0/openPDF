@@ -81,8 +81,8 @@ pub fn images_to_pdf<P: AsRef<Path>>(paths: &[P]) -> Result<Document> {
 
     for path in paths {
         let bytes = std::fs::read(path.as_ref())?;
-        let dyn_img = image::load_from_memory(&bytes)
-            .map_err(|e| Error::structure(e.to_string()))?;
+        let dyn_img =
+            image::load_from_memory(&bytes).map_err(|e| Error::structure(e.to_string()))?;
         let rgb = dyn_img.to_rgb8();
         let (iw, ih) = rgb.dimensions();
         if iw == 0 || ih == 0 {
@@ -185,10 +185,7 @@ mod tests {
     fn blank_and_images_roundtrip() {
         let doc = blank_document(3).unwrap();
         assert_eq!(doc.page_count(), 3);
-        let dir = std::env::temp_dir().join(format!(
-            "openpdf-img-{}",
-            std::process::id()
-        ));
+        let dir = std::env::temp_dir().join(format!("openpdf-img-{}", std::process::id()));
         let _ = std::fs::create_dir_all(&dir);
         let png = dir.join("dot.png");
         // 2x2 red PNG

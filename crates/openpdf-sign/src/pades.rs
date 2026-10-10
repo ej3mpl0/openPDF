@@ -133,7 +133,7 @@ pub(crate) fn verify_signatures(pdf: &[u8]) -> Result<Vec<SignatureInfo>> {
         if !is_signature_value(dict) {
             continue;
         }
-        out.push(verify_one(pdf, &doc, dict)?);
+        out.push(verify_one(pdf, &doc, dict));
     }
     Ok(out)
 }
@@ -211,12 +211,24 @@ fn revision_end(pdf: &[u8], from: usize) -> Option<usize> {
     Some(end)
 }
 
-fn verify_one(pdf: &[u8], doc: &Document, dict: &Dictionary) -> Result<SignatureInfo> {
+fn verify_one(pdf: &[u8], doc: &Document, dict: &Dictionary) -> SignatureInfo {
     let reason = dict_text(dict, b"Reason");
     let location = dict_text(dict, b"Location");
     let name = dict_text(dict, b"Name");
 
-    let [a, b, c, d] = check_byte_range(pdf, dict).map_err(Error::ByteRange)?;
+    let [a, b, c, d] = match check_byte_range(pdf, dict) {
+        Ok(v) => v,
+        Err(e) => {
+            return SignatureInfo {
+                name,
+                reason,
+                location,
+                valid: Some(false),
+                invalid_reason: Some(e),
+                ..SignatureInfo::default()
+            }
+        }
+    };
     let signed_end = c + d;
     let modified_after = if pdf[signed_end..].iter().all(|b| b.is_ascii_whitespace()) {
         None
@@ -229,26 +241,28 @@ fn verify_one(pdf: &[u8], doc: &Document, dict: &Dictionary) -> Result<Signature
         location: location.clone(),
         valid: Some(false),
         modified_after,
+        invalid_reason: None,
     };
     let Some(contents) = contents_bytes(dict) else {
-        return Ok(invalid(name));
+        return invalid(name);
     };
     if contents.iter().all(|b| *b == 0) {
-        return Ok(invalid(name));
+        return invalid(name);
     }
     let Ok(message) = byterange_bytes(pdf, &[a as i64, b as i64, c as i64, d as i64]) else {
-        return Ok(invalid(name));
+        return invalid(name);
     };
     // Integrity of the claimed ranges: SHA-256 is also pinned inside CMS.
     let _ = Sha256::digest(&message);
     let check = cades::verify_detached(&contents, &message);
-    Ok(SignatureInfo {
+    SignatureInfo {
         name: name.or(check.signer),
         reason,
         location,
         valid: Some(check.valid),
         modified_after,
-    })
+        invalid_reason: None,
+    }
 }
 
 /// Compare the signed revision with the final document and classify every
@@ -319,7 +333,7 @@ fn is_replacement_acroform(old: &Document, full: &Document, id: ObjectId, d: &Di
         Object::Reference(r) => Some(*r),
         _ => None,
     };
-    if acro_of(full) != Some(id) || d.iter().any(|(k, _)| k != b"Fields" && k != b"SigFlags") {
+    if acro_of(full) != Some(id) {
         return false;
     }
     let fields = |doc: &Document, dict: Option<&Dictionary>| -> Option<Vec<Object>> {
@@ -335,6 +349,10 @@ fn is_replacement_acroform(old: &Document, full: &Document, id: ObjectId, d: &Di
         Some(Object::Dictionary(d)) => Some(d),
         _ => None,
     };
+    let empty = Dictionary::new();
+    if !only_keys_changed(old_acro.unwrap_or(&empty), d, &[b"Fields", b"SigFlags"]) {
+        return false;
+    }
     match (fields(old, old_acro), fields(full, Some(d))) {
         (Some(o), Some(n)) => n.starts_with(&o),
         _ => false,
@@ -578,23 +596,22 @@ fn write_appearance(
 
 fn build_acroform(doc: &Document, widget: ObjectId) -> Result<Dictionary> {
     let mut fields = Vec::new();
+    // Keep DA/DR/etc. of an existing form; only Fields and SigFlags change.
+    let mut acro = Dictionary::new();
     if let Ok(catalog) = doc.catalog() {
         if let Ok(obj) = catalog.get(b"AcroForm") {
-            match obj {
-                Object::Reference(id) => {
-                    if let Ok(dict) = get_dict(doc, *id) {
-                        fields = existing_array(doc, dict, b"Fields");
-                    }
-                }
-                Object::Dictionary(dict) => {
-                    fields = existing_array(doc, dict, b"Fields");
-                }
-                _ => {}
+            let existing = match obj {
+                Object::Reference(id) => get_dict(doc, *id).ok(),
+                Object::Dictionary(dict) => Some(dict),
+                _ => None,
+            };
+            if let Some(dict) = existing {
+                fields = existing_array(doc, dict, b"Fields");
+                acro = dict.clone();
             }
         }
     }
     fields.push(Object::Reference(widget));
-    let mut acro = Dictionary::new();
     acro.set("Fields", Object::Array(fields));
     acro.set("SigFlags", Object::Integer(3));
     Ok(acro)
