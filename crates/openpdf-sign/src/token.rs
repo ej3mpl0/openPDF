@@ -1,6 +1,8 @@
 //! PKCS#11 module loading, certificate listing (no PIN), and login-on-sign.
 
 use std::path::{Path, PathBuf};
+use std::sync::Arc;
+use std::time::Duration;
 
 use const_oid::AssociatedOid;
 use cryptoki::context::{CInitializeArgs, CInitializeFlags, Pkcs11};
@@ -13,7 +15,7 @@ use cryptoki::types::AuthPin;
 use der::Decode;
 use openpdf_core::{
     tr_args, CertificateInfo, CertificateUsage, CertificateValidity, Error, InvalidKind,
-    PinProvider, Result, SecretPin, SignRequest, SignatureInfo, Signer,
+    PadesLevel, PinProvider, Result, SecretPin, SignRequest, SignatureInfo, Signer,
 };
 use sha2::{Digest, Sha256};
 use x509_cert::ext::pkix::KeyUsage;
@@ -21,6 +23,7 @@ use x509_cert::Certificate;
 
 use crate::cades;
 use crate::pades;
+use crate::tsp::{self, Tsa};
 
 /// OpenSC (Spanish DNIe), p11-kit / NSS softoken (FNMT in a user NSS db), SoftHSM.
 const DEFAULT_MODULES: &[&str] = &[
@@ -46,13 +49,38 @@ const DEFAULT_MODULES: &[&str] = &[
 pub struct Pkcs11Config {
     /// Explicit module. When unset, [`OPENPDF_PKCS11_MODULE`] and the built-in defaults are tried.
     pub module_path: Option<PathBuf>,
+    /// RFC 3161 TSA for PAdES B-T, used when the request has no
+    /// [`SignRequest::tsa_url`]. There is deliberately no default server.
+    pub tsa_url: Option<String>,
+    /// Network timeout for one TSA request ([`tsp::DEFAULT_TSA_TIMEOUT`] when unset).
+    pub tsa_timeout: Option<Duration>,
+    /// DER roots the TSA certificate must chain to, for signing and verifying.
+    /// Empty: the operating system certificate store.
+    pub tsa_trust_anchors: Vec<Vec<u8>>,
 }
 
 impl Pkcs11Config {
     pub fn with_module(path: impl Into<PathBuf>) -> Self {
         Self {
             module_path: Some(path.into()),
+            ..Self::default()
         }
+    }
+
+    pub fn with_tsa_url(mut self, url: impl Into<String>) -> Self {
+        self.tsa_url = Some(url.into());
+        self
+    }
+
+    pub fn with_tsa_timeout(mut self, timeout: Duration) -> Self {
+        self.tsa_timeout = Some(timeout);
+        self
+    }
+
+    /// Trust this DER root for TSA certificates (replaces the system store).
+    pub fn with_tsa_trust_anchor(mut self, der: impl Into<Vec<u8>>) -> Self {
+        self.tsa_trust_anchors.push(der.into());
+        self
     }
 }
 
@@ -62,6 +90,9 @@ impl Pkcs11Config {
 pub struct Pkcs11Signer {
     modules: Vec<LoadedModule>,
     pin: Box<dyn PinProvider>,
+    tsa_url: Option<String>,
+    tsa_timeout: Duration,
+    tsa_trust: Arc<Vec<x509_cert::Certificate>>,
 }
 
 struct LoadedModule {
@@ -80,6 +111,7 @@ struct PickedCert {
 
 impl Pkcs11Signer {
     pub fn new(config: Pkcs11Config, pin: impl PinProvider + 'static) -> Result<Self> {
+        let tsa_trust = tsp::trust_from_der(&config.tsa_trust_anchors)?;
         let paths = resolve_module_paths(&config);
         let mut modules = Vec::new();
         let mut last_err = None;
@@ -103,6 +135,9 @@ impl Pkcs11Signer {
         Ok(Self {
             modules,
             pin: Box::new(pin),
+            tsa_url: config.tsa_url,
+            tsa_timeout: config.tsa_timeout.unwrap_or(tsp::DEFAULT_TSA_TIMEOUT),
+            tsa_trust,
         })
     }
 
@@ -206,27 +241,50 @@ impl Signer for Pkcs11Signer {
         if request.cert_id.trim().is_empty() {
             return Err(Error::invalid(InvalidKind::CertIdRequired));
         }
-        // Refuse unsupported levels before any token login / PIN prompt.
-        pades::ensure_supported_level(request)?;
+        // Refuse unsupported levels / a missing TSA before any token login or PIN prompt.
+        let tsa = self.resolve_tsa(request)?;
+        pades::ensure_supported_level(request, tsa.as_ref())?;
         let picked = self.pick(&request.cert_id)?;
         if !can_sign(&picked.info.usage) {
             return Err(Error::Sign("certificate is not a signing cert".into()));
         }
         let cert = Certificate::from_der(&picked.der).map_err(|e| Error::Sign(e.to_string()))?;
         let name = common_name_or_subject(&cert);
-        pades::sign_incremental(pdf, request, &name, |message| {
+        pades::sign_incremental(pdf, request, &name, tsa.as_ref(), |message| {
             self.sign_cms(message, &picked)
         })
     }
 
     fn verify(&self, pdf: &[u8]) -> Result<Vec<SignatureInfo>> {
-        pades::verify_signatures(pdf)
+        pades::verify_signatures(pdf, &self.tsa_trust)
+    }
+}
+
+impl Pkcs11Signer {
+    /// B-T only: request URL first, then config. No URL is a typed error.
+    fn resolve_tsa(&self, request: &SignRequest) -> Result<Option<Tsa>> {
+        if request.level != PadesLevel::BT {
+            return Ok(None);
+        }
+        let url = request.tsa_url.as_deref().or(self.tsa_url.as_deref());
+        Tsa::new(url, self.tsa_timeout, self.tsa_trust.clone()).map(Some)
     }
 }
 
 /// Verify PAdES signatures without opening a PKCS#11 module.
+///
+/// Signature timestamps are checked against the operating system store.
 pub fn verify_pdf(pdf: &[u8]) -> Result<Vec<SignatureInfo>> {
-    pades::verify_signatures(pdf)
+    pades::verify_signatures(pdf, &tsp::system_trust())
+}
+
+/// Like [`verify_pdf`], but TSA certificates must chain to `tsa_trust_anchors` (DER).
+pub fn verify_pdf_with_tsa_trust(
+    pdf: &[u8],
+    tsa_trust_anchors: &[Vec<u8>],
+) -> Result<Vec<SignatureInfo>> {
+    let trust = tsp::trust_from_der(tsa_trust_anchors)?;
+    pades::verify_signatures(pdf, &trust)
 }
 
 fn resolve_module_paths(config: &Pkcs11Config) -> Vec<PathBuf> {
@@ -355,10 +413,11 @@ fn key_usage(cert: &Certificate) -> Vec<CertificateUsage> {
         }
         if ku.digital_signature() && !ku.non_repudiation() {
             usage.push(CertificateUsage::Authentication);
-        } else if ku.digital_signature() && ku.non_repudiation() {
-            if !usage.contains(&CertificateUsage::Signing) {
-                usage.push(CertificateUsage::Signing);
-            }
+        } else if ku.digital_signature()
+            && ku.non_repudiation()
+            && !usage.contains(&CertificateUsage::Signing)
+        {
+            usage.push(CertificateUsage::Signing);
         }
         if ku.key_encipherment() || ku.data_encipherment() {
             usage.push(CertificateUsage::Encryption);

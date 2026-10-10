@@ -63,6 +63,9 @@ pub struct SignRequest {
     /// PAdES baseline level. Backends must refuse levels they cannot produce
     /// rather than silently downgrading.
     pub level: PadesLevel,
+    /// RFC 3161 timestamp server for [`PadesLevel::BT`]. Overrides the
+    /// backend's configured URL. There is no built-in default.
+    pub tsa_url: Option<String>,
 }
 
 impl SignRequest {
@@ -97,6 +100,12 @@ impl SignRequest {
         self.level = level;
         self
     }
+
+    /// TSA URL for B-T (`http://` or `https://`).
+    pub fn with_tsa_url(mut self, url: impl Into<String>) -> Self {
+        self.tsa_url = Some(url.into());
+        self
+    }
 }
 
 /// PAdES baseline signature level (ETSI EN 319 142-1).
@@ -106,8 +115,8 @@ pub enum PadesLevel {
     /// B-B: signed attributes only, no timestamp.
     #[default]
     BB,
-    /// B-T: B-B plus a signature timestamp from a TSA (not implemented yet;
-    /// no TSA is configured anywhere).
+    /// B-T: B-B plus an RFC 3161 signature timestamp from a TSA. The TSA URL
+    /// must be configured explicitly; there is no default server.
     BT,
 }
 
@@ -128,6 +137,19 @@ pub struct SignatureInfo {
     pub reason: Option<String>,
     pub location: Option<String>,
     pub valid: Option<bool>,
+    /// RFC 3161 signature timestamp (PAdES B-T), if the signature carries one.
+    pub timestamp: Option<TimestampInfo>,
+}
+
+/// A signature timestamp found while verifying.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct TimestampInfo {
+    /// `genTime` as RFC 3339 UTC, when the token could be parsed.
+    pub time: Option<String>,
+    /// Token signature, imprint, ESS binding and TSA chain all verified.
+    pub valid: bool,
+    /// Why it is not valid, when `valid` is false.
+    pub problem: Option<crate::error::TimestampErrorKind>,
 }
 
 /// Certificate / PKCS#11 signing is implemented in `openpdf-sign`.
@@ -213,6 +235,14 @@ pub fn format_verify_result(info: &SignatureInfo) -> String {
         Some(false) => tr("Invalid"),
         None => tr("Validity unknown"),
     });
+    if let Some(ts) = &info.timestamp {
+        let time = ts.time.clone().unwrap_or_else(|| tr("unknown time"));
+        parts.push(if ts.valid {
+            tr_args("Timestamp: {time} (valid)", &[("time", &time)])
+        } else {
+            tr_args("Timestamp: {time} (invalid)", &[("time", &time)])
+        });
+    }
     if parts.len() == 1 {
         parts.insert(0, tr("Signature"));
     }
@@ -572,6 +602,7 @@ mod tests {
             reason: Some("agree".into()),
             location: Some("Madrid".into()),
             valid: Some(true),
+            timestamp: None,
         };
         with_locale("en", || {
             assert_eq!(
