@@ -1,8 +1,58 @@
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::Arc;
+use std::time::{Duration, Instant};
+
 use lopdf::{Dictionary, Document as LopdfDocument, Object};
 
 use crate::document::Document;
 use crate::error::{Error, InvalidKind, Result};
 use crate::i18n::{tr, tr_args};
+
+/// Backends must observe [`CancelToken::cancel`] within this bound (before the
+/// PIN prompt, before a TSA request, and while waiting on the TSA).
+pub const CANCEL_NOTICE: Duration = Duration::from_millis(200);
+
+const CANCEL_SLICE: Duration = Duration::from_millis(50);
+
+/// Shared cancel flag for one signing attempt. Clone is an `Arc` clone.
+///
+/// GTK Cancel and [`Signer::sign`] share one token. Cancel is silent: not an
+/// error toast, document untouched.
+#[derive(Clone, Debug, Default)]
+pub struct CancelToken {
+    cancelled: Arc<AtomicBool>,
+}
+
+impl CancelToken {
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    /// Signal cancel. [`Signer::sign`] must notice within [`CANCEL_NOTICE`].
+    pub fn cancel(&self) {
+        self.cancelled.store(true, Ordering::SeqCst);
+    }
+
+    pub fn is_cancelled(&self) -> bool {
+        self.cancelled.load(Ordering::SeqCst)
+    }
+
+    /// Block up to `limit`, returning [`Error::SignCancelled`] within
+    /// [`CANCEL_NOTICE`] of [`Self::cancel`]. Used while waiting on a TSA.
+    pub fn wait(&self, limit: Duration) -> Result<()> {
+        let start = Instant::now();
+        loop {
+            if self.is_cancelled() {
+                return Err(Error::SignCancelled);
+            }
+            let elapsed = start.elapsed();
+            if elapsed >= limit {
+                return Ok(());
+            }
+            std::thread::sleep(CANCEL_SLICE.min(limit - elapsed));
+        }
+    }
+}
 
 /// Visible appearance for a certificate signature. Coordinates are PDF points.
 #[derive(Clone, Debug, Default)]
@@ -63,6 +113,9 @@ pub struct SignRequest {
     /// PAdES baseline level. Backends must refuse levels they cannot produce
     /// rather than silently downgrading.
     pub level: PadesLevel,
+    /// Shared with the UI Cancel button. Checked before PIN, before TSA, and
+    /// while waiting (<[`CANCEL_NOTICE`]).
+    pub cancel_token: CancelToken,
 }
 
 impl SignRequest {
@@ -96,6 +149,20 @@ impl SignRequest {
     pub fn with_level(mut self, level: PadesLevel) -> Self {
         self.level = level;
         self
+    }
+
+    pub fn with_cancel_token(mut self, token: CancelToken) -> Self {
+        self.cancel_token = token;
+        self
+    }
+
+    /// [`Error::SignCancelled`] when the UI Cancel button has been pressed.
+    pub fn check_cancel(&self) -> Result<()> {
+        if self.cancel_token.is_cancelled() {
+            Err(Error::SignCancelled)
+        } else {
+            Ok(())
+        }
     }
 }
 
@@ -298,11 +365,14 @@ impl Document {
     /// Already-signed documents are passed through without a full rewrite so the
     /// existing signature bytes stay intact; the backend must append incrementally.
     pub fn apply_signer(&mut self, signer: &dyn Signer, request: &SignRequest) -> Result<()> {
+        request.check_cancel()?;
         if request.cert_id.trim().is_empty() {
             return Err(Error::invalid(InvalidKind::CertIdRequired));
         }
         let input = self.bytes_for_signer()?;
+        request.check_cancel()?;
         let signed = signer.sign(&input, request)?;
+        request.check_cancel()?;
         *self = Document::from_bytes(signed, self.path().map(|p| p.to_path_buf()))?;
         Ok(())
     }
@@ -425,6 +495,7 @@ mod tests {
         }
 
         fn sign(&self, pdf: &[u8], request: &SignRequest) -> Result<Vec<u8>> {
+            request.check_cancel()?;
             let cert = self
                 .certs
                 .iter()
@@ -463,6 +534,75 @@ mod tests {
             SignRequest::new("c").with_level(PadesLevel::BT).level,
             PadesLevel::BT
         );
+    }
+
+    #[test]
+    fn cancelled_apply_signer_is_silent_and_leaves_document_untouched() {
+        let mut doc = Document::open(corpus("hello.pdf")).unwrap();
+        let before = doc.original_bytes().to_vec();
+        let token = CancelToken::new();
+        token.cancel();
+        let req = signing_request().with_cancel_token(token);
+        let err = doc
+            .apply_signer(
+                &TokenSigner {
+                    certs: dnie_certs(),
+                },
+                &req,
+            )
+            .unwrap_err();
+        assert!(matches!(err, Error::SignCancelled));
+        assert!(err.is_silent_cancel());
+        assert!(!matches!(err, Error::Sign(_)));
+        assert_eq!(doc.original_bytes(), before.as_slice());
+        assert!(!doc.is_signed());
+    }
+
+    /// Fake slow TSA: wait as if RFC 3161 were outstanding. Cancel must land
+    /// within [`CANCEL_NOTICE`] and leave the document untouched.
+    #[test]
+    fn cancel_during_fake_slow_tsa_notices_within_200ms() {
+        struct SlowTsa;
+        impl Signer for SlowTsa {
+            fn list_certificates(&self) -> Result<Vec<CertificateInfo>> {
+                Ok(Vec::new())
+            }
+            fn sign(&self, _pdf: &[u8], request: &SignRequest) -> Result<Vec<u8>> {
+                request.check_cancel()?; // before PIN
+                request.check_cancel()?; // before TSA
+                request.cancel_token.wait(Duration::from_secs(5))?; // while waiting
+                Ok(_pdf.to_vec())
+            }
+            fn verify(&self, _pdf: &[u8]) -> Result<Vec<SignatureInfo>> {
+                Ok(Vec::new())
+            }
+        }
+
+        let mut doc = Document::open(corpus("hello.pdf")).unwrap();
+        let before = doc.original_bytes().to_vec();
+        let token = CancelToken::new();
+        let req = SignRequest::new("tsa-cert")
+            .with_level(PadesLevel::BT)
+            .with_cancel_token(token.clone());
+        let handle = std::thread::spawn({
+            let token = token.clone();
+            move || {
+                std::thread::sleep(Duration::from_millis(80));
+                token.cancel();
+                Instant::now()
+            }
+        });
+        let err = doc.apply_signer(&SlowTsa, &req).unwrap_err();
+        let cancelled_at = handle.join().unwrap();
+        let noticed = Instant::now().saturating_duration_since(cancelled_at);
+        assert!(
+            noticed < CANCEL_NOTICE,
+            "TSA wait must notice cancel within {CANCEL_NOTICE:?}, took {noticed:?}"
+        );
+        assert!(matches!(err, Error::SignCancelled));
+        assert!(err.is_silent_cancel());
+        assert_eq!(doc.original_bytes(), before.as_slice());
+        assert!(!doc.is_signed());
     }
 
     #[test]

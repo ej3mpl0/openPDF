@@ -33,6 +33,10 @@ pub enum Error {
     /// Unit variant — no payload. The token was not touched. UIs treat
     /// this as a silent cancel. The CLI prints a neutral status, not an error.
     PinCancelled,
+    /// [`crate::CancelToken`] fired (Cancel before PIN, before TSA, or while
+    /// waiting). Unit variant — not a failure. UIs stay silent and leave the
+    /// document untouched. The CLI prints a neutral status, not an error.
+    SignCancelled,
     /// The signer backend cannot produce this PAdES level yet. Never downgraded.
     SignLevelUnsupported {
         level: crate::signer::PadesLevel,
@@ -148,6 +152,7 @@ impl Error {
             Error::Sign(m) => tr_args("sign: {detail}", &[("detail", &tr(m))]),
             Error::SignerUnavailable { reason } => describe_signer_unavailable(reason),
             Error::PinCancelled => tr("PIN entry was cancelled"),
+            Error::SignCancelled => tr("Signing was cancelled"),
             Error::Signed { op } => tr_args(
                 "document is signed; {op} would invalidate the signature (incremental save only)",
                 &[("op", &tr(op.msgid()))],
@@ -232,6 +237,11 @@ impl Error {
     pub fn signer_unavailable(reason: SignerUnavailableReason) -> Self {
         Error::SignerUnavailable { reason }
     }
+
+    /// PIN dismiss or [`crate::CancelToken`]. Not a failure — stay silent.
+    pub fn is_silent_cancel(&self) -> bool {
+        matches!(self, Error::PinCancelled | Error::SignCancelled)
+    }
 }
 
 /// Translated text for [`Error::SignerUnavailable`]. The UI must not build this.
@@ -310,12 +320,25 @@ mod tests {
         assert!(matches!(err, Error::PinCancelled));
         assert_eq!(err.to_string(), "PIN entry was cancelled");
         assert!(!matches!(err, Error::Sign(_)));
+        assert!(err.is_silent_cancel());
         set_locale("es");
         assert_eq!(
             Error::PinCancelled.to_string(),
             tr("PIN entry was cancelled")
         );
         assert_ne!(Error::PinCancelled.to_string(), "PIN entry was cancelled");
+        set_locale("en");
+        let cancel = Error::SignCancelled;
+        assert!(matches!(cancel, Error::SignCancelled));
+        assert!(cancel.is_silent_cancel());
+        assert!(!matches!(cancel, Error::Sign(_)));
+        assert_eq!(cancel.to_string(), "Signing was cancelled");
+        set_locale("es");
+        assert_eq!(
+            Error::SignCancelled.to_string(),
+            tr("Signing was cancelled")
+        );
+        assert_ne!(Error::SignCancelled.to_string(), "Signing was cancelled");
         set_locale("en");
     }
 

@@ -21,6 +21,7 @@ pub(crate) fn sign_incremental(
     signer_name: &str,
     mut make_cms: impl FnMut(&[u8]) -> Result<Vec<u8>>,
 ) -> Result<Vec<u8>> {
+    request.check_cancel()?;
     ensure_supported_level(request)?;
     if !pdf.starts_with(b"%PDF-") {
         return Err(Error::Sign("not a PDF".into()));

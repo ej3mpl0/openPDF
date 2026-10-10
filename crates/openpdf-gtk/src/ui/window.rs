@@ -3,7 +3,6 @@ use std::cell::{Cell, RefCell};
 use std::panic::{catch_unwind, AssertUnwindSafe};
 use std::path::Path;
 use std::rc::Rc;
-use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 
 use crate::backend::MockDocument;
@@ -575,22 +574,22 @@ fn sign_on_worker(
     toolbar.set_content(Some(&status));
     win.set_content(Some(&toolbar));
 
-    let cancelled = Arc::new(AtomicBool::new(false));
+    let token = req.cancel_token.clone();
     let cancel = gtk::Button::with_label(t(lang, "Cancel"));
     cancel.add_css_class("flat");
     header.pack_start(&cancel);
     cancel.connect_clicked({
         let win = win.clone();
-        let cancelled = cancelled.clone();
+        let token = token.clone();
         move |_| {
-            cancelled.store(true, Ordering::SeqCst);
+            token.cancel();
             win.close();
         }
     });
     win.connect_close_request({
-        let cancelled = cancelled.clone();
+        let token = token.clone();
         move |_| {
-            cancelled.store(true, Ordering::SeqCst);
+            token.cancel();
             gtk::glib::Propagation::Proceed
         }
     });
@@ -608,7 +607,7 @@ fn sign_on_worker(
         match rx.try_recv() {
             Ok(Ok(Ok(signed))) => {
                 win.close();
-                if cancelled.load(Ordering::SeqCst) {
+                if token.is_cancelled() {
                     return glib::ControlFlow::Break;
                 }
                 match view.opened().persist_signed(signed) {
@@ -642,14 +641,14 @@ fn sign_on_worker(
             }
             Ok(Ok(Err(e))) => {
                 win.close();
-                if !cancelled.load(Ordering::SeqCst) {
+                if !token.is_cancelled() && !e.is_silent_cancel() {
                     show_toast(&overlay, &format_core_error(&e));
                 }
                 glib::ControlFlow::Break
             }
             Ok(Err(_)) => {
                 win.close();
-                if !cancelled.load(Ordering::SeqCst) {
+                if !token.is_cancelled() {
                     show_toast(&overlay, t(lang, "Signing failed"));
                 }
                 glib::ControlFlow::Break
@@ -657,7 +656,7 @@ fn sign_on_worker(
             Err(std::sync::mpsc::TryRecvError::Empty) => glib::ControlFlow::Continue,
             Err(std::sync::mpsc::TryRecvError::Disconnected) => {
                 win.close();
-                if !cancelled.load(Ordering::SeqCst) {
+                if !token.is_cancelled() {
                     show_toast(&overlay, t(lang, "Signing failed"));
                 }
                 glib::ControlFlow::Break

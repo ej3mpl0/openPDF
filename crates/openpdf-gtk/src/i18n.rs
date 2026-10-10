@@ -119,6 +119,7 @@ pub fn format_core_error(err: &Error) -> String {
         Error::Signed { op } => format_signed_op(*op),
         Error::SignerUnavailable { reason } => describe_signer_unavailable(reason),
         Error::PinCancelled => tr("PIN entry was cancelled"),
+        Error::SignCancelled => tr("Signing was cancelled"),
         _ => err.to_locale_string(),
     }
 }
@@ -249,5 +250,11 @@ mod tests {
             "PIN entry was cancelled"
         );
         assert!(!matches!(Error::PinCancelled, Error::Sign(_)));
+        assert!(Error::PinCancelled.is_silent_cancel());
+        assert_eq!(
+            format_core_error(&Error::SignCancelled),
+            "Signing was cancelled"
+        );
+        assert!(Error::SignCancelled.is_silent_cancel());
     }
 }

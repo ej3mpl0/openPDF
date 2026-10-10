@@ -227,13 +227,7 @@ mod tests {
 
         let (tx, rx) = mpsc::channel();
         std::thread::spawn(move || {
-            let result = Fake(GtkPinProvider).sign(
-                b"%PDF",
-                &SignRequest {
-                    cert_id: "test".into(),
-                    ..Default::default()
-                },
-            );
+            let result = Fake(GtkPinProvider).sign(b"%PDF", &SignRequest::new("test"));
             let _ = tx.send(result);
         });
         let result = rx

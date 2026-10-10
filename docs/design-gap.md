@@ -71,10 +71,10 @@ Extracted from board **Icon and logo** (`viewBox="0 0 256 256"`): white page, fo
 | Modal over dimmed viewer | **approximate** — `AdwWindow` modal + Adwaita dim |
 | Privacy copy | **approximate** — local-token wording, not “Windows does not send…” |
 | Radio list, selected row `#DDF0EA` | **approximate** — `AdwActionRow` + radio |
-| Visible-signature checkbox + preview | **not possible** — `SignRequest` has no appearance / field target |
-| Reason / Location fields | **not possible** — not on the core request |
-| PAdES B-B / B-T / B-LT dropdown | **not possible** — level is the signer’s |
-| Footer Cancel + Sign and save a copy | **approximate** |
+| Visible-signature checkbox + preview | **not possible** — `SignRequest` has no field-target appearance yet |
+| Reason / Location fields | **pending core #37 / TSA** — Motivo / Lugar `AdwEntryRow`s wired to `SignRequest::with_reason` / `with_location` |
+| PAdES B-B / B-T / B-LT dropdown | **pending core #37 / TSA** — B-B is the active level; B-T is shown but insensitive with a TSA tooltip; never silently falls back |
+| Footer Cancel + Sign and save a copy | **approximate** — picker Cancel closes; Signing Cancel is wired to `CancelToken` (silent, document untouched) |
 | “A signed copy is saved. The original is not modified.” | **exact** as a label |
 
 ## Verify
