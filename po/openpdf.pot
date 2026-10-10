@@ -417,3 +417,6 @@ msgstr ""
 
 msgid "PIN entry was cancelled"
 msgstr ""
+
+msgid "Signing cancelled"
+msgstr ""

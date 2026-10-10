@@ -172,11 +172,7 @@ fn cli() -> Command {
 fn main() {
     init_i18n();
     if let Err(e) = run() {
-        eprintln!(
-            "{}",
-            tr_args("openpdf: {error}", &[("error", &format!("{e:#}"))])
-        );
-        std::process::exit(1);
+        std::process::exit(openpdf_cli::report_cli_error(&e));
     }
 }
 
