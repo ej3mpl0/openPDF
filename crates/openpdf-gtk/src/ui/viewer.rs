@@ -1175,8 +1175,8 @@ mod tests {
     /// Texture is created when the tile arrives, never again across N snapshots.
     #[test]
     fn snapshot_frames_create_zero_new_textures() {
-        let Ok(engine) = Engine::isolated() else {
-            eprintln!("texture reuse: Engine::isolated skipped (no PDFium)");
+        let Ok(engine) = Engine::new() else {
+            eprintln!("texture reuse: Engine::new skipped (no PDFium)");
             return;
         };
         let mut doc = openpdf_core::red_rect_document().expect("red rect PDF");
