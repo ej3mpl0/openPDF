@@ -3,10 +3,10 @@
 // cargo run -p openpdf-core --release --bin openpdf-measure
 // cargo bench -p openpdf-core --bench perf
 //
-// One line of `key=value` fields. Optional budgets (milliseconds / bytes) fail
-// the process when exceeded:
-// `OPENPDF_BENCH_MAX_OPEN_MS`, `OPENPDF_BENCH_MAX_TILE_MS`,
-// `OPENPDF_BENCH_MAX_RSS_BYTES`. Page count: `OPENPDF_BENCH_PAGES` (default 80).
+// One line of key=value fields. Core times are per-step durations from
+// document-open start, not process start. Never emits ui_* (GTK owns those).
+// Optional budgets: OPENPDF_BENCH_MAX_OPEN_MS, OPENPDF_BENCH_MAX_TILE_MS,
+// OPENPDF_BENCH_MAX_RSS_BYTES. Page count: OPENPDF_BENCH_PAGES (default 80).
 
 use std::time::Instant;
 
@@ -95,7 +95,56 @@ fn windows_peak_working_set() -> Option<u64> {
     }
 }
 
+fn help_text() -> &'static str {
+    "\
+openpdf-measure — machine-readable core startup timings
+
+Prints one stdout line of key=value fields. Core times are per-step
+durations measured from document-open start, not process start
+(process/CRT startup is excluded). GTK owns keys with the ui prefix;
+this binary never emits them.
+
+Keys:
+  version os arch pages
+  open_ms            lopdf Document::from_bytes
+  first_tile_ms      first render_tile_blocking (after Engine::new + bind)
+  peak_rss_bytes
+  pdfium_load_ms     dlopen + FPDF_InitLibrary
+  doc_open_ms        PDFium document open (Engine::bind)
+
+Budgets (optional env, fail if exceeded):
+  OPENPDF_BENCH_MAX_OPEN_MS  OPENPDF_BENCH_MAX_TILE_MS
+  OPENPDF_BENCH_MAX_RSS_BYTES
+Page count: OPENPDF_BENCH_PAGES (default 80).
+"
+}
+
+fn format_line(os: &str, arch: &str, fields: &MeasureFields<'_>) -> String {
+    format!(
+        "openpdf_measure version=1 os={os} arch={arch} pages={n} open_ms={open_ms:.3} first_tile_ms={first_tile_ms:.3} peak_rss_bytes={rss} pdfium_load_ms={pdfium_load_ms:.3} doc_open_ms={doc_open_ms:.3}",
+        n = fields.pages,
+        open_ms = fields.open_ms,
+        first_tile_ms = fields.first_tile_ms,
+        rss = fields.rss,
+        pdfium_load_ms = fields.pdfium_load_ms,
+        doc_open_ms = fields.doc_open_ms,
+    )
+}
+
+struct MeasureFields<'a> {
+    pages: u32,
+    open_ms: f64,
+    first_tile_ms: f64,
+    rss: &'a str,
+    pdfium_load_ms: f64,
+    doc_open_ms: f64,
+}
+
 fn main() {
+    if std::env::args().any(|a| a == "--help" || a == "-h") {
+        print!("{}", help_text());
+        return;
+    }
     openpdf_core::init();
     let n = pages();
     let os = std::env::consts::OS;
@@ -113,30 +162,47 @@ fn main() {
     let open_ms = t1.elapsed().as_secs_f64() * 1000.0;
     assert_eq!(opened.page_count(), n);
 
-    let (first_tile_ms, tile_ok) = match Engine::new() {
+    let (first_tile_ms, tile_ok, pdfium_load_ms, doc_open_ms) = match Engine::new() {
         Ok(engine) => {
+            let pdfium_load_ms = engine.pdfium_load_ms();
+            let t_doc = Instant::now();
             engine.bind(&opened).expect("bind");
+            let doc_open_ms = t_doc.elapsed().as_secs_f64() * 1000.0;
             let key = TileKey::new(opened.id(), 0, 1.0, 0, 0);
             let t2 = Instant::now();
             let tile = engine.render_tile_blocking(key).expect("tile");
             let ms = t2.elapsed().as_secs_f64() * 1000.0;
             assert!(tile.width > 0 && tile.height > 0);
-            (ms, true)
+            (ms, true, pdfium_load_ms, doc_open_ms)
         }
         Err(e) => {
             if std::env::var("CI").is_ok() {
                 panic!("PDFium required in CI: {e}");
             }
-            (-1.0, false)
+            (-1.0, false, -1.0, -1.0)
         }
     };
 
     let rss = peak_rss_bytes();
     let rss_s = rss.map(|v| v.to_string()).unwrap_or_else(|| "na".into());
 
-    println!(
-        "openpdf_measure version=1 os={os} arch={arch} pages={n} open_ms={open_ms:.3} first_tile_ms={first_tile_ms:.3} peak_rss_bytes={rss_s}"
+    let line = format_line(
+        os,
+        arch,
+        &MeasureFields {
+            pages: n,
+            open_ms,
+            first_tile_ms,
+            rss: &rss_s,
+            pdfium_load_ms,
+            doc_open_ms,
+        },
     );
+    debug_assert!(
+        !line.split_whitespace().any(|f| f.starts_with("ui_")),
+        "core must never emit GTK ui-prefixed keys"
+    );
+    println!("{line}");
 
     let mut failed = false;
     if let Some(max) = budget_f64("OPENPDF_BENCH_MAX_OPEN_MS") {
