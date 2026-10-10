@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: MPL-2.0
 /// Shared gettext catalog for Swift / C# chrome (PIN dialog, banners).
 ///
 /// Foreign UIs should call these instead of shipping a second catalog.

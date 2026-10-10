@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: MPL-2.0
 use std::sync::{Arc, Mutex};
 
 use openpdf_core::{Error as CoreError, PinProvider as CorePinProvider, Result as CoreResult};

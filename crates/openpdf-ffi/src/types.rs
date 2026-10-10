@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: MPL-2.0
 use openpdf_core::{
     CertificateInfo, CertificateUsage, OutlineItem as CoreOutline, PageInfo as CorePage,
     PageRange as CorePageRange, PdfPermissions, Raster as CoreRaster, SearchHit as CoreHit, Tile,

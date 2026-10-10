@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: MPL-2.0
 //! UniFFI bindings for openPDF — the native macOS (Swift) and Windows (C#) entry point.
 //!
 //! This crate wraps [`openpdf_core`] and [`openpdf_sign`]. Foreign code never
