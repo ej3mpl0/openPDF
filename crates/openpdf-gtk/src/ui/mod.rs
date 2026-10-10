@@ -138,6 +138,7 @@ pub fn run_measure(pages: usize) -> i32 {
         let ui_adw_init_ms = ui_adw_init_ms.clone();
         let ui_css_ms = ui_css_ms.clone();
         move |_| {
+            measure::mark_gtk_startup();
             measure::warmup_fontconfig_pango();
             measure::mark_pango_init();
             adw::init().ok();
@@ -296,6 +297,7 @@ fn watch_measure(
                         ui_first_tile_ms: measure::ui_first_tile_painted_ms(),
                         pdfium_load_ms: measure::ui_pdfium_load_ms(),
                         ui_pango_init_ms: measure::ui_pango_init_ms(),
+                        ui_gtk_startup_ms: measure::ui_gtk_startup_ms(),
                         pdfium_sha256: measure::pdfium_library_sha256(),
                         ui_adw_init_ms: marks.ui_adw_init_ms,
                         ui_css_ms: marks.ui_css_ms,

@@ -39,6 +39,7 @@ static THUMBS_DONE: OnceLock<u128> = OnceLock::new();
 static ALL_VISIBLE: OnceLock<u128> = OnceLock::new();
 static PDFIUM_LOADED: OnceLock<u128> = OnceLock::new();
 static PANGO_INIT: OnceLock<u128> = OnceLock::new();
+static GTK_STARTUP: OnceLock<u128> = OnceLock::new();
 
 pub fn mark_doc_load_start() {
     let _ = DOC_LOAD_START.get_or_init(process_elapsed_ms);
@@ -63,6 +64,9 @@ pub fn mark_pdfium_loaded() {
 }
 pub fn mark_pango_init() {
     let _ = PANGO_INIT.get_or_init(process_elapsed_ms);
+}
+pub fn mark_gtk_startup() {
+    let _ = GTK_STARTUP.get_or_init(process_elapsed_ms);
 }
 pub fn mark_thumbs_done() {
     let _ = THUMBS_DONE.get_or_init(process_elapsed_ms);
@@ -94,6 +98,9 @@ pub fn ui_pdfium_load_ms() -> u128 {
 }
 pub fn ui_pango_init_ms() -> u128 {
     PANGO_INIT.get().copied().unwrap_or(0)
+}
+pub fn ui_gtk_startup_ms() -> u128 {
+    GTK_STARTUP.get().copied().unwrap_or(0)
 }
 
 /// `ui_first_tile_ms` must be a real draw-path paint, not before the worker mark.
@@ -185,6 +192,8 @@ pub struct BudgetReport {
     pub pdfium_load_ms: u128,
     /// Fontconfig + Pango fontmap warmup, from process start (before `adw::init`).
     pub ui_pango_init_ms: u128,
+    /// `connect_startup` entered (process + GTK .so load, before Pango warmup).
+    pub ui_gtk_startup_ms: u128,
     /// SHA-256 of the `libpdfium.so` that `--measure` will bind.
     pub pdfium_sha256: String,
     /// `adw::init` + icon GResource registration, from process start.
@@ -234,6 +243,7 @@ impl Display for BudgetReport {
         writeln!(f, "ui_window_present_ms={}", self.ui_window_present_ms)?;
         writeln!(f, "ui_first_frame_ms={}", self.ui_first_frame_ms)?;
         writeln!(f, "ui_first_tile_ms={}", self.ui_first_tile_ms)?;
+        writeln!(f, "ui_gtk_startup_ms={}", self.ui_gtk_startup_ms)?;
         writeln!(f, "ui_pango_init_ms={}", self.ui_pango_init_ms)?;
         writeln!(f, "pdfium_load_ms={}", self.pdfium_load_ms)?;
         writeln!(f, "pdfium_sha256={}", self.pdfium_sha256)?;

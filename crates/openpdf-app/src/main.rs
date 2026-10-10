@@ -119,6 +119,7 @@ All --measure marks are milliseconds from one process-start Instant \
   ui_activate_ms                  GTK activate callback
   ui_window_present_ms            window.present()
   ui_window_build_ms              OpenPdfWindow::new returns
+  ui_gtk_startup_ms               connect_startup entered (process + GTK .so load)
   ui_pango_init_ms                fontconfig + Pango fontmap warmup (before adw::init)
   ui_adw_init_ms                  adw::init + icon GResource
   ui_css_ms                       application CSS load
