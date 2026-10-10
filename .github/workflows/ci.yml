@@ -417,8 +417,11 @@ jobs:
             --out "cold/$TAG.txt" 2>&1 | tee measure-1.log; rc=${PIPESTATUS[0]}
           set -e
           mkdir -p crash; cp measure-1.log crash/; echo "$rc" > crash/first.rc
-          echo "exit_code=$rc" >> "cold/$TAG.txt"
-          .github/scripts/gdb-on-signal.sh "$rc" first
+          # run-measure exits 1 on failure; the app's own status is in "single-cold: exit N" (-N = signal N).
+          crc=$(grep -oE 'single-cold: exit -?[0-9]+' measure-1.log | grep -oE -- '-?[0-9]+$' | tail -1)
+          echo "${crc:-$rc}" > crash/first.child_rc
+          echo "exit_code=$rc child_exit=${crc:-$rc}" >> "cold/$TAG.txt"
+          .github/scripts/gdb-on-signal.sh "${crc:-$rc}" first
           g=$(grep -o 'gsk_renderer=[^ ]*' measure-1.log | tail -1 || true); echo "${g:-gsk_renderer=not_printed}" | tee -a "cold/$TAG.txt"
           [ "$rc" = 0 ] || exit "$rc"
           printf 'variant=%s\nstraced=%s\n' "${{ matrix.variant }}" "$straced" >> "cold/$TAG.txt"
@@ -468,8 +471,11 @@ jobs:
             --out "cold/$TAG.second" 2>&1 | tee measure-2.log; rc=${PIPESTATUS[0]}
           set -e
           mkdir -p crash; cp measure-2.log crash/; echo "$rc" > crash/second.rc
-          echo "exit_code=$rc" >> "cold/$TAG.second"
-          .github/scripts/gdb-on-signal.sh "$rc" second
+          # run-measure exits 1 on failure; the app's own status is in "single-cold: exit N" (-N = signal N).
+          crc=$(grep -oE 'single-cold: exit -?[0-9]+' measure-2.log | grep -oE -- '-?[0-9]+$' | tail -1)
+          echo "${crc:-$rc}" > crash/second.child_rc
+          echo "exit_code=$rc child_exit=${crc:-$rc}" >> "cold/$TAG.second"
+          .github/scripts/gdb-on-signal.sh "${crc:-$rc}" second
           g=$(grep -o 'gsk_renderer=[^ ]*' measure-2.log | tail -1 || true); echo "${g:-gsk_renderer=not_printed}" | tee -a "cold/$TAG.second"
           printf 'straced=%s\n' "$straced" >> "cold/$TAG.second"
           if [ "$straced" = 1 ]; then

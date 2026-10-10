@@ -1,12 +1,12 @@
 #!/usr/bin/env bash
-# gdb-on-signal.sh RC LABEL: if RC > 128 (launch ended by a signal), rerun the same
+# gdb-on-signal.sh RC LABEL: if RC > 128 or RC < 0 (launch ended by a signal), rerun the same
 # --measure launch under gdb (same display/backend/env, no strace) and save the
 # backtrace to crash/gdb-LABEL.txt; print the crashing thread's top ~30 frames.
 set -u
 rc="$1"; label="$2"
-[ "$rc" -gt 128 ] 2>/dev/null || exit 0
+if [ "$rc" -lt 0 ] 2>/dev/null; then sig=$(( -rc )); elif [ "$rc" -gt 128 ] 2>/dev/null; then sig=$(( rc - 128 )); else exit 0; fi
 mkdir -p crash
-echo "::group::gdb backtrace ($label, exit $rc = signal $((rc - 128)))"
+echo "::group::gdb backtrace ($label, exit $rc = signal $sig)"
 gdbwrap="gdb -batch -nx -ex 'set debuginfod enabled off' -ex 'set pagination off' -ex run -ex 'thread apply all bt' --args"
 OPENPDF_MEASURE_WRAP="${GDB_BASE_WRAP:-} $gdbwrap" OPENPDF_ENV_DUMP= \
   python3 .github/scripts/run-measure.py --kind gui --single-cold --frames 32 \
