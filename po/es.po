@@ -417,3 +417,15 @@ msgstr "el recorte debe ser llx,lly,urx,ury"
 
 msgid "PIN entry was cancelled"
 msgstr "Se canceló la introducción del PIN"
+
+msgid "Token PIN is locked"
+msgstr "El PIN del token está bloqueado"
+
+msgid "Last PIN attempt"
+msgstr "Último intento de PIN"
+
+msgid "Few PIN attempts remaining"
+msgstr "Quedan pocos intentos de PIN"
+
+msgid "Signing cancelled"
+msgstr "Firma cancelada"

@@ -288,3 +288,63 @@ fn tempfile() -> PathBuf {
     std::fs::create_dir_all(&dir).unwrap();
     dir
 }
+
+#[test]
+fn pin_cancelled_prints_neutral_status_not_error() {
+    use openpdf_cli::{is_pin_cancelled, report_cli_error_to, EXIT_CANCEL, EXIT_ERROR};
+    use openpdf_core::{init_i18n, set_locale, Error};
+
+    let _g = locale_test_guard();
+    init_i18n();
+
+    // Unit variant: construct with no payload.
+    let cancel = anyhow::Error::from(Error::PinCancelled);
+    assert!(is_pin_cancelled(&cancel));
+    assert_ne!(EXIT_CANCEL, EXIT_ERROR);
+    assert_eq!(EXIT_CANCEL, 0);
+
+    set_locale("en");
+    let mut stdout = Vec::new();
+    let mut stderr = Vec::new();
+    let code = report_cli_error_to(&cancel, &mut stdout, &mut stderr);
+    let out = String::from_utf8_lossy(&stdout);
+    let err = String::from_utf8_lossy(&stderr);
+    assert_eq!(code, EXIT_CANCEL, "{err}");
+    assert_eq!(out.trim(), "Signing cancelled");
+    assert!(err.is_empty(), "cancel must not print as an error: {err}");
+    assert!(!out.contains("openpdf:"), "{out}");
+    assert!(!out.contains("PIN entry was cancelled"), "{out}");
+    assert!(!err.contains("PIN entry was cancelled"), "{err}");
+
+    let wrapped = anyhow::Error::from(Error::PinCancelled).context("sign");
+    stdout.clear();
+    stderr.clear();
+    let code = report_cli_error_to(&wrapped, &mut stdout, &mut stderr);
+    assert_eq!(code, EXIT_CANCEL);
+    assert_eq!(String::from_utf8_lossy(&stdout).trim(), "Signing cancelled");
+    assert!(stderr.is_empty(), "{}", String::from_utf8_lossy(&stderr));
+
+    set_locale("es");
+    stdout.clear();
+    stderr.clear();
+    let code = report_cli_error_to(&cancel, &mut stdout, &mut stderr);
+    let cat = es_catalog();
+    let es = cat.translate("Signing cancelled");
+    assert_ne!(es, "Signing cancelled");
+    assert_ne!(es, cat.translate("PIN entry was cancelled"));
+    assert_eq!(code, EXIT_CANCEL);
+    assert_eq!(String::from_utf8_lossy(&stdout).trim(), es);
+    assert!(stderr.is_empty(), "{}", String::from_utf8_lossy(&stderr));
+
+    set_locale("en");
+    let fail = anyhow::Error::from(Error::EmptyDocument);
+    assert!(!is_pin_cancelled(&fail));
+    stdout.clear();
+    stderr.clear();
+    let code = report_cli_error_to(&fail, &mut stdout, &mut stderr);
+    assert_eq!(code, EXIT_ERROR);
+    assert!(stdout.is_empty(), "{}", String::from_utf8_lossy(&stdout));
+    let err = String::from_utf8_lossy(&stderr);
+    assert!(err.contains("openpdf:"), "{err}");
+}
+

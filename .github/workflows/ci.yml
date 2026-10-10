@@ -24,3 +24,19 @@ jobs:
         env:
           CI: "true"
           OPENPDF_PDFIUM: /usr/local/lib/libpdfium.so
+      - name: Generate Swift and C# bindings
+        run: |
+          set -euo pipefail
+          cargo build -p openpdf-ffi --release
+          mkdir -p bindings/swift bindings/csharp
+          cargo run -p openpdf-ffi --features bindgen --bin uniffi-bindgen -- \
+            generate --library target/release/libopenpdf_ffi.so \
+            --language swift --out-dir bindings/swift
+          cargo install uniffi-bindgen-cs \
+            --git https://github.com/NordSecurity/uniffi-bindgen-cs \
+            --tag v0.10.0+v0.29.4
+          uniffi-bindgen-cs --library --out-dir bindings/csharp \
+            target/release/libopenpdf_ffi.so
+          test -n "$(find bindings/swift -type f | head -n 1)"
+          test -n "$(find bindings/csharp -type f | head -n 1)"
+
