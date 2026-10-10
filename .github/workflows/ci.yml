@@ -235,7 +235,7 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        variant: [plain, nodbuswait, minimal, fcwarm]
+        variant: [plain, nodbuswait, minimal, fcwarm, nogl, default]
         shard: [1, 2, 3]
     defaults:
       run:
@@ -277,6 +277,15 @@ jobs:
           allow="GDK_BACKEND=x11 GSK_RENDERER=cairo"
           case "${{ matrix.variant }}" in
             plain|fcwarm) ;;
+            # nogl: diagnostic only. GDK_DISABLE needs GTK >= 4.16; GDK_DEBUG covers older.
+            nogl)
+              echo "GDK_DISABLE=gl" >> "$GITHUB_ENV"
+              echo "GDK_DEBUG=gl-disable" >> "$GITHUB_ENV"
+              allow="$allow GDK_DISABLE=gl GDK_DEBUG=gl-disable" ;;
+            # default: GTK picks its renderer (GSK_RENDERER unset). Informational, never a limit.
+            default)
+              echo "OPENPDF_NO_GSK_CAIRO=1" >> "$GITHUB_ENV"
+              allow="GDK_BACKEND=x11" ;;
             nodbuswait)
               echo "OPENPDF_MEASURE_WRAP=dbus-run-session --" >> "$GITHUB_ENV"
               echo "GTK_A11Y=none" >> "$GITHUB_ENV"
@@ -315,7 +324,17 @@ jobs:
           sudo apt-get update
           sudo apt-get install -y --no-install-recommends \
             libgtk-4-dev libadwaita-1-dev pkg-config librsvg2-common adwaita-icon-theme \
-            xvfb xauth dbus dbus-daemon strace fontconfig
+            xvfb xauth dbus dbus-daemon strace fontconfig mesa-utils
+          echo "GTK version: $(pkg-config --modversion gtk4)" | tee -a "$GITHUB_STEP_SUMMARY"
+
+      - name: GL renderer (glxinfo -B under the same xvfb)
+        if: steps.gui.outputs.skip == 'false'
+        run: |
+          mkdir -p cold
+          xvfb-run -a --server-args="-screen 0 1280x800x24" glxinfo -B | tee glxinfo.txt || true
+          gl=$(sed -n 's/^ *OpenGL renderer string: *//p' glxinfo.txt | head -1)
+          echo "GL_RENDERER=${gl:-unknown}"
+          echo "gl_renderer=$(echo "${gl:-unknown}" | tr ' ' '_')" > cold/$TAG.gl
 
       # fcwarm: build the user fontconfig cache up front, as on a real desktop.
       - name: Warm fontconfig cache (fcwarm only)
@@ -358,10 +377,13 @@ jobs:
             wrap="$wrap strace -f -tt -e trace=openat,connect -o $PWD/strace/trace-first.txt"
             straced=1
           fi
+          [ -n "${OPENPDF_NO_GSK_CAIRO:-}" ] && unset GSK_RENDERER
           export OPENPDF_MEASURE_WRAP="$wrap $PWD/.github/scripts/env-dump.sh"
           echo "variant=${{ matrix.variant }} wrap='$OPENPDF_MEASURE_WRAP'"
           python3 .github/scripts/run-measure.py --kind gui --single-cold --frames 32 \
-            --out "cold/$TAG.txt"
+            --out "cold/$TAG.txt" 2>&1 | tee measure-1.log; rc=${PIPESTATUS[0]}
+          g=$(grep -o 'gsk_renderer=[^ ]*' measure-1.log | tail -1); echo "${g:-gsk_renderer=not_printed}" | tee -a "cold/$TAG.txt"
+          [ "$rc" = 0 ] || exit "$rc"
           printf 'variant=%s\nstraced=%s\n' "${{ matrix.variant }}" "$straced" >> "cold/$TAG.txt"
           if [ "$straced" = 1 ]; then
             python3 .github/scripts/strace-summary.py strace/trace-first.txt | tee strace/summary-first.md
@@ -370,7 +392,13 @@ jobs:
 
       - name: "~/.cache snapshot (after first launch)"
         if: always() && steps.gui.outputs.skip == 'false'
-        run: .github/scripts/cache-snapshot.sh cache/1-after-first.txt
+        run: |
+          .github/scripts/cache-snapshot.sh cache/1-after-first.txt
+          if [ -e "$HOME/.cache/mesa_shader_cache" ]; then m=1; else m=0; fi
+          echo "mesa_shader_cache=$m" | tee -a "cold/$TAG.gl"
+          if [ "${{ matrix.variant }}" = nogl ] && [ "$m" = 1 ]; then
+            echo "::error::nogl: ~/.cache/mesa_shader_cache was created; GL was not disabled"; exit 1
+          fi
 
       - name: Drop page cache (second launch)
         if: always() && steps.gui.outputs.skip == 'false'
@@ -393,10 +421,12 @@ jobs:
             wrap="$wrap strace -f -tt -e trace=openat,connect -o $PWD/strace/trace-second.txt"
             straced=1
           fi
+          [ -n "${OPENPDF_NO_GSK_CAIRO:-}" ] && unset GSK_RENDERER
           export OPENPDF_MEASURE_WRAP="$wrap $PWD/.github/scripts/env-dump.sh"
           echo "wrap='$OPENPDF_MEASURE_WRAP'"
           python3 .github/scripts/run-measure.py --kind gui --single-cold --frames 32 \
-            --out "cold/$TAG.second" || true
+            --out "cold/$TAG.second" 2>&1 | tee measure-2.log || true
+          g=$(grep -o 'gsk_renderer=[^ ]*' measure-2.log | tail -1); echo "${g:-gsk_renderer=not_printed}" | tee -a "cold/$TAG.second"
           printf 'straced=%s\n' "$straced" >> "cold/$TAG.second"
           if [ "$straced" = 1 ]; then
             python3 .github/scripts/strace-summary.py strace/trace-second.txt | tee strace/summary-second.md
@@ -503,12 +533,12 @@ jobs:
         run: |
           python3 - <<'PY2'
           import glob, os, statistics
-          variants = ["plain", "nodbuswait", "minimal", "fcwarm"]
+          variants = ["plain", "nodbuswait", "minimal", "fcwarm", "nogl", "default"]
           def kv(f):
               return dict(l.split("=", 1) for l in open(f).read().split() if "=" in l)
           out = ["## Cold start per variant (informational, fresh VM per job)", "",
-                 "| variant | first launch cold_startup_ms (all shards) | median w/o strace | second launch (same VM) |",
-                 "|---|---|---:|---|"]
+                 "| variant | first launch cold_startup_ms (all shards) | median w/o strace | second launch (same VM) | GL / GSK / mesa_shader_cache |",
+                 "|---|---|---:|---|---|"]
           skipped = 0
           for v in variants:
               first, clean, second = [], [], []
@@ -526,8 +556,14 @@ jobs:
                       d2 = kv(sf)
                       second.append(f"s{sh}={d2.get('cold_startup_ms', 'fail')}{'*' if d2.get('straced') == '1' else ''}")
               med = f"{statistics.median(clean):g}" if clean else "-"
-              out.append(f"| {v} | {' '.join(first) or '-'} | {med} | {' '.join(second) or '-'} |")
-          out += ["", "`*` = under strace (slower; not in the median)."]
+              extra = []
+              for f in sorted(glob.glob(f"cold/{v}-*.txt")):
+                  sh = os.path.basename(f)[len(v) + 1:-4]
+                  d = kv(f); g = f[:-4] + ".gl"
+                  dg = kv(g) if os.path.exists(g) else {}
+                  extra.append(f"s{sh}:gl={dg.get('gl_renderer','?')},gsk={d.get('gsk_renderer','?')},mesa={dg.get('mesa_shader_cache','?')}")
+              out.append(f"| {v} | {' '.join(first) or '-'} | {med} | {' '.join(second) or '-'} | {' '.join(extra)} |")
+          out += ["", "`*` = under strace (slower; not in the median). `default` = GTK-chosen renderer, informational only; the limit stays on cairo. `nogl` is diagnostic only."]
           if skipped: out.append(f"{skipped} job(s) skipped (GUI placeholder).")
           text = "\n".join(out) + "\n"
           print(text)
