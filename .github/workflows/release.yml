@@ -18,13 +18,14 @@ jobs:
     name: Tag is on main
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
         with:
+          persist-credentials: false
           fetch-depth: 0
       - name: Check tag commit is reachable from main
         run: |
           set -euo pipefail
-          git fetch --no-tags origin main
+          # fetch-depth: 0 already brought origin/main; no credentials needed.
           git merge-base --is-ancestor "$GITHUB_SHA" origin/main
 
   linux-flatpak:
@@ -42,8 +43,9 @@ jobs:
       run:
         shell: bash
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
         with:
+          persist-credentials: false
           fetch-depth: 0
 
       - name: Import desktop metadata from gtk if needed
@@ -59,7 +61,7 @@ jobs:
           ostree --repo=repo config set core.min-free-space-size 0MB
 
       - name: Build Flatpak
-        uses: flatpak/flatpak-github-actions/flatpak-builder@v6
+        uses: flatpak/flatpak-github-actions/flatpak-builder@79327416609af08178ad73b352877e51450790b3 # v6.8
         with:
           bundle: io.github.ej3mpl0.openpdf.flatpak
           manifest-path: packaging/flatpak/io.github.ej3mpl0.openpdf.yml
@@ -67,11 +69,11 @@ jobs:
           cache: false
           upload-artifact: false
 
-      - uses: actions/attest-build-provenance@v2
+      - uses: actions/attest-build-provenance@e8998f949152b193b063cb0ec769d69d929409be # v2.4.0
         with:
           subject-path: io.github.ej3mpl0.openpdf.flatpak
 
-      - uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
         with:
           name: release-linux-flatpak
           path: io.github.ej3mpl0.openpdf.flatpak
@@ -86,8 +88,9 @@ jobs:
     name: Linux AppImage
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
         with:
+          persist-credentials: false
           fetch-depth: 0
 
       - name: Install Rust from rust-toolchain.toml
@@ -95,7 +98,7 @@ jobs:
         run: |
           rustup toolchain install
           rustup show active-toolchain
-      - uses: Swatinem/rust-cache@v2
+      - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
         with:
           prefix-key: release-linux-appimage
 
@@ -114,11 +117,11 @@ jobs:
         env:
           APPIMAGE_EXTRACT_AND_RUN: "1"
 
-      - uses: actions/attest-build-provenance@v2
+      - uses: actions/attest-build-provenance@e8998f949152b193b063cb0ec769d69d929409be # v2.4.0
         with:
           subject-path: packaging/appimage/dist/*.AppImage
 
-      - uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
         with:
           name: release-linux-appimage
           path: packaging/appimage/dist/*.AppImage
@@ -136,13 +139,15 @@ jobs:
       run:
         shell: bash
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+        with:
+          persist-credentials: false
       - name: Install Rust from rust-toolchain.toml
         shell: bash
         run: |
           rustup toolchain install
           rustup show active-toolchain
-      - uses: Swatinem/rust-cache@v2
+      - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
         with:
           prefix-key: release-windows-cli
 
@@ -175,11 +180,11 @@ jobs:
           print(zpath)
           PY
 
-      - uses: actions/attest-build-provenance@v2
+      - uses: actions/attest-build-provenance@e8998f949152b193b063cb0ec769d69d929409be # v2.4.0
         with:
           subject-path: dist/openpdf-*-windows-x64.zip
 
-      - uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
         with:
           name: release-windows-cli
           path: dist/openpdf-*-windows-x64.zip
@@ -201,13 +206,15 @@ jobs:
       run:
         shell: bash
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+        with:
+          persist-credentials: false
       - name: Install Rust from rust-toolchain.toml
         shell: bash
         run: |
           rustup toolchain install
           rustup show active-toolchain
-      - uses: Swatinem/rust-cache@v2
+      - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
         with:
           prefix-key: release-macos-cli-${{ matrix.os }}
 
@@ -232,11 +239,11 @@ jobs:
           cp "$PDFIUM_LIB" "$stage/libpdfium.dylib"
           tar -C dist -czf "${stage}.tar.gz" "$(basename "$stage")"
 
-      - uses: actions/attest-build-provenance@v2
+      - uses: actions/attest-build-provenance@e8998f949152b193b063cb0ec769d69d929409be # v2.4.0
         with:
           subject-path: dist/openpdf-*-macos-*.tar.gz
 
-      - uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
         with:
           name: release-macos-cli-${{ matrix.os }}
           path: dist/openpdf-*-macos-*.tar.gz
@@ -254,7 +261,7 @@ jobs:
       id-token: write
       attestations: write
     steps:
-      - uses: actions/download-artifact@v4
+      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
         with:
           pattern: release-*
           path: artifacts
@@ -271,12 +278,12 @@ jobs:
           sha256sum * > SHA256SUMS
           cat SHA256SUMS
 
-      - uses: actions/attest-build-provenance@v2
+      - uses: actions/attest-build-provenance@e8998f949152b193b063cb0ec769d69d929409be # v2.4.0
         with:
           subject-path: out/*
 
       - name: Create GitHub release
-        uses: softprops/action-gh-release@v2
+        uses: softprops/action-gh-release@3bb12739c298aeb8a4eeaf626c5b8d85266b0e65 # v2.6.2
         with:
           files: out/*
           generate_release_notes: true

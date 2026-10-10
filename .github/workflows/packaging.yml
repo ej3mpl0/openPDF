@@ -22,7 +22,9 @@ jobs:
     name: cargo-sources.json
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+        with:
+          persist-credentials: false
       - name: Check cargo-sources.json matches Cargo.lock
         run: python3 packaging/flatpak/check-cargo-sources.py
 
@@ -37,8 +39,9 @@ jobs:
       run:
         shell: bash
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
         with:
+          persist-credentials: false
           fetch-depth: 0
 
       - name: Import desktop metadata from gtk if needed
@@ -69,7 +72,7 @@ jobs:
           ostree --repo=repo config set core.min-free-space-size 0MB
 
       - name: Build Flatpak
-        uses: flatpak/flatpak-github-actions/flatpak-builder@v6
+        uses: flatpak/flatpak-github-actions/flatpak-builder@79327416609af08178ad73b352877e51450790b3 # v6.8
         with:
           bundle: io.github.ej3mpl0.openpdf.flatpak
           manifest-path: packaging/flatpak/io.github.ej3mpl0.openpdf.yml
@@ -78,7 +81,7 @@ jobs:
           upload-artifact: false
 
       - name: Upload Flatpak
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
         with:
           name: openpdf-flatpak
           path: io.github.ej3mpl0.openpdf.flatpak
@@ -103,8 +106,9 @@ jobs:
     name: AppImage
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
         with:
+          persist-credentials: false
           fetch-depth: 0
 
       - name: Install Rust from rust-toolchain.toml
@@ -131,7 +135,7 @@ jobs:
           APPIMAGE_EXTRACT_AND_RUN: "1"
 
       - name: Upload AppImage
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
         with:
           name: openpdf-appimage
           path: packaging/appimage/dist/*.AppImage
@@ -156,7 +160,7 @@ jobs:
     needs: [flatpak, appimage]
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/download-artifact@v4
+      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
         with:
           path: artifacts
 

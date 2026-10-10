@@ -37,7 +37,9 @@ jobs:
       CARGO_TERM_COLOR: always
       OPENPDF_MEASURE_RAM_MIB: "250"
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+        with:
+          persist-credentials: false
 
       - name: Install Rust from rust-toolchain.toml
         shell: bash
@@ -49,7 +51,7 @@ jobs:
         if: runner.os == 'Linux'
         run: cargo fmt --all --check
 
-      - uses: Swatinem/rust-cache@v2
+      - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
         with:
           prefix-key: ci-${{ matrix.os }}
 
@@ -136,7 +138,7 @@ jobs:
             echo "CI time: **${dur}s**"
           } >> "$GITHUB_STEP_SUMMARY"
 
-      - uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
         if: always()
         with:
           name: ci-time-${{ matrix.os }}
@@ -154,12 +156,14 @@ jobs:
       MSRV: "1.98.0"
       RUSTUP_TOOLCHAIN: "1.98.0"
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+        with:
+          persist-credentials: false
 
       - name: Check MSRV matches Cargo.toml
         run: grep -qx "rust-version = \"$MSRV\"" Cargo.toml
 
-      - name: Every workspace member inherits rust-version
+      - name: Every workspace member inherits rust-version and license
         run: |
           set -o pipefail
           cargo metadata --no-deps --format-version 1 --locked \
@@ -168,7 +172,7 @@ jobs:
       - name: Install Rust ${{ env.MSRV }}
         run: rustup toolchain install "$MSRV" --profile minimal
 
-      - uses: Swatinem/rust-cache@v2
+      - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
         with:
           prefix-key: msrv
 
@@ -189,7 +193,7 @@ jobs:
     if: always()
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/download-artifact@v4
+      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
         with:
           pattern: ci-time-*
           path: ci-times

@@ -12,8 +12,15 @@ if [[ -f "$ROOT/$DESKTOP_FILE" && -f "$ROOT/$METAINFO_FILE" ]]; then
 fi
 
 echo "data/ desktop metadata missing; importing from origin/gtk (PR #1)" >&2
-git -C "$ROOT" fetch --depth=1 origin gtk
-git -C "$ROOT" checkout FETCH_HEAD -- data
+# Prefer the ref already fetched by actions/checkout (fetch-depth: 0), so CI
+# works with persist-credentials: false; fall back to a fetch locally.
+if git -C "$ROOT" rev-parse --verify -q refs/remotes/origin/gtk >/dev/null; then
+  src=refs/remotes/origin/gtk
+else
+  git -C "$ROOT" fetch --depth=1 origin gtk
+  src=FETCH_HEAD
+fi
+git -C "$ROOT" checkout "$src" -- data
 if [[ ! -f "$ROOT/$DESKTOP_FILE" || ! -f "$ROOT/$METAINFO_FILE" ]]; then
   echo "expected $DESKTOP_FILE and $METAINFO_FILE after importing gtk data/" >&2
   exit 1
