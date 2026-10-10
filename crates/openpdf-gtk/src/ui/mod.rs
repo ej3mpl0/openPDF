@@ -271,6 +271,7 @@ fn watch_measure(
                         elapsed,
                         peak.get(),
                         "Engine/PDFium is required; placeholder renderer is not measured",
+                        win.widget(),
                     ),
                 );
                 return glib::ControlFlow::Break;
@@ -335,6 +336,7 @@ fn watch_measure(
                         ..Default::default()
                     }
                     .with_runtime_env()
+                    .with_window_graphics(win.widget())
                     .evaluate(),
                 );
                 return glib::ControlFlow::Break;
@@ -368,7 +370,13 @@ fn watch_measure(
     });
 }
 
-fn failed_report(pages: usize, startup_ms: u128, rss_bytes: u64, error: &str) -> BudgetReport {
+fn failed_report(
+    pages: usize,
+    startup_ms: u128,
+    rss_bytes: u64,
+    error: &str,
+    widget: &impl IsA<gtk::Widget>,
+) -> BudgetReport {
     BudgetReport {
         pages,
         startup_ms,
@@ -377,6 +385,7 @@ fn failed_report(pages: usize, startup_ms: u128, rss_bytes: u64, error: &str) ->
         ..Default::default()
     }
     .with_runtime_env()
+    .with_window_graphics(widget)
 }
 
 fn finish_measure(

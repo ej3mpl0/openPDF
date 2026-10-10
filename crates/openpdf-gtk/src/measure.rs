@@ -239,7 +239,14 @@ pub struct BudgetReport {
     pub fontconfig_file_env: String,
     pub fontconfig_path_env: String,
     pub gtk_env: String,
+    /// `GSK_RENDERER` environment variable (may be empty).
+    pub gsk_renderer_env: String,
+    /// Realized `GskRenderer` GType name (`GskCairoRenderer` / `GskNglRenderer` / …).
     pub gsk_renderer: String,
+    /// `GL_RENDERER` from an already-created `GdkGLContext`, or `none`.
+    pub gl_renderer: String,
+    /// `gtk_get_{major,minor,micro}_version`.
+    pub gtk_version: String,
     /// Variables `--measure` code itself set. Must be empty.
     pub env_overrides: Vec<String>,
     pub ok: bool,
@@ -307,7 +314,10 @@ impl Display for BudgetReport {
         writeln!(f, "FONTCONFIG_FILE={}", self.fontconfig_file_env)?;
         writeln!(f, "FONTCONFIG_PATH={}", self.fontconfig_path_env)?;
         write!(f, "{}", self.gtk_env)?;
-        writeln!(f, "GSK_RENDERER={}", self.gsk_renderer)?;
+        writeln!(f, "GSK_RENDERER={}", self.gsk_renderer_env)?;
+        writeln!(f, "gsk_renderer={}", or_none(&self.gsk_renderer))?;
+        writeln!(f, "gl_renderer={}", or_none(&self.gl_renderer))?;
+        writeln!(f, "gtk_version={}", self.gtk_version)?;
         writeln!(f, "env_overrides={}", self.env_overrides.join(","))?;
         writeln!(f, "ok={}", self.ok)?;
         if let Some(err) = &self.error {
@@ -770,6 +780,64 @@ fn env_or_empty(key: &str) -> String {
     std::env::var(key).unwrap_or_default()
 }
 
+fn or_none(value: &str) -> &str {
+    if value.is_empty() {
+        "none"
+    } else {
+        value
+    }
+}
+
+/// `gtk_get_major/minor/micro_version` as `major.minor.micro`.
+pub fn gtk_version_string() -> String {
+    format!(
+        "{}.{}.{}",
+        gtk::major_version(),
+        gtk::minor_version(),
+        gtk::micro_version()
+    )
+}
+
+/// GType name of the realized window's `GskRenderer`, or empty if none.
+pub fn realized_gsk_renderer_name(widget: &impl gtk::prelude::IsA<gtk::Widget>) -> String {
+    use gtk::prelude::{NativeExt, ObjectExt, WidgetExt};
+    widget
+        .as_ref()
+        .native()
+        .and_then(|n| n.renderer())
+        .map(|r| r.type_().name().to_string())
+        .unwrap_or_default()
+}
+
+/// `GL_RENDERER` from `GdkGLContext::current()` only. Never creates a context.
+pub fn existing_gl_renderer() -> String {
+    if gtk::gdk::GLContext::current().is_none() {
+        return String::new();
+    }
+    gl_renderer_string().unwrap_or_default()
+}
+
+const GL_RENDERER: u32 = 0x1F01;
+
+#[link(name = "epoxy")]
+extern "C" {
+    fn glGetString(name: u32) -> *const std::ffi::c_uchar;
+}
+
+fn gl_renderer_string() -> Option<String> {
+    unsafe {
+        let ptr = glGetString(GL_RENDERER);
+        if ptr.is_null() {
+            return None;
+        }
+        Some(
+            std::ffi::CStr::from_ptr(ptr.cast())
+                .to_string_lossy()
+                .into_owned(),
+        )
+    }
+}
+
 fn gtk_star_env_block() -> String {
     let mut keys: Vec<String> = std::env::vars()
         .map(|(k, _)| k)
@@ -797,6 +865,7 @@ pub fn collect_runtime_env() -> (
     String,
     String,
     String,
+    String,
     Vec<String>,
 ) {
     let (theme, paths) = gtk_icon_theme_report();
@@ -813,6 +882,7 @@ pub fn collect_runtime_env() -> (
         env_or_empty("FONTCONFIG_PATH"),
         gtk_star_env_block(),
         env_or_empty("GSK_RENDERER"),
+        gtk_version_string(),
         measure_env_overrides(),
     )
 }
@@ -975,7 +1045,8 @@ impl BudgetReport {
             fontconfig_file_env,
             fontconfig_path_env,
             gtk_env,
-            gsk_renderer,
+            gsk_renderer_env,
+            gtk_version,
             env_overrides,
         ) = collect_runtime_env();
         self.fontconfig_file = fontconfig_file;
@@ -989,8 +1060,17 @@ impl BudgetReport {
         self.fontconfig_file_env = fontconfig_file_env;
         self.fontconfig_path_env = fontconfig_path_env;
         self.gtk_env = gtk_env;
-        self.gsk_renderer = gsk_renderer;
+        self.gsk_renderer_env = gsk_renderer_env;
+        self.gtk_version = gtk_version;
         self.env_overrides = env_overrides;
+        self
+    }
+
+    /// Fill realized `gsk_renderer` / `gl_renderer` from a mapped window.
+    /// Does not create a GL context.
+    pub fn with_window_graphics(mut self, widget: &impl gtk::prelude::IsA<gtk::Widget>) -> Self {
+        self.gsk_renderer = realized_gsk_renderer_name(widget);
+        self.gl_renderer = existing_gl_renderer();
         self
     }
 }
@@ -1107,6 +1187,32 @@ mod tests {
         assert!(text.contains("env_overrides="));
         assert!(text.contains("fontconfig_fonts="));
         assert!(text.contains("gtk_icon_theme="));
+        assert!(text.contains("gsk_renderer=none"));
+        assert!(text.contains("gl_renderer=none"));
+        assert!(text.contains("gtk_version="));
+        let named = BudgetReport {
+            gsk_renderer: "GskCairoRenderer".into(),
+            gl_renderer: "llvmpipe".into(),
+            gtk_version: "4.14.5".into(),
+            ..Default::default()
+        }
+        .to_string();
+        assert!(named.contains("gsk_renderer=GskCairoRenderer"));
+        assert!(named.contains("gl_renderer=llvmpipe"));
+        assert!(named.contains("gtk_version=4.14.5"));
+    }
+
+    #[test]
+    fn gtk_version_string_is_dotted_triple() {
+        let v = gtk_version_string();
+        let parts: Vec<&str> = v.split('.').collect();
+        assert_eq!(parts.len(), 3, "{v}");
+        assert!(
+            parts
+                .iter()
+                .all(|p| !p.is_empty() && p.chars().all(|c| c.is_ascii_digit())),
+            "{v}"
+        );
     }
 
     #[test]

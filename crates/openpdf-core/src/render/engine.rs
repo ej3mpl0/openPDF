@@ -460,6 +460,28 @@ impl Engine {
         worker().ok()?.cache.lock().ok()?.get(key)
     }
 
+    /// Resize the process-wide tile cache. Evicts LRU entries when shrinking.
+    pub fn set_cache_bytes(&self, bytes: usize) {
+        if let Ok(h) = worker() {
+            if let Ok(mut c) = h.cache.lock() {
+                c.set_cap(bytes);
+            }
+        }
+    }
+
+    pub fn cache_cap(&self) -> Option<usize> {
+        Some(worker().ok()?.cache.lock().ok()?.cap())
+    }
+
+    /// PDFium `render_tile` calls this process (cache hits excluded).
+    pub fn render_tile_calls() -> u64 {
+        super::pdfium::render_tile_calls()
+    }
+
+    pub fn reset_render_tile_calls() {
+        super::pdfium::reset_render_tile_calls();
+    }
+
     pub fn try_recv(&self) -> Option<TileEvent> {
         let h = worker().ok()?;
         let rx = h.events.lock().ok()?;

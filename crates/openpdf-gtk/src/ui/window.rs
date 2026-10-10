@@ -64,7 +64,7 @@ impl OpenPdfWindow {
 
         let window = adw::ApplicationWindow::new(app);
         window.set_title(Some(t(lang, "openPDF")));
-        window.set_default_size(1180, 800);
+        window.set_default_size(1280, 800);
 
         let toast = adw::ToastOverlay::new();
         let tab_view = adw::TabView::new();

@@ -35,6 +35,21 @@ impl TileCache {
         self.map.is_empty()
     }
 
+    pub fn cap(&self) -> usize {
+        self.cap
+    }
+
+    /// Change the byte budget. Evicts LRU tiles when the new cap is smaller
+    /// than [`Self::bytes_used`].
+    pub fn set_cap(&mut self, cap_bytes: usize) {
+        self.cap = cap_bytes.max(1);
+        while self.used > self.cap {
+            if !self.evict_one() {
+                break;
+            }
+        }
+    }
+
     pub fn get(&mut self, key: &TileKey) -> Option<Arc<Tile>> {
         let tile = self.map.get(key).cloned()?;
         if let Some(pos) = self.order.iter().position(|k| k == key) {
@@ -68,12 +83,7 @@ impl TileCache {
     }
 
     pub fn invalidate_doc(&mut self, doc: DocumentId) {
-        let keys: Vec<TileKey> = self
-            .map
-            .keys()
-            .filter(|k| k.doc == doc)
-            .copied()
-            .collect();
+        let keys: Vec<TileKey> = self.map.keys().filter(|k| k.doc == doc).copied().collect();
         for key in keys {
             if let Some(old) = self.map.remove(&key) {
                 self.used = self.used.saturating_sub(old.byte_len());
@@ -123,14 +133,15 @@ mod tests {
         cache.insert(tile(1, 2, 4));
         cache.insert(tile(1, 3, 4));
         assert_eq!(cache.len(), 3);
-        assert!(cache.get(&TileKey {
-            doc: DocumentId(1),
-            page: 0,
-            zoom_q: 1000,
-            x: 0,
-            y: 0,
-        })
-        .is_none());
+        assert!(cache
+            .get(&TileKey {
+                doc: DocumentId(1),
+                page: 0,
+                zoom_q: 1000,
+                x: 0,
+                y: 0,
+            })
+            .is_none());
         assert!(cache
             .get(&TileKey {
                 doc: DocumentId(1),
@@ -149,5 +160,37 @@ mod tests {
         cache.insert(tile(2, 0, 4));
         cache.invalidate_doc(DocumentId(1));
         assert_eq!(cache.len(), 1);
+    }
+
+    #[test]
+    fn set_cap_evicts_when_shrinking() {
+        let mut cache = TileCache::new(16);
+        cache.insert(tile(1, 0, 4));
+        cache.insert(tile(1, 1, 4));
+        cache.insert(tile(1, 2, 4));
+        cache.insert(tile(1, 3, 4));
+        assert_eq!(cache.len(), 4);
+        cache.set_cap(8);
+        assert_eq!(cache.cap(), 8);
+        assert!(cache.bytes_used() <= 8);
+        assert_eq!(cache.len(), 2);
+        assert!(cache
+            .get(&TileKey {
+                doc: DocumentId(1),
+                page: 0,
+                zoom_q: 1000,
+                x: 0,
+                y: 0,
+            })
+            .is_none());
+        assert!(cache
+            .get(&TileKey {
+                doc: DocumentId(1),
+                page: 0,
+                zoom_q: 1000,
+                x: 3,
+                y: 0,
+            })
+            .is_some());
     }
 }

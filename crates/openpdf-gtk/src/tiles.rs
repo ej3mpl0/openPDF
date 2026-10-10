@@ -232,6 +232,24 @@ impl TileCache {
         self.map.is_empty()
     }
 
+    pub fn max_bytes(&self) -> usize {
+        self.max_bytes
+    }
+
+    /// Change the byte budget. Evicts LRU tiles when shrinking.
+    pub fn set_max_bytes(&mut self, max_bytes: usize) {
+        self.max_bytes = max_bytes.max(1);
+        while self.bytes > self.max_bytes {
+            if let Some(old_key) = self.order.pop_front() {
+                if let Some(old) = self.map.remove(&old_key) {
+                    self.bytes = self.bytes.saturating_sub(old.byte_len());
+                }
+            } else {
+                break;
+            }
+        }
+    }
+
     pub fn get(&mut self, key: &TileKey) -> Option<Arc<TileBitmap>> {
         let tile = self.map.get(key).cloned()?;
         if let Some(pos) = self.order.iter().position(|k| k == key) {
@@ -381,6 +399,25 @@ mod tests {
         assert!(cache.len() <= 4);
         assert!(cache.get(&TileKey::new(7, 1.0, 0, 0, 256)).is_some());
         assert!(cache.get(&TileKey::new(0, 1.0, 0, 0, 256)).is_none());
+    }
+
+    #[test]
+    fn cache_set_max_bytes_evicts_when_shrinking() {
+        let mut cache = TileCache::new(64);
+        for i in 0..4 {
+            let bmp = Arc::new(TileBitmap {
+                width: 2,
+                height: 2,
+                pixels: vec![1; 16],
+            });
+            cache.insert(TileKey::new(i, 1.0, 0, 0, 256), bmp);
+        }
+        assert_eq!(cache.len(), 4);
+        cache.set_max_bytes(32);
+        assert!(cache.bytes() <= 32);
+        assert_eq!(cache.len(), 2);
+        assert!(cache.get(&TileKey::new(0, 1.0, 0, 0, 256)).is_none());
+        assert!(cache.get(&TileKey::new(3, 1.0, 0, 0, 256)).is_some());
     }
 
     #[test]

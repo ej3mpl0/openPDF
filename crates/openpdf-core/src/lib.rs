@@ -50,8 +50,8 @@ pub use pin::{PinProvider, SecretPin};
 pub use protect::{protect, sanitize_metadata, unprotect, PdfPermissions, ProtectOptions};
 pub use render::{
     page_pixel_size, parse_tile_cache_bytes, quantize_zoom, tile_cache_bytes, tile_grid, tile_rect,
-    Engine, Priority, Raster, SearchHit, Tile, TileCache, TileEvent, TileKey, TileRequest,
-    DEFAULT_CACHE_BYTES, TILE_SIZE,
+    viewport_cache_bytes, Engine, Priority, Raster, SearchHit, Tile, TileCache, TileEvent, TileKey,
+    TileRequest, DEFAULT_CACHE_BYTES, MAX_CACHE_BYTES, MIN_CACHE_BYTES, TILE_SIZE,
 };
 pub use signer::{
     certificate_common_name, describe_certificate, describe_certificate_detail,

@@ -409,6 +409,10 @@ impl Session {
         self.engine.cache_get(&core)
     }
 
+    pub fn set_cache_bytes(&self, bytes: usize) {
+        self.engine.set_cache_bytes(bytes);
+    }
+
     pub fn poll(&self) -> bool {
         let mut dirty = false;
         while self.poll_one() {
@@ -496,6 +500,12 @@ impl MockView {
 
     pub fn lock_after_sign(&self) {
         self.locked.set(true);
+    }
+
+    pub fn set_cache_bytes(&self, bytes: usize) {
+        if let Ok(mut cache) = self.cache.lock() {
+            cache.set_max_bytes(bytes);
+        }
     }
 
     pub fn request_view_tiles(&self, keys: &[ViewTile], _priority: Priority) {
@@ -720,6 +730,13 @@ impl Opened {
         match self {
             Self::Core(s) => Some(s.engine()),
             Self::Mock(_) => None,
+        }
+    }
+
+    pub fn set_cache_bytes(&self, bytes: usize) {
+        match self {
+            Self::Core(s) => s.set_cache_bytes(bytes),
+            Self::Mock(s) => s.set_cache_bytes(bytes),
         }
     }
 
@@ -1077,5 +1094,155 @@ mod tests {
             "verify must not reread the unsigned source"
         );
         let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// 3840×2160 @ 1 and 1920×1080 @ 2 share a ~63.3 MiB budget. Scroll down
+    /// and back over the same range; cached tiles must not call `render_tile`
+    /// again. Peak RSS is informational (no assert).
+    #[test]
+    fn viewport_cache_reuses_tiles_at_3840x2160_and_1920x1080_scale_2() {
+        use gtk::prelude::*;
+        use gtk4 as gtk;
+
+        let Ok(engine) = Engine::new() else {
+            eprintln!("viewport cache reuse: Engine::new skipped (no PDFium)");
+            return;
+        };
+        let path = match crate::measure::write_measure_pdf(8) {
+            Ok(p) => p,
+            Err(e) => {
+                eprintln!("viewport cache reuse: {e}");
+                return;
+            }
+        };
+        let session = match Session::open(&engine, &path) {
+            Ok(s) => s,
+            Err(e) => {
+                let _ = std::fs::remove_file(&path);
+                panic!("open measure PDF: {e}");
+            }
+        };
+
+        if gtk::init().is_err() && !gtk::is_initialized() {
+            let _ = std::fs::remove_file(&path);
+            eprintln!("viewport cache reuse: skipped (no GTK display)");
+            return;
+        }
+        let scroll = gtk::ScrolledWindow::new();
+        scroll.set_size_request(1920, 1080);
+        eprintln!(
+            "viewport cache reuse: gtk scale_factor={}",
+            scroll.scale_factor()
+        );
+
+        scroll_reuse_case(&engine, &session, &scroll, 3840, 2160, 1.0);
+        scroll_reuse_case(&engine, &session, &scroll, 1920, 1080, 2.0);
+        let _ = std::fs::remove_file(&path);
+    }
+
+    fn wait_cached(session: &Session, keys: &[ViewTile], timeout: std::time::Duration) {
+        session.request_view_tiles(keys, Priority::Visible);
+        let t0 = std::time::Instant::now();
+        while t0.elapsed() < timeout {
+            session.poll();
+            if !keys.is_empty() && keys.iter().all(|k| session.cache_get(k).is_some()) {
+                return;
+            }
+            std::thread::sleep(std::time::Duration::from_millis(5));
+        }
+        let ready = keys
+            .iter()
+            .filter(|k| session.cache_get(k).is_some())
+            .count();
+        panic!(
+            "viewport tiles not cached in {:?}: {ready}/{}",
+            timeout,
+            keys.len()
+        );
+    }
+
+    fn scroll_reuse_case(
+        engine: &Engine,
+        session: &Session,
+        scroll: &gtk4::ScrolledWindow,
+        logical_w: u32,
+        logical_h: u32,
+        scale: f64,
+    ) {
+        use crate::tiles::{layout_continuous, visible_tiles, DEFAULT_TILE_SIZE};
+        use gtk::prelude::*;
+        use gtk4 as gtk;
+
+        let budget = openpdf_core::viewport_cache_bytes(logical_w, logical_h, scale);
+        assert_eq!(
+            budget,
+            openpdf_core::viewport_cache_bytes(3840, 2160, 1.0),
+            "{logical_w}x{logical_h}@{scale} must match 3840×2160@1"
+        );
+        engine.set_cache_bytes(1);
+        engine.set_cache_bytes(budget);
+        assert_eq!(engine.cache_cap(), Some(budget));
+
+        scroll.set_size_request(logical_w as i32, logical_h as i32);
+        let _ = scroll.scale_factor();
+
+        let device_w = f64::from(logical_w) * scale;
+        let device_h = f64::from(logical_h) * scale;
+        let sizes = session.pages();
+        let zoom = ((device_w - 36.0) / sizes[0].width).max(0.1);
+        let layout = layout_continuous(&sizes, zoom, device_w, 18.0, 14.0);
+        let keys_top = visible_tiles(
+            &layout,
+            0.0,
+            0.0,
+            device_w,
+            device_h,
+            zoom,
+            DEFAULT_TILE_SIZE,
+            0,
+        );
+        assert!(
+            !keys_top.is_empty(),
+            "{logical_w}x{logical_h}@{scale} must request tiles"
+        );
+
+        Engine::reset_render_tile_calls();
+        wait_cached(session, &keys_top, std::time::Duration::from_secs(45));
+        let calls_top = Engine::render_tile_calls();
+        assert!(
+            calls_top > 0,
+            "{logical_w}x{logical_h}@{scale}: first fill must render"
+        );
+
+        let dy = device_h * 0.5;
+        scroll.vadjustment().set_value(dy);
+        let keys_mid = visible_tiles(
+            &layout,
+            0.0,
+            dy,
+            device_w,
+            device_h,
+            zoom,
+            DEFAULT_TILE_SIZE,
+            0,
+        );
+        wait_cached(session, &keys_mid, std::time::Duration::from_secs(45));
+        let calls_mid = Engine::render_tile_calls();
+
+        scroll.vadjustment().set_value(0.0);
+        wait_cached(session, &keys_top, std::time::Duration::from_secs(45));
+        let calls_back = Engine::render_tile_calls();
+        assert_eq!(
+            calls_back, calls_mid,
+            "{logical_w}x{logical_h}@{scale}: scroll-back re-rendered cached tiles ({calls_back} > {calls_mid})"
+        );
+
+        let peak = crate::measure::peak_rss_bytes();
+        eprintln!(
+            "viewport_cache {logical_w}x{logical_h}@{scale} peak_rss_mb={:.1} budget_mib={:.1} tiles_top={} renders_top={calls_top} renders_after_scroll={calls_mid}",
+            peak as f64 / (1024.0 * 1024.0),
+            budget as f64 / (1024.0 * 1024.0),
+            keys_top.len(),
+        );
     }
 }

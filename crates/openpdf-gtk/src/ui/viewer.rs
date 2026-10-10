@@ -332,6 +332,23 @@ impl DocumentView {
         self.thumbs_area.queue_draw();
         self.update_chrome();
         self.refresh_lock_chrome();
+        self.apply_viewport_cache();
+    }
+
+    /// Recompute the Engine / mock tile-cache budget from this viewport.
+    ///
+    /// Uses the scrolled page widget's logical size and `scale_factor`
+    /// exactly once: `device_px = (w * scale) * (h * scale)`.
+    pub fn apply_viewport_cache(&self) {
+        let w = self.pages_scroll.width().max(1) as u32;
+        let h = self.pages_scroll.height().max(1) as u32;
+        let scale = f64::from(self.pages_scroll.scale_factor());
+        self.apply_viewport_cache_size(w, h, scale);
+    }
+
+    pub fn apply_viewport_cache_size(&self, logical_w: u32, logical_h: u32, scale: f64) {
+        let bytes = openpdf_core::viewport_cache_bytes(logical_w, logical_h, scale);
+        self.shared.doc.set_cache_bytes(bytes);
     }
 
     fn update_chrome(&self) {
@@ -543,6 +560,14 @@ pub fn build(doc: Rc<Opened>, settings: &Settings, lang: Lang) -> Rc<DocumentVie
     pages_scroll.connect_notify_local(
         Some("allocated-width"),
         clone!(@strong view => move |_, _| view.relayout()),
+    );
+    pages_scroll.connect_notify_local(
+        Some("allocated-height"),
+        clone!(@strong view => move |_, _| view.apply_viewport_cache()),
+    );
+    pages_scroll.connect_notify_local(
+        Some("scale-factor"),
+        clone!(@strong view => move |_, _| view.apply_viewport_cache()),
     );
 
     let click_pages = gtk::GestureClick::new();
