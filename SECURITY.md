@@ -62,6 +62,9 @@ GitHub Releases attach binaries plus `SHA256SUMS` and artifact
 attestations. Reports about a missing or forgeable checksum,
 attestation bypass, or a substituted artifact are in scope.
 
+Out of scope unless they have a security impact: feature requests,
+docs typos, and crashes that do not leak data or execute code.
+
 ## Test credentials
 
 SoftHSM tokens, PINs, and certificates used in tests and CI are
@@ -70,10 +73,4 @@ or SoftHSM label works in the test suite is not a vulnerability.
 
 ## License
 
-> **Placeholder — license not chosen.** This project has not selected
-> a license yet. Do not assume a LICENSE file or a specific SPDX
-> identifier. A LICENSE file will be added when the license is
-> decided.
-
-Out of scope unless they have a security impact: feature requests,
-docs typos, and crashes that do not leak data or execute code.
+The project is MPL-2.0 (see [LICENSE](LICENSE)).
