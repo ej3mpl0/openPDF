@@ -74,12 +74,14 @@ def parse_metrics(text: str) -> tuple[int | None, int | None]:
 PIN: list[str] = []
 
 
-def pin_prefix(enabled: bool) -> list[str]:
-    """`taskset -c 0` on Linux when available, to cut scheduler noise."""
-    if enabled and sys.platform.startswith("linux"):
+def pin_prefix(cpus: str) -> list[str]:
+    """Opt-in `taskset -c CPUS` on Linux. Off by default: openpdf-gtk is
+    multi-threaded and pinning to one core adds ~100 ms of startup."""
+    if cpus and sys.platform.startswith("linux"):
         ts = shutil.which("taskset")
-        if ts:
-            return [ts, "-c", "0"]
+        if not ts:
+            raise FileNotFoundError("--pin requested but taskset not found")
+        return [ts, "-c", cpus]
     return []
 
 
@@ -162,11 +164,13 @@ def main(argv: list[str] | None = None) -> int:
                         help="repeat N times; enforce median startup and max peak RSS")
     parser.add_argument("--warmup", type=int, default=int(os.environ.get("OPENPDF_MEASURE_WARMUP", "1")),
                         help="discarded warm-up runs before measuring")
-    parser.add_argument("--no-pin", action="store_true",
-                        default=os.environ.get("OPENPDF_MEASURE_NO_PIN") == "1",
-                        help="do not wrap runs in `taskset -c 0` on Linux")
+    parser.add_argument("--pin", metavar="CPUS", default=os.environ.get("OPENPDF_MEASURE_PIN", ""),
+                        help="opt-in: wrap runs in `taskset -c CPUS` on Linux (e.g. 0-1); default off")
     args = parser.parse_args(argv)
-    PIN[:] = pin_prefix(not args.no_pin)
+    try:
+        PIN[:] = pin_prefix(args.pin)
+    except FileNotFoundError as e:
+        return fail(str(e))
     if args.runs < 1 or args.warmup < 0:
         return fail("--runs must be >= 1")
     kind = args.kind
