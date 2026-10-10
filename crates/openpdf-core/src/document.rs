@@ -41,7 +41,7 @@ pub(crate) struct PageSlot {
 pub struct Document {
     id: DocumentId,
     path: Option<PathBuf>,
-    original: Arc<[u8]>,
+    original: Arc<Vec<u8>>,
     inner: LopdfDocument,
     slots: Vec<PageSlot>,
     history: History,
@@ -57,8 +57,8 @@ impl Document {
     }
 
     pub fn from_bytes(bytes: Vec<u8>, path: Option<PathBuf>) -> Result<Self> {
-        // One Vec -> Arc<[u8]> conversion; the Vec is freed before parsing.
-        let bytes: Arc<[u8]> = bytes.into();
+        // Arc::new moves the Vec: no byte copy.
+        let bytes = Arc::new(bytes);
         let inner = LopdfDocument::load_mem(&bytes)?;
         Self::from_lopdf_inner(inner, bytes, path)
     }
@@ -67,14 +67,14 @@ impl Document {
         let mut tmp = inner;
         let mut bytes = Vec::new();
         tmp.save_to(&mut bytes)?;
-        let bytes: Arc<[u8]> = bytes.into();
+        let bytes = Arc::new(bytes);
         let inner = LopdfDocument::load_mem(&bytes)?;
         Self::from_lopdf_inner(inner, bytes, path)
     }
 
     fn from_lopdf_inner(
         inner: LopdfDocument,
-        original: Arc<[u8]>,
+        original: Arc<Vec<u8>>,
         path: Option<PathBuf>,
     ) -> Result<Self> {
         let slots = slots_from(&inner)?;
@@ -341,8 +341,14 @@ impl Document {
     ///
     /// Returns a shared handle (no byte copy) that can be moved to another
     /// thread.
-    pub fn original_bytes(&self) -> Arc<[u8]> {
+    pub fn original_bytes(&self) -> Arc<Vec<u8>> {
         Arc::clone(&self.original)
+    }
+
+    /// Address of the original buffer, for no-copy assertions in tests.
+    #[cfg(test)]
+    pub(crate) fn original_ptr(&self) -> *const u8 {
+        self.original.as_ptr()
     }
 
     /// Borrowed view of [`Document::original_bytes`] for internal use.
@@ -366,7 +372,7 @@ impl Document {
     }
 
     pub(crate) fn reload_from_saved(&mut self, bytes: Vec<u8>) -> Result<()> {
-        let bytes: Arc<[u8]> = bytes.into();
+        let bytes = Arc::new(bytes);
         let inner = LopdfDocument::load_mem(&bytes)?;
         self.slots = slots_from(&inner)?;
         self.signed = contains_signature(&inner);
@@ -558,6 +564,18 @@ mod tests {
         let a = doc.original_bytes();
         let b = doc.original_bytes();
         assert!(Arc::ptr_eq(&a, &b));
+    }
+
+    #[test]
+    fn loading_does_not_copy_the_bytes() {
+        let bytes = std::fs::read(
+            std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../corpus/hello.pdf"),
+        )
+        .unwrap();
+        let before = bytes.as_ptr();
+        let doc = Document::from_bytes(bytes, None).unwrap();
+        assert_eq!(doc.original_ptr(), before);
+        assert_eq!(doc.original_bytes().as_ptr(), before);
     }
 
     #[test]
