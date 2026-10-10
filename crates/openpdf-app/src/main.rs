@@ -298,6 +298,42 @@ mod tests {
         assert_eq!(via_signer[0].valid, Some(false));
     }
 
+    #[test]
+    fn gtk_session_original_bytes_verify_finds_signatures() {
+        use openpdf_core::{format_verify_results, Engine};
+        let Ok(engine) = Engine::new() else {
+            eprintln!("gtk verify: Engine::new skipped (no PDFium)");
+            return;
+        };
+        let signed = stub_signed_pdf();
+        let path = std::env::temp_dir().join(format!(
+            "openpdf-gtk-verify-{}-{}.pdf",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        std::fs::write(&path, &signed).expect("write stub-signed PDF");
+        let session = openpdf_gtk::session::Session::open(&engine, &path).expect("Session::open");
+        let bytes = session
+            .original_bytes()
+            .expect("Document::original_bytes must be pub");
+        assert_eq!(
+            bytes.as_slice(),
+            signed.as_slice(),
+            "verify must use original_bytes, not a to_bytes rewrite"
+        );
+        let infos = PdfVerifier.verify(&*bytes).expect("verify original_bytes");
+        assert!(
+            !infos.is_empty(),
+            "signed PDF must not be 'No signatures found'"
+        );
+        let text = format_verify_results(&infos);
+        assert_ne!(text, "No signatures found", "{text}");
+        let _ = std::fs::remove_file(&path);
+    }
+
     /// Incremental /Type /Sig dictionary so verify runs without SoftHSM.
     fn stub_signed_pdf() -> Vec<u8> {
         use lopdf::{Dictionary, Document, IncrementalDocument, Object};

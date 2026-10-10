@@ -532,7 +532,7 @@ fn maybe_show_verify(
     let overlay = overlay.clone();
     let (tx, rx) = std::sync::mpsc::channel();
     std::thread::spawn(move || {
-        let _ = tx.send(verifier.verify(&bytes));
+        let _ = tx.send(verifier.verify(&*bytes));
     });
     glib::timeout_add_local(std::time::Duration::from_millis(16), move || {
         match rx.try_recv() {

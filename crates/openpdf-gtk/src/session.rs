@@ -299,23 +299,15 @@ impl Session {
         }
     }
 
-    /// Same contract as [`openpdf_core::Document::original_bytes`] once Jian
-    /// makes that method `pub` on #25. Until then, read the file that was
-    /// opened. Never [`Document::to_bytes`] — that is `Signed(Rewrite)`.
-    pub fn original_bytes(&self) -> Result<Vec<u8>, BackendError> {
-        if let Some(path) = self.path.borrow().as_ref() {
-            if path.exists() {
-                return std::fs::read(path).map_err(BackendError::from);
-            }
-        }
-        // When `Document::original_bytes` is `pub`:
-        //   return Ok(self.doc.borrow().original_bytes().to_vec());
-        Err(BackendError::Invalid(openpdf_core::tr(
-            "Cannot verify: original file bytes are unavailable.",
-        )))
+    /// Shared original bytes from [`openpdf_core::Document::original_bytes`].
+    ///
+    /// Arc clone only: no `Vec` copy and no file re-read. Never
+    /// [`Document::to_bytes`] — that is `Signed(Rewrite)`.
+    pub fn original_bytes(&self) -> Result<Arc<Vec<u8>>, BackendError> {
+        Ok(self.doc.borrow().original_bytes())
     }
 
-    pub fn bytes_for_verify(&self) -> Result<Vec<u8>, BackendError> {
+    pub fn bytes_for_verify(&self) -> Result<Arc<Vec<u8>>, BackendError> {
         self.original_bytes()
     }
 
@@ -880,9 +872,10 @@ impl Opened {
         }
     }
 
-    /// Prepared for [`openpdf_core::Document::original_bytes`] (`pub` on #25).
-    /// Until that lands, this reads the opened path and errors if it cannot.
-    pub fn original_bytes(&self) -> Result<Vec<u8>, BackendError> {
+    /// Shared original bytes from [`openpdf_core::Document::original_bytes`].
+    ///
+    /// Arc clone only: no `Vec` copy and no file re-read.
+    pub fn original_bytes(&self) -> Result<Arc<Vec<u8>>, BackendError> {
         match self {
             Self::Core(s) => s.original_bytes(),
             Self::Mock(_) => Err(BackendError::Invalid(openpdf_core::tr(
@@ -891,7 +884,7 @@ impl Opened {
         }
     }
 
-    pub fn bytes_for_verify(&self) -> Result<Vec<u8>, BackendError> {
+    pub fn bytes_for_verify(&self) -> Result<Arc<Vec<u8>>, BackendError> {
         self.original_bytes()
     }
 
@@ -1200,10 +1193,14 @@ mod tests {
         assert_eq!(dest, dir.join("src-signed.pdf"));
         assert_eq!(session.path(), Some(dest.clone()));
         let verify = session.original_bytes().expect("verify original bytes");
-        assert_eq!(verify, written, "verify must read the written sibling");
+        assert_eq!(
+            verify.as_slice(),
+            written.as_slice(),
+            "verify must use the written sibling"
+        );
         assert_ne!(
-            verify,
-            std::fs::read(&src).unwrap(),
+            verify.as_slice(),
+            std::fs::read(&src).unwrap().as_slice(),
             "verify must not reread the unsigned source"
         );
         let _ = std::fs::remove_dir_all(&dir);
