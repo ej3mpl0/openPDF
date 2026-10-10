@@ -55,7 +55,17 @@ if [[ ! -f "$PDFIUM_DIR/lib/libpdfium.so" ]]; then
   tar -xzf "$archive" -C "$PDFIUM_DIR"
 fi
 
-cargo build --locked --release -p "$APP_BIN" -p "$CLI_CRATE" --manifest-path "$ROOT/Cargo.toml"
+# The GUI binary is always openpdf-gtk ($APP_BIN, referenced by the .desktop,
+# Flatpak and docs); since #16 it lives in package openpdf-app. Fall back to
+# package openpdf-gtk on workspaces that predate that split.
+if cargo metadata --no-deps --format-version 1 --locked --manifest-path "$ROOT/Cargo.toml" \
+    | python3 -c 'import json,sys; sys.exit(0 if any(p["name"]=="openpdf-app" for p in json.load(sys.stdin)["packages"]) else 1)'; then
+  APP_PKG=openpdf-app
+else
+  APP_PKG=openpdf-gtk
+fi
+cargo build --locked --release -p "$APP_PKG" --bin "$APP_BIN" --manifest-path "$ROOT/Cargo.toml"
+cargo build --locked --release -p "$CLI_CRATE" --manifest-path "$ROOT/Cargo.toml"
 BIN_PATH="$ROOT/target/release/$APP_BIN"
 CLI_PATH="$ROOT/target/release/$CLI_BIN"
 if [[ ! -x "$BIN_PATH" ]]; then

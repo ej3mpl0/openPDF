@@ -11,6 +11,13 @@ if [[ -f "$ROOT/$DESKTOP_FILE" && -f "$ROOT/$METAINFO_FILE" ]]; then
   exit 0
 fi
 
+# A release must ship only reviewed files from the tagged ref itself.
+if [[ "${GITHUB_REF:-}" == refs/tags/* || "${RELEASE:-0}" == "1" ]]; then
+  echo "data/ desktop metadata ($DESKTOP_FILE, $METAINFO_FILE) is not on the" \
+    "checked-out ref (${GITHUB_REF:-RELEASE=1}); refusing to import it from gtk for a release" >&2
+  exit 1
+fi
+
 echo "data/ desktop metadata missing; importing from origin/gtk (PR #1)" >&2
 # Prefer the ref already fetched by actions/checkout (fetch-depth: 0), so CI
 # works with persist-credentials: false; fall back to a fetch locally.

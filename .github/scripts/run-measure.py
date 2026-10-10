@@ -7,6 +7,15 @@
 --kind core  runs target/release/openpdf info corpus/two_page.pdf and measures
              wall-clock startup and peak RSS of the child process itself
              (wait4 on Linux/macOS, PeakWorkingSetSize on Windows).
+             If target/release/openpdf-measure also exists (openpdf-core, #10),
+             it is run as well, as a separate core measurement: it prints one
+             `openpdf_measure k=v ...` line with open-relative durations
+             (open_ms, pdfium_load_ms, doc_open_ms, first_tile_ms, ...) and no
+             startup_ms. Its required keys are CORE_MEASURE_KEYS; medians are
+             reported under core_measure.*, never mixed with CLI startup_ms or
+             GTK ui_* keys. Its gate is the median of core_ready_ms =
+             open_ms + pdfium_load_ms + doc_open_ms + first_tile_ms against
+             OPENPDF_MEASURE_CORE_READY_MS (default 1000).
 
 Exits non-zero if the binary is missing, exits non-zero, reports no metrics,
 or exceeds OPENPDF_MEASURE_RAM_MIB (default 250) or OPENPDF_MEASURE_STARTUP_MS
@@ -41,9 +50,100 @@ def find_binary(kind: str) -> Path:
     extra = os.environ.get("OPENPDF_MEASURE_BIN")
     if extra:
         return Path(extra)
-    if kind == "core" and (RELEASE / f"openpdf-measure{EXE}").is_file():
-        return RELEASE / f"openpdf-measure{EXE}"
     return RELEASE / BINARIES[kind]
+
+
+def is_core_measure(binary: Path) -> bool:
+    return binary.stem == "openpdf-measure"
+
+
+CORE_MEASURE_KEYS = ("open_ms", "pdfium_load_ms", "doc_open_ms", "first_tile_ms",
+                     "peak_rss_bytes")
+KV = re.compile(r"([a-z][a-z0-9_]*)=(\S+)")
+
+
+def run_core_measure(binary: Path) -> tuple[int, str]:
+    proc = subprocess.run(PIN + [str(binary)], cwd=ROOT, text=True,
+                          capture_output=True, check=False)
+    return proc.returncode, (proc.stdout or "") + (proc.stderr or "")
+
+
+def parse_core_measure(text: str) -> dict[str, float] | str:
+    """Numeric fields of the `openpdf_measure ...` line, or an error string."""
+    line = next((l for l in text.splitlines() if l.startswith("openpdf_measure ")), None)
+    if line is None:
+        return "no `openpdf_measure` line"
+    out: dict[str, float] = {}
+    for k, v in KV.findall(line):
+        try:
+            out[k] = float(v)
+        except ValueError:
+            pass
+    missing = [k for k in CORE_MEASURE_KEYS if k not in out]
+    if missing:
+        return f"missing/non-numeric keys {missing}"
+    negative = [k for k in CORE_MEASURE_KEYS if out[k] < 0]
+    if negative:
+        return f"keys not measured (negative, PDFium missing?) {negative}"
+    if any(k.startswith("ui_") for k in out):
+        return "core measure emitted ui_* keys"
+    out["core_ready_ms"] = (out["open_ms"] + out["pdfium_load_ms"]
+                            + out["doc_open_ms"] + out["first_tile_ms"])
+    return out
+
+
+def fmt(key: str, v: float) -> str:
+    return f"{v:.0f}" if key == "peak_rss_bytes" else f"{v:g}"
+
+
+def measure_core_bin(binary: Path, runs: int, warmup: int) -> int:
+    ready_limit = float(os.environ.get("OPENPDF_MEASURE_CORE_READY_MS") or 1000)
+    ram_mib = int(os.environ.get("OPENPDF_MEASURE_RAM_MIB", "250"))
+    print(f"measure: core_measure running {binary} runs={runs} warmup={warmup}")
+    print(f"measure: core_measure limits median core_ready_ms<={ready_limit:g}, "
+          f"max peak RSS<={ram_mib} MiB")
+    samples: dict[str, list[float]] = {}
+    for n in range(-warmup + 1, runs + 1):
+        code, output = run_core_measure(binary)
+        if code != 0:
+            print(output)
+            return fail(f"core_measure run {n}: binary exited {code}")
+        got = parse_core_measure(output)
+        if isinstance(got, str):
+            print(output)
+            return fail(f"core_measure run {n}: {got}")
+        if n <= 0:
+            print("measure: core_measure warm-up discarded")
+            continue
+        keys = [k for k in got if k.endswith("_ms") or k == "peak_rss_bytes"]
+        for k in keys:
+            samples.setdefault(k, []).append(got[k])
+        print(f"measure: core_measure run {n}/{runs} "
+              + " ".join(f"{k}={fmt(k, got[k])}" for k in keys))
+    meds = {k: statistics.median(v) for k, v in samples.items()}
+    peak = max(samples["peak_rss_bytes"])
+    print("measure: core_measure medians "
+          + " ".join(f"core_measure.{k}={fmt(k, v)}" for k, v in meds.items()))
+    summary = os.environ.get("GITHUB_STEP_SUMMARY")
+    if summary:
+        with open(summary, "a", encoding="utf-8") as f:
+            f.write("### [core] openpdf-measure (open-relative, not process startup)\n\n"
+                    "| metric | median |\n| --- | ---: |\n")
+            for k, v in meds.items():
+                f.write(f"| core_measure.{k} | {fmt(k, v)} |\n")
+            f.write(f"| max peak_rss_bytes | {peak:.0f} ({peak / 1048576:.1f} MiB) |\n")
+            f.write(f"| runs / warm-up | {runs} / {warmup} |\n\n")
+    bad = False
+    if meds["core_ready_ms"] > ready_limit:
+        fail(f"core_measure median core_ready_ms {meds['core_ready_ms']:g} exceeds {ready_limit:g}")
+        bad = True
+    if peak > ram_mib * 1048576:
+        fail(f"core_measure max peak RSS {peak / 1048576:.1f} MiB exceeds {ram_mib} MiB")
+        bad = True
+    if bad:
+        return 1
+    print("measure: OK core_measure")
+    return 0
 
 
 EXTRA_MS = re.compile(r"^([a-z][a-z0-9_]*_ms)\s*=\s*([0-9.]+)\s*$", re.M)
@@ -124,12 +224,6 @@ def _peak_rss_windows(handle: int) -> int | None:
 
 def run_core(binary: Path) -> tuple[int, str]:
     sample = ROOT / "corpus" / "two_page.pdf"
-    if binary.stem == "openpdf-measure":
-        # Dedicated core measure binary prints its own marks
-        # (first_tile_ms, pdfium_load_ms, doc_open_ms, startup_ms, peak_rss_bytes).
-        proc = subprocess.run(PIN + [str(binary)], cwd=ROOT, text=True,
-                              capture_output=True, check=False)
-        return proc.returncode, (proc.stdout or "") + (proc.stderr or "")
     cmd = PIN + [str(binary), "info", str(sample)]
     start = time.perf_counter()
     proc = subprocess.Popen(cmd, cwd=ROOT, text=True,
@@ -178,6 +272,11 @@ def main(argv: list[str] | None = None) -> int:
     startup_limit = int(os.environ.get("OPENPDF_MEASURE_STARTUP_MS") or DEFAULT_STARTUP_MS[kind])
 
     binary = find_binary(kind)
+    if kind == "core" and is_core_measure(binary):
+        # Explicit OPENPDF_MEASURE_BIN=.../openpdf-measure: only that measurement.
+        if not binary.is_file():
+            return fail(f"core measure binary not found at {binary}")
+        return measure_core_bin(binary, args.runs, args.warmup)
     if not binary.is_file() or not os.access(binary, os.X_OK):
         return fail(f"{kind} binary not found at {binary}; build it first "
                     f"(cargo build --release {'--workspace --locked' if kind == 'gui' else '-p openpdf-cli'})")
@@ -248,6 +347,9 @@ def main(argv: list[str] | None = None) -> int:
     if bad:
         return 1
     print(f"measure: OK kind={kind}")
+    measure_bin = RELEASE / f"openpdf-measure{EXE}"
+    if kind == "core" and not os.environ.get("OPENPDF_MEASURE_BIN") and measure_bin.is_file():
+        return measure_core_bin(measure_bin, args.runs, args.warmup)
     return 0
 
 

@@ -163,14 +163,14 @@ jobs:
       - name: Check MSRV matches Cargo.toml
         run: grep -qx "rust-version = \"$MSRV\"" Cargo.toml
 
+      - name: Install Rust ${{ env.MSRV }}
+        run: rustup toolchain install "$MSRV" --profile minimal
+
       - name: Every workspace member inherits rust-version and license
         run: |
           set -o pipefail
           cargo metadata --no-deps --format-version 1 --locked \
             | python3 .github/scripts/check-rust-version.py
-
-      - name: Install Rust ${{ env.MSRV }}
-        run: rustup toolchain install "$MSRV" --profile minimal
 
       - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
         with:
