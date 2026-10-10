@@ -1,0 +1,363 @@
+name: Release
+
+on:
+  push:
+    tags:
+      - "v*"
+
+concurrency:
+  group: release-${{ github.ref }}
+  cancel-in-progress: false
+
+permissions:
+  contents: read
+
+jobs:
+  # Tags carry no branch; refuse to release a tag whose commit is not on main.
+  guard:
+    name: Tag is on main
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+        with:
+          persist-credentials: false
+          fetch-depth: 0
+      - name: Check tag commit is reachable from main
+        run: |
+          set -euo pipefail
+          # fetch-depth: 0 already brought origin/main; no credentials needed.
+          git merge-base --is-ancestor "$GITHUB_SHA" origin/main
+
+  notices:
+    name: Third-party notices
+    needs: [guard]
+    permissions:
+      contents: read
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+        with:
+          persist-credentials: false
+
+      - name: Install Rust from rust-toolchain.toml
+        run: |
+          rustup toolchain install
+          rustup show active-toolchain
+
+      - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
+        with:
+          prefix-key: notices
+
+      - name: Install cargo-about (pinned)
+        run: .github/scripts/install-cargo-tool.sh cargo-about
+
+      - name: Generate THIRD-PARTY-NOTICES
+        run: packaging/gen-notices.sh
+
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: third-party-notices
+          path: THIRD-PARTY-NOTICES
+          if-no-files-found: error
+
+  linux-flatpak:
+    needs: [guard, notices]
+    permissions:
+      contents: read
+      id-token: write
+      attestations: write
+    name: Linux Flatpak
+    runs-on: ubuntu-latest
+    container:
+      image: ghcr.io/flathub-infra/flatpak-github-actions:gnome-51
+      options: --privileged
+    defaults:
+      run:
+        shell: bash
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+        with:
+          persist-credentials: false
+          fetch-depth: 0
+
+      - name: Download THIRD-PARTY-NOTICES
+        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
+        with:
+          name: third-party-notices
+          path: .
+
+      - name: Import desktop metadata from gtk if needed
+        run: |
+          git config --global --add safe.directory "$GITHUB_WORKSPACE"
+          packaging/import-desktop-data.sh
+
+      - name: Prepare ostree repo
+        run: |
+          mkdir -p repo
+          ostree init --repo=repo --mode=archive-z2
+          ostree --repo=repo config set core.min-free-space-percent 0
+          ostree --repo=repo config set core.min-free-space-size 0MB
+
+      - name: Build Flatpak
+        uses: flatpak/flatpak-github-actions/flatpak-builder@79327416609af08178ad73b352877e51450790b3 # v6.8
+        with:
+          bundle: io.github.ej3mpl0.openpdf.flatpak
+          manifest-path: packaging/flatpak/io.github.ej3mpl0.openpdf.yml
+          repo-dir: repo
+          cache: false
+          upload-artifact: false
+
+      - name: Check notices are in the Flatpak
+        run: packaging/check-notices.sh flatpak repo
+
+      - uses: actions/attest-build-provenance@e8998f949152b193b063cb0ec769d69d929409be # v2.4.0
+        with:
+          subject-path: io.github.ej3mpl0.openpdf.flatpak
+
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: release-linux-flatpak
+          path: io.github.ej3mpl0.openpdf.flatpak
+          if-no-files-found: error
+
+  linux-appimage:
+    needs: [guard, notices]
+    permissions:
+      contents: read
+      id-token: write
+      attestations: write
+    name: Linux AppImage
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+        with:
+          persist-credentials: false
+          fetch-depth: 0
+
+      - name: Install Rust from rust-toolchain.toml
+        shell: bash
+        run: |
+          rustup toolchain install
+          rustup show active-toolchain
+      - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
+        with:
+          prefix-key: release-linux-appimage
+
+      - name: Install GTK4, libadwaita, and AppImage tools
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends \
+            libgtk-4-dev libadwaita-1-dev pkg-config \
+            librsvg2-dev librsvg2-common file desktop-file-utils dpkg-dev
+
+      - name: Import desktop metadata from gtk if needed
+        run: packaging/import-desktop-data.sh
+
+      - name: Download THIRD-PARTY-NOTICES
+        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
+        with:
+          name: third-party-notices
+          path: .
+
+      - name: Build AppImage
+        run: packaging/appimage/build.sh
+        env:
+          APPIMAGE_EXTRACT_AND_RUN: "1"
+
+      - name: Check notices are in the AppImage
+        run: packaging/check-notices.sh appimage packaging/appimage/dist/*.AppImage
+        env:
+          APPIMAGE_EXTRACT_AND_RUN: "1"
+
+      - uses: actions/attest-build-provenance@e8998f949152b193b063cb0ec769d69d929409be # v2.4.0
+        with:
+          subject-path: packaging/appimage/dist/*.AppImage
+
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: release-linux-appimage
+          path: packaging/appimage/dist/*.AppImage
+          if-no-files-found: error
+
+  windows-cli:
+    needs: [guard, notices]
+    permissions:
+      contents: read
+      id-token: write
+      attestations: write
+    name: Windows CLI
+    runs-on: windows-latest
+    defaults:
+      run:
+        shell: bash
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+        with:
+          persist-credentials: false
+      - name: Install Rust from rust-toolchain.toml
+        shell: bash
+        run: |
+          rustup toolchain install
+          rustup show active-toolchain
+      - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
+        with:
+          prefix-key: release-windows-cli
+
+      - name: Install PDFium
+        run: .github/scripts/install-pdfium.sh
+
+      - name: Build CLI
+        run: cargo build --release -p openpdf-cli
+
+      - name: Download THIRD-PARTY-NOTICES
+        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
+        with:
+          name: third-party-notices
+          path: .
+
+      - name: Pack portable zip
+        run: |
+          set -euo pipefail
+          ver="${GITHUB_REF_NAME#v}"
+          name="openpdf-${ver}-windows-x64"
+          mkdir -p "dist/$name"
+          cp target/release/openpdf.exe "dist/$name/"
+          cp "$PDFIUM_LIB" "dist/$name/pdfium.dll"
+          cp THIRD-PARTY-NOTICES "dist/$name/THIRD-PARTY-NOTICES"
+          python3 - <<'PY'
+          import zipfile
+          from pathlib import Path
+          import os
+          ver = os.environ["GITHUB_REF_NAME"].removeprefix("v")
+          name = f"openpdf-{ver}-windows-x64"
+          root = Path("dist") / name
+          zpath = Path("dist") / f"{name}.zip"
+          with zipfile.ZipFile(zpath, "w", zipfile.ZIP_DEFLATED) as zf:
+              for path in root.rglob("*"):
+                  if path.is_file():
+                      zf.write(path, path.relative_to("dist"))
+          print(zpath)
+          PY
+
+      - name: Check notices are in the zip
+        shell: bash
+        run: packaging/check-notices.sh zip dist/openpdf-*-windows-x64.zip
+
+      - uses: actions/attest-build-provenance@e8998f949152b193b063cb0ec769d69d929409be # v2.4.0
+        with:
+          subject-path: dist/openpdf-*-windows-x64.zip
+
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: release-windows-cli
+          path: dist/openpdf-*-windows-x64.zip
+          if-no-files-found: error
+
+  macos-cli:
+    needs: [guard, notices]
+    permissions:
+      contents: read
+      id-token: write
+      attestations: write
+    name: macOS CLI (${{ matrix.os }})
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [macos-latest, macos-13]
+    defaults:
+      run:
+        shell: bash
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+        with:
+          persist-credentials: false
+      - name: Install Rust from rust-toolchain.toml
+        shell: bash
+        run: |
+          rustup toolchain install
+          rustup show active-toolchain
+      - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
+        with:
+          prefix-key: release-macos-cli-${{ matrix.os }}
+
+      - name: Install PDFium
+        run: .github/scripts/install-pdfium.sh
+
+      - name: Build CLI
+        run: cargo build --release -p openpdf-cli
+
+      - name: Download THIRD-PARTY-NOTICES
+        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
+        with:
+          name: third-party-notices
+          path: .
+
+      - name: Pack tar.gz
+        run: |
+          set -euo pipefail
+          ver="${GITHUB_REF_NAME#v}"
+          arch="$(uname -m)"
+          case "$arch" in
+            arm64) arch=arm64 ;;
+            x86_64) arch=x64 ;;
+          esac
+          stage="dist/openpdf-${ver}-macos-${arch}"
+          mkdir -p "$stage"
+          cp target/release/openpdf "$stage/"
+          cp "$PDFIUM_LIB" "$stage/libpdfium.dylib"
+          cp THIRD-PARTY-NOTICES "$stage/THIRD-PARTY-NOTICES"
+          tar -C dist -czf "${stage}.tar.gz" "$(basename "$stage")"
+
+      - name: Check notices are in the tar.gz
+        run: packaging/check-notices.sh tar dist/openpdf-*-macos-*.tar.gz
+
+      - uses: actions/attest-build-provenance@e8998f949152b193b063cb0ec769d69d929409be # v2.4.0
+        with:
+          subject-path: dist/openpdf-*-macos-*.tar.gz
+
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: release-macos-cli-${{ matrix.os }}
+          path: dist/openpdf-*-macos-*.tar.gz
+          if-no-files-found: error
+
+  publish:
+    name: GitHub release
+    needs: [guard, linux-flatpak, linux-appimage, windows-cli, macos-cli]
+    runs-on: ubuntu-latest
+    # Protected environment: required reviewers / tag rules and any signing
+    # secrets live here, never at repo level.
+    environment: release
+    permissions:
+      contents: write
+      id-token: write
+      attestations: write
+    steps:
+      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
+        with:
+          pattern: release-*
+          path: artifacts
+          merge-multiple: true
+
+      - name: Generate SHA256SUMS
+        run: |
+          set -euo pipefail
+          mkdir -p out
+          find artifacts -type f \( -name '*.flatpak' -o -name '*.AppImage' -o -name '*.zip' -o -name '*.tar.gz' \) -print | sort | while read -r f; do
+            cp "$f" "out/$(basename "$f")"
+          done
+          cd out
+          sha256sum * > SHA256SUMS
+          cat SHA256SUMS
+
+      - uses: actions/attest-build-provenance@e8998f949152b193b063cb0ec769d69d929409be # v2.4.0
+        with:
+          subject-path: out/*
+
+      - name: Create GitHub release
+        uses: softprops/action-gh-release@3bb12739c298aeb8a4eeaf626c5b8d85266b0e65 # v2.6.2
+        with:
+          files: out/*
+          generate_release_notes: true
+          fail_on_unmatched_files: true
