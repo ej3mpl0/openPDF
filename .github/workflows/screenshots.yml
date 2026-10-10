@@ -1,0 +1,104 @@
+name: Screenshots
+
+on:
+  pull_request:
+    types: [opened, synchronize, reopened, labeled]
+  workflow_dispatch:
+
+concurrency:
+  group: screenshots-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+jobs:
+  screenshots-macos:
+    name: screenshots-macos
+    runs-on: macos-latest
+    if: >
+      github.event_name == 'workflow_dispatch' ||
+      contains(github.event.pull_request.labels.*.name, 'ci:full')
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+        with:
+          persist-credentials: false
+
+      - name: Install Rust
+        run: rustup toolchain install stable --profile minimal --no-self-update
+
+      - name: Install PDFium
+        run: |
+          set -euo pipefail
+          curl -fsSL -o /tmp/pdfium.tgz \
+            "https://github.com/bblanchon/pdfium-binaries/releases/download/chromium%2F8035/pdfium-mac-arm64.tgz"
+          mkdir -p "$HOME/pdfium"
+          tar -xzf /tmp/pdfium.tgz -C "$HOME/pdfium"
+          if [ -f "$HOME/pdfium/lib/libpdfium.dylib" ]; then
+            echo "OPENPDF_PDFIUM=$HOME/pdfium/lib/libpdfium.dylib" >> "$GITHUB_ENV"
+          else
+            echo "OPENPDF_PDFIUM=$HOME/pdfium/bin/libpdfium.dylib" >> "$GITHUB_ENV"
+          fi
+
+      - name: Build openpdf-macos
+        run: |
+          set -euo pipefail
+          chmod +x apps/macos/build.sh
+          ./apps/macos/build.sh
+
+      - name: Launch, open corpus PDF, capture EN and ES
+        run: |
+          set -euo pipefail
+          PDF="${GITHUB_WORKSPACE}/corpus/hello.pdf"
+          test -f "$PDF"
+          BIN="$(cd apps/macos && swift build -c release --show-bin-path)/openpdf-macos"
+          test -x "$BIN"
+          mkdir -p "${GITHUB_WORKSPACE}/screenshots"
+
+          capture() {
+            local lang="$1"
+            local dest="$2"
+            export LANGUAGE="$lang"
+            if [ "$lang" = "es" ]; then
+              export LANG=es_ES.UTF-8 LC_ALL=es_ES.UTF-8 LC_MESSAGES=es_ES.UTF-8
+            else
+              export LANG=en_US.UTF-8 LC_ALL=en_US.UTF-8 LC_MESSAGES=en_US.UTF-8
+            fi
+            export OPENPDF_PDFIUM="${OPENPDF_PDFIUM}"
+            export OPENPDF_CORPUS="${GITHUB_WORKSPACE}/corpus"
+            "$BIN" "$PDF" &
+            local pid=$!
+            local i
+            for i in 1 2 3 4 5 6 7 8 9 10; do
+              if ! kill -0 "$pid" 2>/dev/null; then
+                wait "$pid" || true
+                echo "openpdf-macos exited before capture (lang=$lang, attempt=$i)"
+                echo "WindowServer / screencapture cannot photograph an app that is not running."
+                exit 1
+              fi
+              sleep 2
+            done
+            if ! screencapture -x -t png "$dest"; then
+              echo "screencapture failed (lang=$lang). This runner may lack a WindowServer session."
+              kill "$pid" 2>/dev/null || true
+              exit 1
+            fi
+            kill "$pid" 2>/dev/null || true
+            wait "$pid" 2>/dev/null || true
+            local bytes
+            bytes="$(stat -f%z "$dest" 2>/dev/null || stat -c%s "$dest")"
+            if [ "$bytes" -lt 10000 ]; then
+              echo "screenshot $dest is ${bytes} bytes — too small to be a real window capture"
+              exit 1
+            fi
+            file "$dest"
+          }
+
+          capture en "${GITHUB_WORKSPACE}/screenshots/macos-en.png"
+          capture es "${GITHUB_WORKSPACE}/screenshots/macos-es.png"
+
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: screenshots-macos
+          path: screenshots/
+          if-no-files-found: error

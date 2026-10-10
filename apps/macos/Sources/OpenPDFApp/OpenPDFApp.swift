@@ -29,6 +29,13 @@ struct OpenPDFApp: App {
         WindowGroup {
             ContentView(model: model)
                 .frame(minWidth: 720, minHeight: 480)
+                .onAppear {
+                    if let pdf = CommandLine.arguments.dropFirst().first(where: {
+                        $0.lowercased().hasSuffix(".pdf")
+                    }) {
+                        model.open(path: pdf)
+                    }
+                }
         }
         .commands {
             CommandGroup(replacing: .newItem) {
