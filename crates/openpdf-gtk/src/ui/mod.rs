@@ -3,6 +3,7 @@ mod about;
 mod home;
 mod preferences;
 mod sign;
+mod verify;
 mod viewer;
 mod window;
 
@@ -416,6 +417,14 @@ const CSS: &str = r#"
   background: alpha(@accent_bg_color, 0.15);
   color: @window_fg_color;
   font-size: 0.9em;
+}
+
+.verify-invalid {
+  color: @error_color;
+}
+
+.verify-ok {
+  color: @success_color;
 }
 "#;
 
