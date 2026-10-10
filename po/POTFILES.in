@@ -10,3 +10,17 @@ crates/openpdf-cli/src/main.rs
 crates/openpdf-sign/src/token.rs
 crates/openpdf-sign/src/pades.rs
 crates/openpdf-cli/src/tools.rs
+crates/openpdf-gtk/src/i18n.rs
+crates/openpdf-gtk/src/pin.rs
+crates/openpdf-gtk/src/sign.rs
+crates/openpdf-gtk/src/backend.rs
+crates/openpdf-gtk/src/session.rs
+crates/openpdf-gtk/src/ui/about.rs
+crates/openpdf-gtk/src/ui/home.rs
+crates/openpdf-gtk/src/ui/preferences.rs
+crates/openpdf-gtk/src/ui/sign.rs
+crates/openpdf-gtk/src/ui/viewer.rs
+crates/openpdf-gtk/src/ui/window.rs
+crates/openpdf-app/src/main.rs
+data/io.github.ej3mpl0.openpdf.desktop
+data/io.github.ej3mpl0.openpdf.metainfo.xml
