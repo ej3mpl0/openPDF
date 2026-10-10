@@ -235,7 +235,7 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        variant: [plain, nodbuswait, minimal, fcwarm, nogl, default]
+        variant: [plain, nodbuswait, minimal, fcwarm, nogl, default, default-nodri3, default-wayland]
         shard: [1, 2, 3]
     defaults:
       run:
@@ -286,6 +286,17 @@ jobs:
             default)
               echo "OPENPDF_NO_GSK_CAIRO=1" >> "$GITHUB_ENV"
               allow="GDK_BACKEND=x11" ;;
+            # default-nodri3: default under Xvfb with Mesa's DRI3 path off (Xvfb lacks DRI3).
+            default-nodri3)
+              echo "OPENPDF_NO_GSK_CAIRO=1" >> "$GITHUB_ENV"
+              echo "LIBGL_DRI3_DISABLE=1" >> "$GITHUB_ENV"
+              allow="GDK_BACKEND=x11 LIBGL_DRI3_DISABLE=1" ;;
+            # default-wayland: GTK-chosen renderer on weston headless (GL via llvmpipe). Crash GATE.
+            # WAYLAND_DISPLAY/GDK_BACKEND are set only inside the measure steps; DISPLAY is unset there.
+            default-wayland)
+              echo "OPENPDF_NO_GSK_CAIRO=1" >> "$GITHUB_ENV"
+              echo "OPENPDF_WAYLAND=1" >> "$GITHUB_ENV"
+              allow="GDK_BACKEND=wayland WAYLAND_DISPLAY=wayland-ci" ;;
             nodbuswait)
               echo "OPENPDF_MEASURE_WRAP=dbus-run-session --" >> "$GITHUB_ENV"
               echo "GTK_A11Y=none" >> "$GITHUB_ENV"
@@ -324,7 +335,7 @@ jobs:
           sudo apt-get update
           sudo apt-get install -y --no-install-recommends \
             libgtk-4-dev libadwaita-1-dev pkg-config librsvg2-common adwaita-icon-theme \
-            xvfb xauth dbus dbus-daemon strace fontconfig mesa-utils
+            xvfb xauth dbus dbus-daemon strace fontconfig mesa-utils gdb weston
           echo "GTK version: $(pkg-config --modversion gtk4)" | tee -a "$GITHUB_STEP_SUMMARY"
 
       - name: GL renderer (glxinfo -B under the same xvfb)
@@ -334,6 +345,25 @@ jobs:
           MESA_SHADER_CACHE_DISABLE=true xvfb-run -a --server-args="-screen 0 1280x800x24" glxinfo -B | tee glxinfo.txt || true
           gl=$(sed -n 's/^ *OpenGL renderer string: *//p' glxinfo.txt | head -1)
           echo "GL_RENDERER=${gl:-unknown}"
+          echo "gl_renderer=$(echo "${gl:-unknown}" | tr ' ' '_')" > cold/$TAG.gl
+
+      # default-wayland: weston headless with the GL renderer, so clients get EGL (llvmpipe).
+      - name: Start weston headless (default-wayland only)
+        if: steps.gui.outputs.skip == 'false' && matrix.variant == 'default-wayland'
+        run: |
+          weston --version | tee -a "$GITHUB_STEP_SUMMARY"
+          if [ -z "${XDG_RUNTIME_DIR:-}" ]; then echo "::error::XDG_RUNTIME_DIR unset on runner"; exit 1; fi
+          maj=$(weston --version | grep -oE '[0-9]+' | head -1)
+          if [ "${maj:-0}" -ge 13 ]; then gl="--renderer=gl"; else gl="--use-gl"; fi
+          echo "weston major=$maj gl flag=$gl"
+          nohup weston --backend=headless $gl --width=1280 --height=800 --socket=wayland-ci \
+            --idle-time=0 > weston.log 2>&1 &
+          for i in $(seq 50); do [ -S "$XDG_RUNTIME_DIR/wayland-ci" ] && break; sleep 0.2; done
+          cat weston.log
+          [ -S "$XDG_RUNTIME_DIR/wayland-ci" ] || { echo "::error::weston did not start"; exit 1; }
+          grep -iE 'renderer|EGL|GL_RENDERER|llvmpipe' weston.log | tee weston-gl.txt || true
+          gl=$(grep -oiE 'GL renderer: *.*' weston.log | head -1 | sed 's/^[^:]*: *//')
+          echo "GL_RENDERER(weston)=${gl:-unknown}"
           echo "gl_renderer=$(echo "${gl:-unknown}" | tr ' ' '_')" > cold/$TAG.gl
 
       # fcwarm: build the user fontconfig cache up front, as on a real desktop.
@@ -378,6 +408,8 @@ jobs:
             straced=1
           fi
           [ -n "${OPENPDF_NO_GSK_CAIRO:-}" ] && unset GSK_RENDERER
+          if [ -n "${OPENPDF_WAYLAND:-}" ]; then export GDK_BACKEND=wayland WAYLAND_DISPLAY=wayland-ci; unset DISPLAY; fi
+          export GDB_BASE_WRAP="${OPENPDF_MEASURE_WRAP:-}"
           export OPENPDF_MEASURE_WRAP="$wrap $PWD/.github/scripts/env-dump.sh"
           echo "variant=${{ matrix.variant }} wrap='$OPENPDF_MEASURE_WRAP'"
           set +e
@@ -385,6 +417,8 @@ jobs:
             --out "cold/$TAG.txt" 2>&1 | tee measure-1.log; rc=${PIPESTATUS[0]}
           set -e
           mkdir -p crash; cp measure-1.log crash/; echo "$rc" > crash/first.rc
+          echo "exit_code=$rc" >> "cold/$TAG.txt"
+          .github/scripts/gdb-on-signal.sh "$rc" first
           g=$(grep -o 'gsk_renderer=[^ ]*' measure-1.log | tail -1 || true); echo "${g:-gsk_renderer=not_printed}" | tee -a "cold/$TAG.txt"
           [ "$rc" = 0 ] || exit "$rc"
           printf 'variant=%s\nstraced=%s\n' "${{ matrix.variant }}" "$straced" >> "cold/$TAG.txt"
@@ -425,6 +459,8 @@ jobs:
             straced=1
           fi
           [ -n "${OPENPDF_NO_GSK_CAIRO:-}" ] && unset GSK_RENDERER
+          if [ -n "${OPENPDF_WAYLAND:-}" ]; then export GDK_BACKEND=wayland WAYLAND_DISPLAY=wayland-ci; unset DISPLAY; fi
+          export GDB_BASE_WRAP="${OPENPDF_MEASURE_WRAP:-}"
           export OPENPDF_MEASURE_WRAP="$wrap $PWD/.github/scripts/env-dump.sh"
           echo "wrap='$OPENPDF_MEASURE_WRAP'"
           set +e
@@ -432,6 +468,8 @@ jobs:
             --out "cold/$TAG.second" 2>&1 | tee measure-2.log; rc=${PIPESTATUS[0]}
           set -e
           mkdir -p crash; cp measure-2.log crash/; echo "$rc" > crash/second.rc
+          echo "exit_code=$rc" >> "cold/$TAG.second"
+          .github/scripts/gdb-on-signal.sh "$rc" second
           g=$(grep -o 'gsk_renderer=[^ ]*' measure-2.log | tail -1 || true); echo "${g:-gsk_renderer=not_printed}" | tee -a "cold/$TAG.second"
           printf 'straced=%s\n' "$straced" >> "cold/$TAG.second"
           if [ "$straced" = 1 ]; then
@@ -476,9 +514,9 @@ jobs:
           path: envs/
           if-no-files-found: warn
 
-      # Launch logs + exit codes for the default-renderer crash gate (cold-start-default-crash).
+      # Launch logs, exit codes, gdb backtraces for the crash gate (cold-start-default-crash).
       - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
-        if: always() && matrix.variant == 'default' && steps.gui.outputs.skip == 'false'
+        if: always() && startsWith(matrix.variant, 'default') && steps.gui.outputs.skip == 'false'
         with:
           name: crash-${{ env.TAG }}
           path: crash/
@@ -543,7 +581,10 @@ jobs:
           pattern: crash-default-*
           path: crash
 
-      - name: Exit code 0 and no Gsk:ERROR / Gsk-CRITICAL / Gdk-CRITICAL
+      # Gate: default-wayland (and default-nodri3) must exit 0, log no Gsk:ERROR/CRITICAL,
+      # and must print a non-cairo gsk_renderer (else it did not exercise GL).
+      # Plain Xvfb `default` is informational only: Xvfb lacks DRI3.
+      - name: default-wayland / default-nodri3 exit 0, no CRITICAL, GL renderer; default informational
         run: |
           shopt -s nullglob
           dirs=(crash/crash-default-*)
@@ -551,21 +592,29 @@ jobs:
             if [ "${{ needs.cold-start.result }}" = skipped ]; then echo "::notice::cold-start skipped"; exit 0; fi
             echo "::warning::no crash-default-* artifacts (GUI not built on this branch?)"; exit 0
           fi
-          rc=0
+          rc=0; seen_wl=0
           for d in "${dirs[@]}"; do
-            t=${d#crash/crash-}
+            t=${d#crash/crash-}; v=${t%-*}
+            case "$v" in default-wayland|default-nodri3) gate=1; [ "$v" = default-wayland ] && seen_wl=1 ;; *) gate=0 ;; esac
             for l in first second; do
-              if [ ! -f "$d/$l.rc" ]; then echo "::error::$t $l launch: no exit code recorded"; rc=1; continue; fi
-              code=$(cat "$d/$l.rc")
               n=1; [ "$l" = second ] && n=2
-              log="$d/measure-$n.log"
-              if [ "$code" != 0 ]; then echo "::error::$t $l launch: exit code $code"; rc=1; fi
-              if [ -f "$log" ] && grep -nE 'Gsk:ERROR|Gsk-CRITICAL|Gdk-CRITICAL' "$log"; then
-                echo "::error::$t $l launch: $(grep -m1 -oE '(Gsk:ERROR|Gsk-CRITICAL|Gdk-CRITICAL).*' "$log" | cut -c1-200)"; rc=1
+              log="$d/measure-$n.log"; code=$(cat "$d/$l.rc" 2>/dev/null || echo missing)
+              why=""
+              [ "$code" = 0 ] || why="exit code $code"
+              if [ -f "$log" ] && grep -qE 'Gsk:ERROR|Gsk-CRITICAL|Gdk-CRITICAL' "$log"; then
+                why="$why; $(grep -m1 -oE '(Gsk:ERROR|Gsk-CRITICAL|Gdk-CRITICAL).*' "$log" | cut -c1-200)"
               fi
-              [ "$code" = 0 ] && ! grep -qE 'Gsk:ERROR|Gsk-CRITICAL|Gdk-CRITICAL' "$log" 2>/dev/null && echo "$t $l launch: ok"
+              g=$(grep -o 'gsk_renderer=[^ ]*' "$log" 2>/dev/null | tail -1)
+              if [ "$code" = 0 ] && { [ -z "$g" ] || echo "$g" | grep -qi cairo; }; then
+                why="$why; did not exercise GL (${g:-gsk_renderer not printed})"
+              fi
+              if [ -z "$why" ]; then echo "$t $l launch: ok ($g)"
+              elif [ $gate = 1 ]; then echo "::error::$t $l launch: ${why#; }"; rc=1
+              else echo "::notice::$t $l launch (informational, Xvfb lacks DRI3): ${why#; }"; fi
+              [ -f "$d/gdb-$l.txt" ] && echo "  gdb backtrace: artifact crash-$t/gdb-$l.txt"
             done
           done
+          [ $seen_wl = 1 ] || { echo "::error::no default-wayland artifacts"; rc=1; }
           exit $rc
 
   cold-start-summary:
@@ -585,7 +634,10 @@ jobs:
         run: |
           python3 - <<'PY2'
           import glob, os, statistics
-          variants = ["plain", "nodbuswait", "minimal", "fcwarm", "nogl", "default"]
+          variants = ["plain", "nodbuswait", "minimal", "fcwarm", "nogl", "default", "default-nodri3", "default-wayland"]
+          import re
+          def mine(v, ext):
+              return [f for f in sorted(glob.glob(f"cold/{v}-*{ext}")) if re.fullmatch(re.escape(v) + r"-\d+" + re.escape(ext), os.path.basename(f))]
           def kv(f):
               return dict(l.split("=", 1) for l in open(f).read().split() if "=" in l)
           out = ["## Cold start per variant (informational, fresh VM per job)", "",
@@ -594,7 +646,7 @@ jobs:
           skipped = 0
           for v in variants:
               first, clean, second = [], [], []
-              for f in sorted(glob.glob(f"cold/{v}-*.txt")):
+              for f in mine(v, ".txt"):
                   d = kv(f)
                   if d.get("skipped"):
                       skipped += 1; continue
@@ -609,13 +661,15 @@ jobs:
                       second.append(f"s{sh}={d2.get('cold_startup_ms', 'fail')}{'*' if d2.get('straced') == '1' else ''}")
               med = f"{statistics.median(clean):g}" if clean else "-"
               extra = []
-              for f in sorted(glob.glob(f"cold/{v}-*.txt")):
+              for f in mine(v, ".txt"):
                   sh = os.path.basename(f)[len(v) + 1:-4]
                   d = kv(f); g = f[:-4] + ".gl"
                   dg = kv(g) if os.path.exists(g) else {}
-                  extra.append(f"s{sh}:gl={dg.get('gl_renderer','?')},gsk={d.get('gsk_renderer','?')},mesa={dg.get('mesa_shader_cache','?')}")
+                  d2 = kv(f[:-4] + ".second") if os.path.exists(f[:-4] + ".second") else {}
+                  extra.append(f"s{sh}:gl={dg.get('gl_renderer','?')},gsk={d.get('gsk_renderer','?')},mesa={dg.get('mesa_shader_cache','?')},rss={d.get('peak_rss_mb','?')},exit={d.get('exit_code','?')}/{d2.get('exit_code','?')}")
               out.append(f"| {v} | {' '.join(first) or '-'} | {med} | {' '.join(second) or '-'} | {' '.join(extra)} |")
-          out += ["", "`*` = under strace (slower; not in the median). `default` = GTK-chosen renderer, informational only; the limit stays on cairo. `nogl` is diagnostic only."]
+          out += ["", "`*` = under strace (slower; not in the median). `default` = GTK-chosen renderer, informational only; the limit stays on cairo. `nogl` is diagnostic only.",
+                  "Crash gate: `default-wayland` (weston headless, GL) and `default-nodri3` gate; a crash in Xvfb `default` is informational (reason: Xvfb lacks DRI3)."]
           if skipped: out.append(f"{skipped} job(s) skipped (GUI placeholder).")
           text = "\n".join(out) + "\n"
           print(text)
