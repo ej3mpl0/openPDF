@@ -6,6 +6,7 @@ use crate::i18n::{tr, tr_args};
 /// Crate-wide error type. Variants are stable so the GTK UI can localize them
 /// itself; [`Display`] uses the shared gettext catalog.
 #[derive(Debug)]
+#[non_exhaustive]
 pub enum Error {
     Io(io::Error),
     Structure(String),
@@ -29,6 +30,7 @@ pub enum Error {
 
 /// User-facing invalid-input cases. Match this instead of parsing [`Display`].
 #[derive(Clone, Debug, PartialEq, Eq)]
+#[non_exhaustive]
 pub enum InvalidKind {
     CertIdRequired,
     RangeInverted {
@@ -41,6 +43,7 @@ pub enum InvalidKind {
         value: String,
     },
     DocumentNotBound,
+    TileOutOfRange,
     CropInverted,
     PasswordRequired,
     WrongPassword,
@@ -138,6 +141,7 @@ impl InvalidKind {
                 tr_args("not a page number: {value}", &[("value", value)])
             }
             InvalidKind::DocumentNotBound => tr("document is not bound to the render engine"),
+            InvalidKind::TileOutOfRange => tr("tile is outside the page"),
             InvalidKind::CropInverted => tr("crop box is inverted"),
             InvalidKind::PasswordRequired => tr("password is required"),
             InvalidKind::WrongPassword => tr("wrong password"),

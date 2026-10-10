@@ -67,6 +67,9 @@ msgstr ""
 msgid "document is not bound to the render engine"
 msgstr ""
 
+msgid "tile is outside the page"
+msgstr ""
+
 msgid "missing Catalog"
 msgstr ""
 
