@@ -139,12 +139,29 @@ pub fn init() {
 }
 
 pub fn detect_locale() -> String {
+    let language = nonempty_env("LANGUAGE");
+    let lc_all = nonempty_env("LC_ALL");
+    let lc_messages = nonempty_env("LC_MESSAGES");
+    let lang = nonempty_env("LANG");
+    // Windows / macOS often have no GNU locale vars; fall back to the OS locale.
+    if language.is_none() && lc_all.is_none() && lc_messages.is_none() && lang.is_none() {
+        if let Some(sys) = sys_locale::get_locale() {
+            return detect_locale_from(None, None, None, Some(sys.as_str()));
+        }
+    }
     detect_locale_from(
-        env::var("LANGUAGE").ok().as_deref(),
-        env::var("LC_ALL").ok().as_deref(),
-        env::var("LC_MESSAGES").ok().as_deref(),
-        env::var("LANG").ok().as_deref(),
+        language.as_deref(),
+        lc_all.as_deref(),
+        lc_messages.as_deref(),
+        lang.as_deref(),
     )
+}
+
+fn nonempty_env(key: &str) -> Option<String> {
+    env::var(key)
+        .ok()
+        .map(|s| s.trim().to_string())
+        .filter(|s| !s.is_empty())
 }
 
 fn detect_locale_from(
@@ -576,6 +593,12 @@ msgstr "HELLO"
             detect_locale_from(None, Some("es_ES.UTF-8"), None, None),
             "es_ES"
         );
+    }
+
+    #[test]
+    fn sys_locale_hyphen_tags_normalize() {
+        assert_eq!(detect_locale_from(None, None, None, Some("es-ES")), "es_ES");
+        assert_eq!(detect_locale_from(None, None, None, Some("en-US")), "en_US");
     }
 
     #[test]

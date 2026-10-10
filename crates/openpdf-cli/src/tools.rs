@@ -4,11 +4,11 @@ use std::path::{Path, PathBuf};
 use anyhow::{bail, Context, Result};
 use clap::{value_parser, Arg, ArgMatches, Command};
 use openpdf_core::{
-    apply_overlay, compare_pdfs, crop_pages, extract, images_to_pdf, insert_pages, ocr,
-    ocr_capability, optimize, parse_page_ranges, pdf_to_rasters, protect, raster_to_png, redact,
-    replace_pages, sanitize_metadata, tr, tr_args, unprotect, CropBox, Document, Engine,
-    OcrOptions, OptimizeOptions, Overlay, OverlayKind, PageRange, PdfPermissions, ProtectOptions,
-    RedactBox,
+    apply_overlay, compare_pdfs, crop_pages, default_ocr_engine, extract, images_to_pdf,
+    insert_pages, ocr, ocr_capability, ocr_install_hint, optimize, parse_page_ranges,
+    pdf_to_rasters, protect, raster_to_png, redact, replace_pages, sanitize_metadata, tr, tr_args,
+    unprotect, CropBox, Document, Engine, OcrOptions, OptimizeOptions, Overlay, OverlayKind,
+    PageRange, PdfPermissions, ProtectOptions, RedactBox,
 };
 
 use crate::{decorate, engine, path_arg};
@@ -193,13 +193,13 @@ pub fn register(cmd: Command, arguments: &'static str) -> Command {
     ))
     .subcommand(decorate(
         Command::new("ocr")
-            .about(tr("Add an invisible searchable text layer (Tesseract)"))
+            .about(tr("Add an invisible searchable text layer"))
             .arg(file_arg(arguments).required(false))
             .arg(
                 Arg::new("lang")
                     .long("lang")
                     .default_value("eng")
-                    .help(tr("Tesseract language (eng, spa, …)")),
+                    .help(tr("OCR language (eng, spa, …)")),
             )
             .arg(pages_arg())
             .arg(
@@ -490,7 +490,10 @@ fn ocr_cmd(m: &ArgMatches) -> Result<()> {
         if !cap.available {
             bail!(
                 "{}",
-                tr("OCR is unavailable (install tesseract-ocr or set OPENPDF_TESSERACT to the binary or libtesseract)")
+                tr_args(
+                    "OCR is unavailable ({hint})",
+                    &[("hint", &ocr_install_hint())]
+                )
             );
         }
         for lang in cap.languages {
@@ -512,7 +515,8 @@ fn ocr_cmd(m: &ArgMatches) -> Result<()> {
         pages: Vec::new(),
     };
     opts.pages = ranges_or_all(&doc, m.get_one::<String>("pages").map(String::as_str))?;
-    save_out(ocr(&engine, &doc, &opts)?, &output)
+    let ocr_eng = default_ocr_engine();
+    save_out(ocr(&engine, ocr_eng.as_ref(), &doc, &opts)?, &output)
 }
 
 fn redact_cmd(m: &ArgMatches) -> Result<()> {

@@ -4,7 +4,7 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::mpsc::{self, Receiver, RecvTimeoutError, Sender};
 use std::sync::{Arc, Mutex, OnceLock};
 use std::thread;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use pdfium_render::prelude::{PdfDocument, Pdfium};
 
@@ -84,6 +84,8 @@ enum WorkerCmd {
 struct WorkerHandle {
     cmd: Sender<WorkerCmd>,
     cache: Arc<Mutex<TileCache>>,
+    /// dlopen + FPDF_InitLibrary only (not worker spawn).
+    pdfium_load: Duration,
 }
 
 static WORKER: OnceLock<std::result::Result<WorkerHandle, String>> = OnceLock::new();
@@ -96,7 +98,9 @@ fn worker() -> Result<&'static WorkerHandle> {
 }
 
 fn start_worker(bundled: Option<&Path>) -> Result<WorkerHandle> {
+    let t_load = Instant::now();
     let pdfium = pdfium_bind::bind_pdfium(bundled)?;
+    let pdfium_load = t_load.elapsed();
     let (cmd_tx, cmd_rx) = mpsc::channel();
     let cache = Arc::new(Mutex::new(TileCache::new(DEFAULT_CACHE_BYTES)));
     let cache_thread = Arc::clone(&cache);
@@ -106,7 +110,11 @@ fn start_worker(bundled: Option<&Path>) -> Result<WorkerHandle> {
         .spawn(move || worker_loop(pdfium, cmd_rx, cache_thread))
         .map_err(|e| Error::pdfium(e.to_string()))?;
 
-    Ok(WorkerHandle { cmd: cmd_tx, cache })
+    Ok(WorkerHandle {
+        cmd: cmd_tx,
+        cache,
+        pdfium_load,
+    })
 }
 
 struct BoundDoc {
@@ -399,10 +407,24 @@ pub struct Engine {
 }
 
 impl Engine {
-    /// Bind PDFium from `OPENPDF_PDFIUM`, a bundled path, or the system library.
+    /// Bind PDFium from absolute paths only (`OPENPDF_PDFIUM`, next to the exe, system dirs).
     pub fn new() -> Result<Self> {
         worker()?;
         Self::register()
+    }
+
+    /// Milliseconds for dlopen + `FPDF_InitLibrary` on the shared worker.
+    /// `-1.0` if PDFium is unavailable.
+    pub fn pdfium_load_ms(&self) -> f64 {
+        match worker() {
+            Ok(h) => h.pdfium_load.as_secs_f64() * 1000.0,
+            Err(_) => -1.0,
+        }
+    }
+
+    /// Last tile/page buffer copy after PDFium render. See `pdfium::last_convert_ms`.
+    pub fn last_convert_ms(&self) -> f64 {
+        pdfium_bind::last_convert_ms()
     }
 
     /// First successful call wins; later engines share the same worker.

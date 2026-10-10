@@ -7,6 +7,7 @@ mod queue;
 
 pub use cache::TileCache;
 pub use engine::Engine;
+pub use pdfium::pdfium_library_name;
 
 use crate::document::DocumentId;
 

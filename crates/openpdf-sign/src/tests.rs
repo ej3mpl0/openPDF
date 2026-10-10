@@ -51,7 +51,7 @@ fn softhsm_module() -> Option<PathBuf> {
 fn require_softhsm() -> PathBuf {
     match softhsm_module() {
         Some(p) => p,
-        None if std::env::var_os("CI").is_some() => {
+        None if std::env::var_os("CI").is_some() && cfg!(target_os = "linux") => {
             panic!("SoftHSM2 is required in CI (apt install softhsm2)")
         }
         None => panic!("skip-not-soft: no libsofthsm2.so"),

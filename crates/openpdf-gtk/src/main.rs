@@ -8,7 +8,7 @@
 //! use openpdf_sign::{Pkcs11Config, Pkcs11Signer};
 //!
 //! fn main() {
-//!     openpdf_core::init_i18n();
+//!     openpdf_core::init();
 //!     let pin = /* GTK dialog implementing PinProvider */;
 //!     let signer: Box<dyn Signer> =
 //!         Box::new(Pkcs11Signer::new(Pkcs11Config::default(), pin)?);
