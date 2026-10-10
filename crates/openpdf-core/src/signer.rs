@@ -116,9 +116,30 @@ pub fn usage_label(usage: &CertificateUsage) -> String {
     }
 }
 
-/// One-line certificate description for a picker (translated).
-pub fn describe_certificate(info: &CertificateInfo) -> String {
-    let usages = if info.usage.is_empty() {
+/// Common Name from a Distinguished Name.
+///
+/// `O=AC DNIE,CN=María García (FIRMA),C=ES` → `María García (FIRMA)`.
+/// Slash-separated `/CN=...` forms are accepted. Falls back to `subject`.
+pub fn certificate_common_name(subject: &str) -> String {
+    for part in subject.split([',', '/']) {
+        let part = part.trim();
+        let rest = part
+            .strip_prefix("CN=")
+            .or_else(|| part.strip_prefix("cn="))
+            .or_else(|| part.strip_prefix("CN ="))
+            .or_else(|| part.strip_prefix("cn ="));
+        if let Some(cn) = rest {
+            let cn = cn.trim();
+            if !cn.is_empty() {
+                return cn.to_string();
+            }
+        }
+    }
+    subject.trim().to_string()
+}
+
+fn certificate_usage_text(info: &CertificateInfo) -> String {
+    if info.usage.is_empty() {
         tr("unspecified usage")
     } else {
         info.usage
@@ -126,20 +147,47 @@ pub fn describe_certificate(info: &CertificateInfo) -> String {
             .map(usage_label)
             .collect::<Vec<_>>()
             .join(", ")
-    };
-    let validity = match (&info.validity.not_before, &info.validity.not_after) {
+    }
+}
+
+fn certificate_validity_text(info: &CertificateInfo) -> String {
+    match (&info.validity.not_before, &info.validity.not_after) {
         (Some(a), Some(b)) => tr_args(
             "valid {not_before} to {not_after}",
             &[("not_before", a), ("not_after", b)],
         ),
         _ => tr("validity unknown"),
-    };
+    }
+}
+
+/// One-line certificate description for a picker (translated).
+///
+/// Uses the raw `subject` DN. For a picker row title use
+/// [`certificate_common_name`]; for the subtitle use
+/// [`describe_certificate_detail`] after formatting validity instants.
+pub fn describe_certificate(info: &CertificateInfo) -> String {
+    let usages = certificate_usage_text(info);
+    let validity = certificate_validity_text(info);
     tr_args(
         "{subject} — {usage} — {validity}",
         &[
             ("subject", &info.subject),
             ("usage", &usages),
             ("validity", &validity),
+        ],
+    )
+}
+
+/// Picker subtitle: usage and validity only (no raw DN).
+///
+/// Validity strings are used as stored. The UI should replace RFC 3339
+/// `…Z` values with a locale/local-time form before calling this.
+pub fn describe_certificate_detail(info: &CertificateInfo) -> String {
+    tr_args(
+        "{usage} — {validity}",
+        &[
+            ("usage", &certificate_usage_text(info)),
+            ("validity", &certificate_validity_text(info)),
         ],
     )
 }
@@ -523,6 +571,51 @@ mod tests {
             assert_ne!(
                 expected,
                 "CN=Test — Signing — valid 2020-01-01T00:00:00Z to 2030-01-01T00:00:00Z"
+            );
+        });
+    }
+
+    #[test]
+    fn certificate_common_name_peels_cn() {
+        assert_eq!(
+            certificate_common_name("O=AC DNIE,CN=María García (FIRMA),C=ES"),
+            "María García (FIRMA)"
+        );
+        assert_eq!(
+            certificate_common_name("CN=CITIZEN (SIGNING)"),
+            "CITIZEN (SIGNING)"
+        );
+        assert_eq!(
+            certificate_common_name("/C=ES/O=AC DNIE/CN=María García (FIRMA)"),
+            "María García (FIRMA)"
+        );
+        assert_eq!(certificate_common_name("no-cn-here"), "no-cn-here");
+    }
+
+    #[test]
+    fn describe_certificate_detail_omits_the_dn() {
+        let info = CertificateInfo {
+            id: "1".into(),
+            subject: "O=AC DNIE,CN=María García (FIRMA),C=ES".into(),
+            issuer: "CN=CA".into(),
+            validity: CertificateValidity {
+                not_before: Some("10/01/2020 01:00:00".into()),
+                not_after: Some("01/01/2030 01:00:00".into()),
+            },
+            usage: vec![CertificateUsage::Signing],
+        };
+        with_locale("en", || {
+            assert_eq!(
+                certificate_common_name(&info.subject),
+                "María García (FIRMA)"
+            );
+            assert_eq!(
+                describe_certificate_detail(&info),
+                "Signing — valid 10/01/2020 01:00:00 to 01/01/2030 01:00:00"
+            );
+            assert!(
+                !describe_certificate_detail(&info).contains("O=AC DNIE"),
+                "picker subtitle must not repeat the raw DN"
             );
         });
     }
