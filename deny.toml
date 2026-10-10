@@ -29,9 +29,13 @@ yanked = "deny"
 # Each ignore needs an owner/issue; remove as soon as it is fixed.
 ignore = [
   # rsa Marvin timing side channel; no patched release exists (latest rsa
-  # 0.9.10 / 0.10.0-rc still affected). openpdf-sign only uses rsa locally
-  # (software-key tests / verification), not as a network oracle.
-  { id = "RUSTSEC-2023-0071", reason = "no fix upstream; local-only use in openpdf-sign" },
+  # 0.9.10 / 0.10.0-rc still affected). Marvin only targets private-key
+  # operations (RSA decryption / signing timing). openpdf-sign uses rsa for
+  # public-key verification only: PAdES signatures and, since PAdES B-T (#39),
+  # RFC 3161 timestamp tokens received from the network. Verification touches
+  # no secret, so there is nothing to leak. Real signing happens on the token
+  # via PKCS#11; rsa private keys appear only in tests with public test keys.
+  { id = "RUSTSEC-2023-0071", reason = "no fix upstream; rsa is used only for public-key verification (incl. TSA tokens from the network); Marvin needs private-key operations" },
   # lopdf stack overflow on deeply nested objects; fix is lopdf >= 0.42, an
   # API-breaking bump of openpdf-core. TRACKED: must be fixed in its own PR.
   { id = "RUSTSEC-2026-0187", reason = "needs lopdf 0.36 -> 0.42 core upgrade, separate PR" },
