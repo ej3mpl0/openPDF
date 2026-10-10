@@ -137,6 +137,19 @@ pub trait Signer: Send + Sync {
     fn verify(&self, pdf: &[u8]) -> Result<Vec<SignatureInfo>>;
 }
 
+/// Token-less PDF signature verification. No PIN, token, or certificate list.
+///
+/// The application binary (not the GTK UI crate) implements this via
+/// `openpdf-sign` and hands `Box<dyn Verifier>` to the UI — the same injection
+/// pattern as [`Signer`]. GTK must not depend on `openpdf-sign`.
+///
+/// Per-signature failures stay inside [`SignatureInfo`] (`valid`, and
+/// `invalid_reason` when the backend provides it). [`Err`] is only for
+/// whole-document failures (unparseable PDF).
+pub trait Verifier: Send + Sync {
+    fn verify(&self, pdf: &[u8]) -> Result<Vec<SignatureInfo>>;
+}
+
 /// User-facing PIN prompt for a token (translated).
 pub fn pin_prompt_text(token_label: &str) -> String {
     tr_args("Enter PIN for token \"{token}\"", &[("token", token_label)])
@@ -521,6 +534,26 @@ mod tests {
             !src.contains("openpdf-sign"),
             "openpdf-gtk must depend only on openpdf-core"
         );
+    }
+
+    #[test]
+    fn verifier_is_object_safe_and_has_no_token() {
+        struct PdfOnly;
+        impl Verifier for PdfOnly {
+            fn verify(&self, pdf: &[u8]) -> Result<Vec<SignatureInfo>> {
+                if !pdf.starts_with(b"%PDF") {
+                    return Err(Error::structure("unparseable PDF"));
+                }
+                Ok(vec![SignatureInfo {
+                    valid: Some(false),
+                    ..Default::default()
+                }])
+            }
+        }
+        let v: std::sync::Arc<dyn Verifier> = std::sync::Arc::new(PdfOnly);
+        let infos = v.verify(b"%PDF-1.4").unwrap();
+        assert_eq!(infos[0].valid, Some(false));
+        assert!(v.verify(b"not-a-pdf").is_err());
     }
 
     #[test]
