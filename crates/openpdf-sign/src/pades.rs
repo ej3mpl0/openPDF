@@ -34,6 +34,7 @@ pub(crate) fn sign_incremental(
     tsa: Option<&Tsa>,
     mut make_cms: impl FnMut(&[u8]) -> Result<Vec<u8>>,
 ) -> Result<Vec<u8>> {
+    request.check_cancelled()?;
     let tsa = ensure_supported_level(request, tsa)?;
     let contents_len = if tsa.is_some() {
         CONTENTS_LEN_BT

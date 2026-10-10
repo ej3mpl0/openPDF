@@ -1,0 +1,666 @@
+// SPDX-License-Identifier: MPL-2.0
+use std::cell::{Cell, RefCell};
+use std::panic::{catch_unwind, AssertUnwindSafe};
+use std::path::Path;
+use std::rc::Rc;
+use std::sync::Arc;
+
+use crate::backend::MockDocument;
+use crate::i18n::{format_core_error, t};
+use crate::session::{sample_pdf_path, MockView, Opened, Session};
+use crate::settings::{self, Settings};
+use crate::sign::format_verify_results;
+use adw::prelude::*;
+use gtk::gio;
+use gtk::glib::{self, clone};
+use gtk4 as gtk;
+use libadwaita as adw;
+use openpdf_core::{tr_args, Engine, Signer, Verifier};
+
+use super::about;
+use super::home;
+use super::preferences;
+use super::show_toast;
+use super::sign as sign_ui;
+use super::viewer::{self, DocumentView};
+
+#[derive(Clone)]
+struct Ctx {
+    /// Created on the first document open, not at window construction, so the
+    /// first frame is not blocked on PDFium.
+    engine: Rc<RefCell<Option<Engine>>>,
+    signer: Arc<dyn Signer>,
+    verifier: Arc<dyn Verifier>,
+    window: adw::ApplicationWindow,
+    tab_view: adw::TabView,
+    toast: adw::ToastOverlay,
+    settings: Rc<RefCell<Settings>>,
+    current: Rc<RefCell<Option<Rc<DocumentView>>>>,
+    home_slot: gtk::Box,
+    home_filled: Rc<Cell<bool>>,
+    zoom_label: gtk::Label,
+    search_entry: gtk::SearchEntry,
+}
+
+#[derive(Clone)]
+pub struct OpenPdfWindow {
+    window: adw::ApplicationWindow,
+    ctx: Ctx,
+}
+
+impl OpenPdfWindow {
+    pub fn new(
+        app: &adw::Application,
+        settings: Settings,
+        signer: Arc<dyn Signer>,
+        verifier: Arc<dyn Verifier>,
+    ) -> Self {
+        let lang = settings.lang();
+        let settings = Rc::new(RefCell::new(settings));
+        let current = Rc::new(RefCell::new(None));
+        let engine = Rc::new(RefCell::new(None));
+
+        let window = adw::ApplicationWindow::new(app);
+        window.set_title(Some(t(lang, "openPDF")));
+        let measuring = super::chrome::measuring();
+        window.set_default_size(if measuring { 1100 } else { 1280 }, 800);
+
+        let toast = adw::ToastOverlay::new();
+        let tab_view = adw::TabView::new();
+        tab_view.set_vexpand(true);
+
+        let tab_bar = adw::TabBar::new();
+        tab_bar.set_view(Some(&tab_view));
+
+        let menu = app_menu(lang);
+        let tools = if measuring {
+            None
+        } else {
+            Some(super::chrome::tool_row(lang, &menu))
+        };
+        let zoom_label = tools
+            .as_ref()
+            .map(|t| t.zoom_label.clone())
+            .unwrap_or_else(|| gtk::Label::new(None));
+        let search_entry = tools
+            .as_ref()
+            .map(|t| t.search_entry.clone())
+            .unwrap_or_else(gtk::SearchEntry::new);
+        let settings_btn = tools.as_ref().map(|t| t.settings_btn.clone());
+
+        let toolbar = adw::ToolbarView::new();
+        if !measuring {
+            let tab_row = super::chrome::tab_row(&tab_bar, {
+                let app = app.clone();
+                move || app.activate_action("open", None)
+            });
+            toolbar.add_top_bar(&tab_row);
+        }
+        if let Some(tools) = &tools {
+            toolbar.add_top_bar(&tools.root);
+        }
+        toast.set_child(Some(&tab_view));
+        toolbar.set_content(Some(&toast));
+        window.set_content(Some(&toolbar));
+
+        let home_slot = gtk::Box::new(gtk::Orientation::Vertical, 0);
+        home_slot.set_vexpand(true);
+        let home_filled = Rc::new(Cell::new(false));
+
+        let ctx = Ctx {
+            engine,
+            signer,
+            verifier,
+            window: window.clone(),
+            tab_view: tab_view.clone(),
+            toast: toast.clone(),
+            settings: settings.clone(),
+            current: current.clone(),
+            home_slot: home_slot.clone(),
+            home_filled: home_filled.clone(),
+            zoom_label: zoom_label.clone(),
+            search_entry: search_entry.clone(),
+        };
+
+        install_actions(app, &ctx);
+
+        tab_view.connect_selected_page_notify({
+            let current = current.clone();
+            let window = window.clone();
+            move |tv| {
+                if let Some(page) = tv.selected_page() {
+                    window.set_title(Some(&page.title()));
+                    if page.is_pinned() {
+                        *current.borrow_mut() = None;
+                    }
+                }
+            }
+        });
+
+        tab_view.connect_close_page(|view, page| {
+            if page.is_pinned() {
+                view.close_page_finish(page, false);
+            } else {
+                view.close_page_finish(page, true);
+            }
+            true
+        });
+
+        crate::measure::note_idle_load_pending();
+        window.add_tick_callback(move |w, _| {
+            let w = w.clone();
+            let settings_btn = settings_btn.clone();
+            glib::idle_add_local_once(move || {
+                if !super::chrome::measuring() {
+                    super::register_deferred_icons();
+                    if let Some(btn) = settings_btn {
+                        btn.set_icon_name("preferences-system-symbolic");
+                    }
+                    w.set_icon_name(Some(crate::APP_ID));
+                }
+                crate::measure::note_idle_load_finished();
+            });
+            glib::ControlFlow::Break
+        });
+
+        Self { window, ctx }
+    }
+
+    /// Apply on-disk settings after `present()` so startup does not wait on
+    /// `~/.config` or recent-files reads. Restores the last document if asked.
+    pub fn hydrate_settings(&self) {
+        let loaded = settings::load();
+        loaded.apply_locale();
+        super::apply_theme(loaded.theme);
+        let restore = loaded.restore_last;
+        let last = loaded.recent.first().cloned();
+        *self.ctx.settings.borrow_mut() = loaded;
+        if let Some(view) = self.current_view() {
+            view.apply_zoom_settings(&self.ctx.settings.borrow());
+        }
+        if restore {
+            if let Some(last) = last {
+                let ctx = self.ctx.clone();
+                glib::idle_add_local_once(move || {
+                    open_path_inner(&ctx, Path::new(&last));
+                });
+            }
+        }
+    }
+
+    /// Build the home / recent / tools widgets on first idle (or first visit).
+    pub fn ensure_home(&self) {
+        if self.ctx.home_filled.replace(true) {
+            return;
+        }
+        let skip_tab = self.ctx.current.borrow().is_some();
+        let ctx = self.ctx.clone();
+        let home = home::build(
+            ctx.settings.clone(),
+            {
+                let ctx = ctx.clone();
+                move || open_file_dialog(&ctx)
+            },
+            {
+                let ctx = ctx.clone();
+                move || open_sample(&ctx)
+            },
+            {
+                let ctx = ctx.clone();
+                move |path| open_path_inner(&ctx, &path)
+            },
+            {
+                let ctx = ctx.clone();
+                move |msg| {
+                    if msg == t(ctx.settings.borrow().lang(), "Open sample document")
+                        || msg == t(crate::Lang::En, "Open sample document")
+                    {
+                        open_sample(&ctx);
+                    } else if msg.contains("Signer")
+                        || msg
+                            == t(
+                                ctx.settings.borrow().lang(),
+                                "Signing goes through openpdf-core’s Signer trait (openpdf-sign). This UI never links that crate.",
+                            )
+                    {
+                        start_sign(&ctx);
+                    } else {
+                        show_toast(&ctx.toast, msg);
+                    }
+                }
+            },
+        );
+        self.ctx.home_slot.append(&home.root);
+        if !skip_tab {
+            let page = self.ctx.tab_view.append(&self.ctx.home_slot);
+            page.set_title(t(self.ctx.settings.borrow().lang(), "openPDF"));
+        }
+    }
+
+    pub fn present(&self) {
+        self.window.present();
+    }
+
+    pub fn widget(&self) -> &adw::ApplicationWindow {
+        &self.window
+    }
+
+    pub fn open_path(&self, path: &Path) {
+        open_path_inner(&self.ctx, path);
+    }
+
+    pub fn current_view(&self) -> Option<Rc<DocumentView>> {
+        self.ctx.current.borrow().clone()
+    }
+}
+
+fn app_menu(lang: crate::Lang) -> gio::Menu {
+    let menu = gio::Menu::new();
+    menu.append(Some(t(lang, "Open…")), Some("app.open"));
+    menu.append(Some(t(lang, "Sign with certificate…")), Some("app.sign"));
+    menu.append(Some(t(lang, "Preferences")), Some("app.preferences"));
+    menu.append(Some(t(lang, "About openPDF")), Some("app.about"));
+    menu.append(Some(t(lang, "Quit")), Some("app.quit"));
+    menu
+}
+
+fn install_actions(app: &adw::Application, ctx: &Ctx) {
+    let open = gio::SimpleAction::new("open", None);
+    open.connect_activate({
+        let ctx = ctx.clone();
+        move |_, _| open_file_dialog(&ctx)
+    });
+    app.add_action(&open);
+
+    let sign = gio::SimpleAction::new("sign", None);
+    sign.connect_activate({
+        let ctx = ctx.clone();
+        move |_, _| start_sign(&ctx)
+    });
+    app.add_action(&sign);
+
+    let prefs = gio::SimpleAction::new("preferences", None);
+    prefs.connect_activate({
+        let ctx = ctx.clone();
+        move |_, _| preferences::present(&ctx.window, ctx.settings.clone())
+    });
+    app.add_action(&prefs);
+
+    let about_a = gio::SimpleAction::new("about", None);
+    about_a.connect_activate({
+        let ctx = ctx.clone();
+        move |_, _| about::present(&ctx.window, ctx.settings.borrow().lang())
+    });
+    app.add_action(&about_a);
+
+    let quit = gio::SimpleAction::new("quit", None);
+    quit.connect_activate(clone!(@weak app => move |_, _| app.quit()));
+    app.add_action(&quit);
+
+    add_win_action(&ctx.window, "zoom-in", ctx, |v| v.zoom_in());
+    add_win_action(&ctx.window, "zoom-out", ctx, |v| v.zoom_out());
+    add_win_action(&ctx.window, "toggle-sidebar", ctx, |v| v.toggle_sidebar());
+    let find = gio::SimpleAction::new("find", None);
+    find.connect_activate({
+        let search = ctx.search_entry.clone();
+        let current = ctx.current.clone();
+        move |_, _| {
+            search.grab_focus();
+            if let Some(v) = current.borrow().as_ref() {
+                v.reveal_find();
+            }
+        }
+    });
+    ctx.window.add_action(&find);
+    add_win_action(&ctx.window, "next-page", ctx, |v| v.next_page());
+    add_win_action(&ctx.window, "prev-page", ctx, |v| v.prev_page());
+    add_win_action(&ctx.window, "rotate", ctx, |v| {
+        let _ = v.rotate_current(90);
+    });
+    add_win_action(&ctx.window, "undo", ctx, |v| {
+        let _ = v.undo();
+    });
+    add_win_action(&ctx.window, "redo", ctx, |v| {
+        let _ = v.redo();
+    });
+}
+
+fn add_win_action(
+    window: &adw::ApplicationWindow,
+    name: &str,
+    ctx: &Ctx,
+    f: impl Fn(&DocumentView) + 'static,
+) {
+    let action = gio::SimpleAction::new(name, None);
+    let current = ctx.current.clone();
+    action.connect_activate(move |_, _| {
+        if let Some(v) = current.borrow().as_ref() {
+            f(v);
+        }
+    });
+    window.add_action(&action);
+}
+
+fn open_file_dialog(ctx: &Ctx) {
+    let lang = ctx.settings.borrow().lang();
+    let dialog = gtk::FileDialog::builder()
+        .title(t(lang, "Open PDF"))
+        .modal(true)
+        .build();
+    let filter = gtk::FileFilter::new();
+    filter.set_name(Some(t(lang, "PDF documents")));
+    filter.add_mime_type("application/pdf");
+    filter.add_suffix("pdf");
+    let filters = gio::ListStore::new::<gtk::FileFilter>();
+    filters.append(&filter);
+    dialog.set_filters(Some(&filters));
+    dialog.set_default_filter(Some(&filter));
+
+    let ctx = ctx.clone();
+    glib::spawn_future_local(async move {
+        match dialog.open_future(Some(&ctx.window)).await {
+            Ok(file) => {
+                if let Some(path) = file.path() {
+                    open_path_inner(&ctx, &path);
+                }
+            }
+            Err(_) => {}
+        }
+    });
+}
+
+fn open_sample(ctx: &Ctx) {
+    if let Some(path) = sample_pdf_path() {
+        open_path_inner(ctx, &path);
+        return;
+    }
+    add_opened(ctx, Opened::Mock(MockView::new(MockDocument::sample(16))));
+}
+
+fn ensure_engine(ctx: &Ctx) -> Option<Engine> {
+    let mut slot = ctx.engine.borrow_mut();
+    if slot.is_none() {
+        *slot = Engine::new().ok();
+    }
+    slot.clone()
+}
+
+fn open_path_inner(ctx: &Ctx, path: &Path) {
+    crate::measure::mark_doc_load_start();
+    let opened = if let Some(engine) = ensure_engine(ctx) {
+        match Session::open(&engine, path) {
+            Ok(session) => Opened::Core(session),
+            Err(e) => {
+                show_toast(&ctx.toast, &e.to_string());
+                return;
+            }
+        }
+    } else {
+        match MockDocument::open(path) {
+            Ok(doc) => Opened::Mock(MockView::new(doc)),
+            Err(e) => {
+                show_toast(&ctx.toast, &e.to_string());
+                return;
+            }
+        }
+    };
+    crate::measure::mark_doc_loaded();
+    {
+        let settings = ctx.settings.borrow();
+        opened.prefetch_first_tile(settings.zoom_factor(), settings.tile_size);
+    }
+    ctx.settings.borrow_mut().push_recent(path);
+    let settings = ctx.settings.clone();
+    glib::idle_add_local_once(move || {
+        let _ = settings::save(&settings.borrow());
+    });
+    add_opened(ctx, opened);
+}
+
+fn add_opened(ctx: &Ctx, opened: Opened) {
+    let lang = ctx.settings.borrow().lang();
+    let locked = opened.is_locked();
+    let placeholder = opened.is_placeholder();
+    let view = viewer::build(
+        Rc::new(opened),
+        &ctx.settings.borrow(),
+        lang,
+        ctx.zoom_label.clone(),
+        ctx.search_entry.clone(),
+    );
+    let page = ctx.tab_view.append(view.widget());
+    page.set_title(&view.title());
+    if let Some(path) = view.path() {
+        page.set_tooltip(&path.to_string_lossy());
+    }
+    ctx.tab_view.set_selected_page(&page);
+    *ctx.current.borrow_mut() = Some(view.clone());
+    view.request_first_tile();
+    if locked {
+        show_toast(
+            &ctx.toast,
+            t(
+                lang,
+                "Signed document — read-only. Rotate, delete and reorder are disabled.",
+            ),
+        );
+        maybe_show_verify(&ctx.toast, ctx.verifier.clone(), view.opened(), lang);
+    } else if placeholder {
+        show_toast(
+            &ctx.toast,
+            t(
+                lang,
+                "Preview uses a placeholder renderer because PDFium is not available.",
+            ),
+        );
+    }
+}
+
+fn maybe_show_verify(
+    overlay: &adw::ToastOverlay,
+    verifier: Arc<dyn Verifier>,
+    opened: &Opened,
+    lang: crate::Lang,
+) {
+    let bytes = match opened.original_bytes() {
+        Ok(bytes) => bytes,
+        Err(e) => {
+            show_toast(overlay, &e.to_string());
+            return;
+        }
+    };
+    let overlay = overlay.clone();
+    let (tx, rx) = std::sync::mpsc::channel();
+    std::thread::spawn(move || {
+        let _ = tx.send(verifier.verify(&bytes));
+    });
+    glib::timeout_add_local(std::time::Duration::from_millis(16), move || {
+        match rx.try_recv() {
+            Ok(Ok(infos)) if !infos.is_empty() => {
+                show_toast(&overlay, &format_verify_results(&infos));
+                glib::ControlFlow::Break
+            }
+            Ok(Ok(_)) => glib::ControlFlow::Break,
+            Ok(Err(e)) => {
+                show_toast(&overlay, &format_core_error(&e));
+                glib::ControlFlow::Break
+            }
+            Err(std::sync::mpsc::TryRecvError::Empty) => glib::ControlFlow::Continue,
+            Err(std::sync::mpsc::TryRecvError::Disconnected) => {
+                show_toast(&overlay, t(lang, "Verification failed"));
+                glib::ControlFlow::Break
+            }
+        }
+    });
+}
+
+fn start_sign(ctx: &Ctx) {
+    let lang = ctx.settings.borrow().lang();
+    let Some(view) = ctx.current.borrow().clone() else {
+        show_toast(&ctx.toast, t(lang, "Open a PDF before signing."));
+        return;
+    };
+    let signer = ctx.signer.clone();
+    let verifier = ctx.verifier.clone();
+    let overlay = ctx.toast.clone();
+    let window = ctx.window.clone();
+    let tab_view = ctx.tab_view.clone();
+    sign_ui::present_picker(&ctx.window, &ctx.toast, lang, signer.clone(), move |req| {
+        sign_on_worker(
+            &window,
+            &overlay,
+            &tab_view,
+            lang,
+            view.clone(),
+            signer.clone(),
+            verifier.clone(),
+            req,
+        );
+    });
+}
+
+/// `C_Sign` / `Signer::sign` (and the PIN dialog it may invoke) stay off the
+/// GTK thread. The UI shows a spinner with Cancel and applies the signed
+/// bytes only after the worker returns.
+fn sign_on_worker(
+    parent: &adw::ApplicationWindow,
+    overlay: &adw::ToastOverlay,
+    tab_view: &adw::TabView,
+    lang: crate::Lang,
+    view: Rc<DocumentView>,
+    signer: Arc<dyn Signer>,
+    verifier: Arc<dyn Verifier>,
+    req: openpdf_core::SignRequest,
+) {
+    if view.opened().is_placeholder() {
+        view.opened().lock_after_sign();
+        view.refresh_lock_chrome();
+        show_toast(
+            overlay,
+            t(
+                lang,
+                "Signed document — read-only. Rotate, delete and reorder are disabled.",
+            ),
+        );
+        return;
+    }
+    let bytes = match view.opened().bytes_for_sign() {
+        Ok(bytes) => bytes,
+        Err(e) => {
+            show_toast(overlay, &e.to_string());
+            return;
+        }
+    };
+
+    let win = adw::Window::new();
+    win.set_transient_for(Some(parent));
+    win.set_modal(true);
+    win.set_default_size(360, 200);
+    win.set_title(Some(t(lang, "Signing…")));
+
+    let header = adw::HeaderBar::new();
+    let toolbar = adw::ToolbarView::new();
+    toolbar.add_top_bar(&header);
+    let spinner = gtk::Spinner::new();
+    spinner.start();
+    let status = adw::StatusPage::new();
+    status.set_icon_name(Some("dialog-password-symbolic"));
+    status.set_title(t(lang, "Signing…"));
+    status.set_description(Some(t(
+        lang,
+        "Choose a signing certificate. The token will ask for the PIN if needed.",
+    )));
+    status.set_child(Some(&spinner));
+    toolbar.set_content(Some(&status));
+    win.set_content(Some(&toolbar));
+
+    let token = req.cancel.clone().unwrap_or_default();
+    let cancel = gtk::Button::with_label(t(lang, "Cancel"));
+    cancel.add_css_class("flat");
+    header.pack_start(&cancel);
+    cancel.connect_clicked({
+        let win = win.clone();
+        let token = token.clone();
+        move |_| {
+            token.cancel();
+            win.close();
+        }
+    });
+    win.connect_close_request({
+        let token = token.clone();
+        move |_| {
+            token.cancel();
+            gtk::glib::Propagation::Proceed
+        }
+    });
+    win.present();
+
+    let (tx, rx) = std::sync::mpsc::channel();
+    std::thread::spawn(move || {
+        let result = catch_unwind(AssertUnwindSafe(|| signer.sign(&bytes, &req)));
+        let _ = tx.send(result);
+    });
+
+    let overlay = overlay.clone();
+    let tab_view = tab_view.clone();
+    glib::timeout_add_local(std::time::Duration::from_millis(16), move || {
+        match rx.try_recv() {
+            Ok(Ok(Ok(signed))) => {
+                win.close();
+                if token.is_cancelled() {
+                    return glib::ControlFlow::Break;
+                }
+                match view.opened().persist_signed(signed) {
+                    Ok(dest) => {
+                        view.refresh_lock_chrome();
+                        view.ensure_laid_out();
+                        view.request_first_tile();
+                        if let Some(page) = tab_view.selected_page() {
+                            page.set_title(&view.title());
+                            page.set_tooltip(&dest.to_string_lossy());
+                        }
+                        show_toast(
+                            &overlay,
+                            &tr_args(
+                                "Saved signed PDF to {path}",
+                                &[("path", &dest.display().to_string())],
+                            ),
+                        );
+                        show_toast(
+                            &overlay,
+                            t(
+                                lang,
+                                "Signed document — read-only. Rotate, delete and reorder are disabled.",
+                            ),
+                        );
+                        maybe_show_verify(&overlay, verifier.clone(), view.opened(), lang);
+                    }
+                    Err(e) => show_toast(&overlay, &e.to_string()),
+                }
+                glib::ControlFlow::Break
+            }
+            Ok(Ok(Err(e))) => {
+                win.close();
+                if !token.is_cancelled() && !e.is_silent_cancel() {
+                    show_toast(&overlay, &format_core_error(&e));
+                }
+                glib::ControlFlow::Break
+            }
+            Ok(Err(_)) => {
+                win.close();
+                if !token.is_cancelled() {
+                    show_toast(&overlay, t(lang, "Signing failed"));
+                }
+                glib::ControlFlow::Break
+            }
+            Err(std::sync::mpsc::TryRecvError::Empty) => glib::ControlFlow::Continue,
+            Err(std::sync::mpsc::TryRecvError::Disconnected) => {
+                win.close();
+                if !token.is_cancelled() {
+                    show_toast(&overlay, t(lang, "Signing failed"));
+                }
+                glib::ControlFlow::Break
+            }
+        }
+    });
+}

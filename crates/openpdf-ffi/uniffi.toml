@@ -1,0 +1,6 @@
+[bindings.swift]
+cdylib_name = "openpdf_ffi"
+
+[bindings.csharp]
+cdylib_name = "openpdf_ffi"
+namespace = "OpenPdf"
