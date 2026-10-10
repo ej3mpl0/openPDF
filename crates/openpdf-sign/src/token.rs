@@ -70,6 +70,9 @@ pub struct Pkcs11Config {
     pub module_path: Option<PathBuf>,
 }
 
+/// Environment variable naming the one PKCS#11 module to load. Must be an absolute path.
+pub const PKCS11_MODULE_ENV: &str = "OPENPDF_PKCS11_MODULE";
+
 impl Pkcs11Config {
     pub fn with_module(path: impl Into<PathBuf>) -> Self {
         Self {
@@ -114,7 +117,7 @@ impl Pkcs11Signer {
 
 impl Pkcs11Backend {
     pub(crate) fn new(config: Pkcs11Config, pin: Arc<dyn PinProvider>) -> Result<Self> {
-        let paths = resolve_module_paths(&config);
+        let paths = resolve_module_paths(&config, std::env::var_os(PKCS11_MODULE_ENV))?;
         let mut modules = Vec::new();
         let mut last_err = None;
         for path in paths {
@@ -156,6 +159,9 @@ impl Pkcs11Backend {
     fn enumerate_certs(&self) -> Result<Vec<PickedCert>> {
         let prefix_module = self.modules.len() > 1;
         let mut out = Vec::new();
+        // The same token can be reachable through several modules (e.g. OpenSC directly
+        // and again via p11-kit-proxy). Keep the first (module, slot) that lists a cert.
+        let mut seen = std::collections::HashSet::new();
         for (module_index, module) in self.modules.iter().enumerate() {
             let slots = match module.ctx.get_slots_with_token() {
                 Ok(s) => s,
@@ -168,6 +174,10 @@ impl Pkcs11Backend {
                     .map(|t| trim_pkcs11_label(t.label()))
                     .unwrap_or_default();
                 let pin_status = token_info.as_ref().map(token_pin_status);
+                let token_serial = token_info
+                    .as_ref()
+                    .map(|t| trim_pkcs11_label(t.serial_number()))
+                    .filter(|s| !s.is_empty());
                 let session = match module.ctx.open_ro_session(slot) {
                     Ok(s) => s,
                     Err(_) => continue,
@@ -188,6 +198,12 @@ impl Pkcs11Backend {
                         prefix_module,
                     ) {
                         picked.info.pin_status = pin_status;
+                        if let Some(serial) = &token_serial {
+                            let key = dedup_key(serial, &picked.cka_id, &picked.der);
+                            if !seen.insert(key) {
+                                continue;
+                            }
+                        }
                         out.push(picked);
                     }
                 }
@@ -273,25 +289,85 @@ pub fn verify_pdf(pdf: &[u8]) -> Result<Vec<SignatureInfo>> {
     pades::verify_signatures(pdf)
 }
 
-fn resolve_module_paths(config: &Pkcs11Config) -> Vec<PathBuf> {
-    let mut paths = Vec::new();
+/// Certificates on one token are identified by (token serial, CKA_ID); a missing
+/// CKA_ID falls back to the certificate bytes.
+fn dedup_key(token_serial: &str, cka_id: &[u8], der: &[u8]) -> (String, Vec<u8>) {
+    let id = if cka_id.is_empty() {
+        let mut v = b"der:".to_vec();
+        v.extend_from_slice(&Sha256::digest(der));
+        v
+    } else {
+        cka_id.to_vec()
+    };
+    (token_serial.to_string(), id)
+}
+
+/// Where an explicit PKCS#11 module path came from, so the error can name it.
+#[derive(Clone, Copy)]
+enum ModuleSource {
+    Config,
+    Env,
+}
+
+/// An explicit PKCS#11 module must be an absolute path, so `dlopen` never searches
+/// the library path or the working directory.
+fn absolute_module_path(p: PathBuf, source: ModuleSource) -> Result<PathBuf> {
+    if p.is_absolute() {
+        return Ok(p);
+    }
+    let path = p.display().to_string();
+    let msg = match source {
+        ModuleSource::Config => tr_args(
+            "PKCS#11 module_path in the configuration must be an absolute path: {path}",
+            &[("path", &path)],
+        ),
+        ModuleSource::Env => tr_args(
+            "OPENPDF_PKCS11_MODULE must be an absolute path: {path}",
+            &[("path", &path)],
+        ),
+    };
+    Err(Error::Sign(msg))
+}
+
+/// An explicit module (config or `OPENPDF_PKCS11_MODULE`) is the only one loaded.
+/// Without one, every existing built-in default is loaded.
+fn resolve_module_paths(
+    config: &Pkcs11Config,
+    env: Option<std::ffi::OsString>,
+) -> Result<Vec<PathBuf>> {
     if let Some(p) = &config.module_path {
-        paths.push(p.clone());
-        return paths;
+        return Ok(vec![absolute_module_path(p.clone(), ModuleSource::Config)?]);
     }
-    if let Ok(env) = std::env::var("OPENPDF_PKCS11_MODULE") {
-        let p = PathBuf::from(env);
-        if !p.as_os_str().is_empty() {
-            paths.push(p);
-        }
+    if let Some(env) = env.filter(|v| !v.is_empty()) {
+        return Ok(vec![absolute_module_path(
+            PathBuf::from(env),
+            ModuleSource::Env,
+        )?]);
     }
-    for d in DEFAULT_MODULES {
-        let p = PathBuf::from(d);
-        if !paths.contains(&p) {
-            paths.push(p);
-        }
+    Ok(DEFAULT_MODULES.iter().map(PathBuf::from).collect())
+}
+
+#[cfg(test)]
+pub(crate) fn resolve_module_paths_for_test(
+    config: &Pkcs11Config,
+    env: Option<std::ffi::OsString>,
+) -> Result<Vec<PathBuf>> {
+    resolve_module_paths(config, env)
+}
+
+#[cfg(test)]
+impl Pkcs11Backend {
+    pub(crate) fn from_paths(paths: &[PathBuf], pin: Arc<dyn PinProvider>) -> Result<Self> {
+        let modules = paths
+            .iter()
+            .map(|p| load_module(p))
+            .collect::<Result<Vec<_>>>()?;
+        Ok(Self { modules, pin })
     }
-    paths
+
+    pub(crate) fn module_count(&self) -> usize {
+        self.modules.len()
+    }
 }
 
 fn load_module(path: &Path) -> Result<LoadedModule> {

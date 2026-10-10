@@ -8,7 +8,9 @@ use std::ffi::c_void;
 use std::ptr::null_mut;
 use std::slice;
 
-use openpdf_core::{tr, tr_args, CertificateInfo, Error, Result, SignRequest, SignatureInfo, Signer};
+use openpdf_core::{
+    tr, tr_args, CertificateInfo, Error, Result, SignRequest, SignatureInfo, Signer,
+};
 use sha2::{Digest, Sha256, Sha384, Sha512};
 use windows::core::{w, BOOL};
 use windows::Win32::Security::Cryptography::{

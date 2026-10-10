@@ -7,12 +7,8 @@
 
 use std::path::PathBuf;
 
-use openpdf_core::{
-    tr_args, CertificateInfo, Error, Result, SignRequest, SignatureInfo, Signer,
-};
-use security_framework::item::{
-    ItemClass, ItemSearchOptions, Limit, Reference, SearchResult,
-};
+use openpdf_core::{tr_args, CertificateInfo, Error, Result, SignRequest, SignatureInfo, Signer};
+use security_framework::item::{ItemClass, ItemSearchOptions, Limit, Reference, SearchResult};
 use security_framework::key::Algorithm;
 use security_framework::os::macos::keychain::SecKeychain;
 
@@ -119,10 +115,7 @@ impl KeyBackend for KeychainBackend {
             .into_iter()
             .find(|i| i.listed.id == cert_id)
             .ok_or_else(|| {
-                Error::Sign(tr_args(
-                    "unknown certificate id {id}",
-                    &[("id", cert_id)],
-                ))
+                Error::Sign(tr_args("unknown certificate id {id}", &[("id", cert_id)]))
             })?;
         let key = found.identity.private_key().map_err(|e| {
             Error::Sign(tr_args(
@@ -137,7 +130,11 @@ impl KeyBackend for KeychainBackend {
                 EcdsaHash::Sha384 => Algorithm::ECDSASignatureMessageX962SHA384,
                 EcdsaHash::Sha512 => Algorithm::ECDSASignatureMessageX962SHA512,
             },
-            None => return Err(Error::Sign(openpdf_core::tr("unsupported public key algorithm"))),
+            None => {
+                return Err(Error::Sign(openpdf_core::tr(
+                    "unsupported public key algorithm",
+                )))
+            }
         };
         key.create_signature(alg, data).map_err(|e| {
             Error::Sign(tr_args(

@@ -1,10 +1,10 @@
 //! Internal key backend: enumerate certificates and sign opaque bytes.
 
-use openpdf_core::{
-    describe_unusable, tr, tr_args, CertUnusable, CertificateInfo, Error, InvalidKind,
-    PinProvider, Result, SignRequest, SignatureInfo, Signer,
-};
 use der::Decode;
+use openpdf_core::{
+    describe_unusable, tr, tr_args, CertUnusable, CertificateInfo, Error, InvalidKind, PinProvider,
+    Result, SignRequest, SignatureInfo, Signer,
+};
 use x509_cert::Certificate;
 
 use crate::cades;
@@ -158,10 +158,7 @@ impl Signer for CompositeSigner {
             }
         }
         Err(last_err.unwrap_or_else(|| {
-            Error::Sign(tr_args(
-                "unknown certificate id {id}",
-                &[("id", wanted)],
-            ))
+            Error::Sign(tr_args("unknown certificate id {id}", &[("id", wanted)]))
         }))
     }
 
@@ -190,9 +187,7 @@ impl<B: KeyBackend> KeyBackend for PrefixedBackend<B> {
     }
 
     fn sign_bytes(&self, cert_id: &str, data: &[u8]) -> Result<Vec<u8>> {
-        let id = cert_id
-            .strip_prefix(&self.prefix)
-            .unwrap_or(cert_id);
+        let id = cert_id.strip_prefix(&self.prefix).unwrap_or(cert_id);
         self.inner.sign_bytes(id, data)
     }
 }

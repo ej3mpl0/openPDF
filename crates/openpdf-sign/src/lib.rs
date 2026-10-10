@@ -20,19 +20,19 @@ mod pades;
 mod pin;
 mod token;
 
-#[cfg(windows)]
-mod windows;
 #[cfg(target_os = "macos")]
 mod macos;
+#[cfg(windows)]
+mod windows;
 
 pub use backend::{default_signer, CompositeSigner};
 pub use pin::StaticPinProvider;
 pub use token::{verify_pdf, Pkcs11Config, Pkcs11Signer};
 
-#[cfg(windows)]
-pub use windows::WindowsStoreSigner;
 #[cfg(target_os = "macos")]
 pub use macos::KeychainSigner;
+#[cfg(windows)]
+pub use windows::WindowsStoreSigner;
 
 pub use openpdf_core::{
     init_i18n, set_locale, tr, tr_args, CertUnusable, CertificateInfo, CertificateUsage,
