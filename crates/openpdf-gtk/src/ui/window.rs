@@ -63,7 +63,8 @@ impl OpenPdfWindow {
 
         let window = adw::ApplicationWindow::new(app);
         window.set_title(Some(t(lang, "openPDF")));
-        window.set_default_size(1280, 800);
+        let measuring = super::chrome::measuring();
+        window.set_default_size(if measuring { 1100 } else { 1280 }, 800);
 
         let toast = adw::ToastOverlay::new();
         let tab_view = adw::TabView::new();
@@ -73,7 +74,6 @@ impl OpenPdfWindow {
         tab_bar.set_view(Some(&tab_view));
 
         let menu = app_menu(lang);
-        let measuring = super::chrome::measuring();
         let tools = if measuring {
             None
         } else {
@@ -90,11 +90,13 @@ impl OpenPdfWindow {
         let settings_btn = tools.as_ref().map(|t| t.settings_btn.clone());
 
         let toolbar = adw::ToolbarView::new();
-        let tab_row = super::chrome::tab_row(&tab_bar, {
-            let app = app.clone();
-            move || app.activate_action("open", None)
-        });
-        toolbar.add_top_bar(&tab_row);
+        if !measuring {
+            let tab_row = super::chrome::tab_row(&tab_bar, {
+                let app = app.clone();
+                move || app.activate_action("open", None)
+            });
+            toolbar.add_top_bar(&tab_row);
+        }
         if let Some(tools) = &tools {
             toolbar.add_top_bar(&tools.root);
         }

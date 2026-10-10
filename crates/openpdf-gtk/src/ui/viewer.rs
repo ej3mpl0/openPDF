@@ -528,21 +528,24 @@ pub fn build(
     search_bar.connect_entry(&search_entry);
     search_bar.set_visible(false);
 
-    let status = gtk::Box::new(gtk::Orientation::Horizontal, 8);
-    status.add_css_class("status-bar");
-    status.append(&page_label);
     let fit_w = gtk::Button::new();
     fit_w.add_css_class("flat");
     fit_w.set_tooltip_text(Some(t(lang, "Fit width")));
     let fit_p = gtk::Button::new();
     fit_p.add_css_class("flat");
     fit_p.set_tooltip_text(Some(t(lang, "Fit page")));
-    status.append(&fit_w);
-    status.append(&fit_p);
-
-    content.append(&search_bar);
-    content.append(&pages_scroll);
-    content.append(&status);
+    if !super::chrome::measuring() {
+        let status = gtk::Box::new(gtk::Orientation::Horizontal, 8);
+        status.add_css_class("status-bar");
+        status.append(&page_label);
+        status.append(&fit_w);
+        status.append(&fit_p);
+        content.append(&search_bar);
+        content.append(&pages_scroll);
+        content.append(&status);
+    } else {
+        content.append(&pages_scroll);
+    }
 
     let split = adw::OverlaySplitView::new();
     split.set_sidebar(Some(&sidebar));
@@ -826,8 +829,10 @@ fn paint_pages(cr: &cairo::Context, view: &DocumentView) {
         *view.shared.last_visible.borrow_mut() = keys.clone();
     }
     view.shared.doc.request_tiles(&keys, Priority::Visible);
-    let preview: Vec<TileKey> = keys.iter().map(|k| k.preview()).collect();
-    view.shared.doc.request_tiles(&preview, Priority::Adjacent);
+    if !super::chrome::measuring() {
+        let preview: Vec<TileKey> = keys.iter().map(|k| k.preview()).collect();
+        view.shared.doc.request_tiles(&preview, Priority::Adjacent);
+    }
 
     for page in &layout.pages {
         cr.set_source_rgba(0.078, 0.094, 0.122, 0.18);

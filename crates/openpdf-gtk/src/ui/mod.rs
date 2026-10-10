@@ -397,6 +397,9 @@ fn install_accels(app: &adw::Application) {
 }
 
 fn register_icons() {
+    if chrome::measuring() {
+        return;
+    }
     register_icon_blob(
         include_bytes!(concat!(env!("OUT_DIR"), "/icons-chrome.gresource")),
         "icons-chrome",
@@ -431,6 +434,9 @@ fn register_icon_blob(bytes: &'static [u8], label: &str) {
 }
 
 fn load_css() {
+    if chrome::measuring() {
+        return;
+    }
     add_css(CSS);
 }
 
