@@ -6,6 +6,12 @@ jobs:
     steps:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@stable
+      - name: Install GTK4, libadwaita, and Xvfb
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends \
+            libgtk-4-dev libadwaita-1-dev pkg-config \
+            xvfb dbus-x11 fonts-dejavu-core libgl1-mesa-dri adwaita-icon-theme
       - name: Install PDFium
         run: |
           set -euo pipefail
@@ -19,8 +25,19 @@ jobs:
         run: |
           sudo apt-get update
           sudo apt-get install -y softhsm2
+      - name: Check po catalogs
+        run: python3 scripts/check_po.py
       - run: cargo build --workspace --release
+        env:
+          OPENPDF_PDFIUM: /usr/local/lib/libpdfium.so
       - run: cargo test --workspace
         env:
           CI: "true"
+          OPENPDF_PDFIUM: /usr/local/lib/libpdfium.so
+      - name: Measure RAM and startup
+        run: |
+          xvfb-run -a --server-args="-screen 0 1280x800x24" \
+            env GDK_BACKEND=x11 GSK_RENDERER=cairo \
+            ./target/release/openpdf-gtk --measure 32
+        env:
           OPENPDF_PDFIUM: /usr/local/lib/libpdfium.so
