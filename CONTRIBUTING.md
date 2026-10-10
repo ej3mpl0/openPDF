@@ -20,7 +20,10 @@ never depend on each other. The application binary constructs
 `Box<dyn Signer>` from `openpdf-sign` and passes it to UI code. **openpdf-gtk
 must never depend on openpdf-sign.**
 
-Rust *stable* (`rust-toolchain.toml`), edition 2021, license MPL-2.0.
+Rust *stable* (`rust-toolchain.toml`), edition 2021, license MPL-2.0
+(see [LICENSE](LICENSE)). New `.rs` files start with
+`// SPDX-License-Identifier: MPL-2.0`. Crate owners add that header to
+their own files; do not bulk-add headers to existing sources.
 
 ## Build and test
 
