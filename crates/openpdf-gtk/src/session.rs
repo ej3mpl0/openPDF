@@ -725,7 +725,7 @@ mod tests {
         let Ok(engine) = Engine::new() else {
             return;
         };
-        let path = match crate::measure::write_measure_pdf(2) {
+        let path = match crate::measure::write_sample_text_pdf(2) {
             Ok(p) => p,
             Err(_) => return,
         };

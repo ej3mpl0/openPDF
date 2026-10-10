@@ -746,8 +746,7 @@ fn paint_pages(cr: &cairo::Context, view: &DocumentView) {
         let _ = cr.fill();
 
         for key in keys.iter().filter(|k| k.page == page.page) {
-            let tile_x = page.x + f64::from(key.tx * key.tile_size);
-            let tile_y = page.y + f64::from(key.ty * key.tile_size);
+            let (tile_x, tile_y) = tile_dest_origin(page.x, page.y, key.tx, key.ty, key.tile_size);
             if let Some(bmp) = view.shared.doc.paint_tile(key) {
                 paint_rgba(cr, tile_x, tile_y, bmp.width, bmp.height, &bmp.rgba, true);
             } else if let Some(low) = view.shared.doc.paint_tile(&key.preview()) {
@@ -788,8 +787,7 @@ fn paint_thumbs(cr: &cairo::Context, view: &DocumentView) {
         cr.rectangle(page.x, page.y, page.width, page.height);
         let _ = cr.fill();
         for key in keys.iter().filter(|k| k.page == page.page) {
-            let tile_x = page.x + f64::from(key.tx * key.tile_size);
-            let tile_y = page.y + f64::from(key.ty * key.tile_size);
+            let (tile_x, tile_y) = tile_dest_origin(page.x, page.y, key.tx, key.ty, key.tile_size);
             if let Some(bmp) = view.shared.doc.paint_tile(key) {
                 paint_rgba(cr, tile_x, tile_y, bmp.width, bmp.height, &bmp.rgba, false);
             }
@@ -821,11 +819,22 @@ fn maybe_mark_startup(view: &DocumentView) {
     }
 }
 
+/// Destination of a tile on the page canvas. Same origin as core `tile_rect`
+/// (`tx * tile`, `ty * tile`) plus the page's layout offset.
+pub(crate) fn tile_dest_origin(
+    page_x: f64,
+    page_y: f64,
+    tx: u32,
+    ty: u32,
+    tile_size: u32,
+) -> (f64, f64) {
+    (
+        page_x + f64::from(tx.saturating_mul(tile_size)),
+        page_y + f64::from(ty.saturating_mul(tile_size)),
+    )
+}
+
 /// Convert unpremultiplied RGBA8 to cairo ARgb32 (BGRA on little-endian).
-///
-/// Do not cache this by the source pointer: the tile cache recycles `Vec`
-/// allocations, so a later tile can reuse the first tile's address and every
-/// column would stamp the same pixels (`openPDF sample - paF sample - pa`).
 fn rgba_to_cairo_argb(rgba: &[u8], width: u32, height: u32) -> Option<(Vec<u8>, i32)> {
     let w = width as i32;
     let h = height as i32;
@@ -861,7 +870,7 @@ pub(crate) fn paint_rgba(
     rgba: &[u8],
     real_page_tile: bool,
 ) {
-    let Some((data, stride)) = rgba_to_cairo_argb(rgba, width, height) else {
+    let Some((data, stride)) = rgba_to_cairo_argb_cached(rgba, width, height) else {
         return;
     };
     if let Ok(surface) = cairo::ImageSurface::create_for_data(
@@ -878,6 +887,28 @@ pub(crate) fn paint_rgba(
             crate::measure::mark_first_tile_painted();
         }
     }
+}
+
+/// Last-tile BGRA cache keyed by the source pointer. The engine recycles
+/// `Vec` allocations, so a later tile can reuse an earlier address and this
+/// stamps the previous pixels into the wrong slot.
+fn rgba_to_cairo_argb_cached(rgba: &[u8], width: u32, height: u32) -> Option<(Vec<u8>, i32)> {
+    thread_local! {
+        static LAST: std::cell::RefCell<Option<(usize, usize, i32, Vec<u8>)>> =
+            std::cell::RefCell::new(None);
+    }
+    let key = (rgba.as_ptr() as usize, rgba.len());
+    LAST.with(|slot| {
+        let mut slot = slot.borrow_mut();
+        if let Some((ptr, len, stride, cached)) = slot.as_ref() {
+            if *ptr == key.0 && *len == key.1 {
+                return Some((cached.clone(), *stride));
+            }
+        }
+        let (data, stride) = rgba_to_cairo_argb(rgba, width, height)?;
+        *slot = Some((key.0, key.1, stride, data.clone()));
+        Some((data, stride))
+    })
 }
 
 fn run_search(view: &DocumentView, query: &str) {
@@ -902,18 +933,53 @@ mod tests {
     use super::*;
     use openpdf_core::Engine;
 
+    /// Recycled source pointer must not stamp the previous tile. The engine
+    /// reuses `Vec` allocations; a cache keyed by `as_ptr()` then paints tile
+    /// A into tile B's slot (run-to-run "openPDF sample - paF sample - pa").
+    #[test]
+    fn cairo_reused_rgba_pointer_does_not_stamp_previous_tile() {
+        let w = 16u32;
+        let h = 16u32;
+        let mut rgba = vec![0u8; (w * h * 4) as usize];
+        for px in rgba.chunks_exact_mut(4) {
+            px.copy_from_slice(&[255, 0, 0, 255]);
+        }
+        let surf = cairo::ImageSurface::create(cairo::Format::ARgb32, (w * 2) as i32, h as i32)
+            .expect("reuse surface");
+        {
+            let cr = cairo::Context::new(&surf).unwrap();
+            let (x0, y0) = tile_dest_origin(0.0, 0.0, 0, 0, w);
+            paint_rgba(&cr, x0, y0, w, h, &rgba, false);
+            for px in rgba.chunks_exact_mut(4) {
+                px.copy_from_slice(&[0, 0, 255, 255]);
+            }
+            let (x1, y1) = tile_dest_origin(0.0, 0.0, 1, 0, w);
+            paint_rgba(&cr, x1, y1, w, h, &rgba, false);
+        }
+        surf.flush();
+        let data = surf.take_data().expect("reuse cairo data");
+        let stride = cairo::Format::ARgb32.stride_for_width(w * 2).unwrap() as usize;
+        // ARgb32 on LE is BGRA.
+        let left = &data[0..4];
+        let right = &data[16 * 4..16 * 4 + 4];
+        let left_is_red = left[0] < 32 && left[1] < 32 && left[2] > 200;
+        let right_is_blue = right[0] > 200 && right[1] < 32 && right[2] < 32;
+        assert!(
+            left_is_red && right_is_blue,
+            "reused RGBA pointer stamped the previous tile (left={left:?} right={right:?} stride={stride})"
+        );
+    }
+
     /// UI placement only: draw each tile through `paint_rgba` at
-    /// `tx * tile_size`, `ty * tile_size` and compare to one full-page
-    /// `paint_rgba`. Core `tile_rect` / `tile_grid` / `quantize_zoom` are
-    /// not used or changed here.
+    /// `tile_dest_origin` (the same helper `paint_pages` uses) and compare
+    /// to one full-page `paint_rgba`. Tiles are copied into one scratch
+    /// buffer so a pointer-keyed ARGB cache would reuse the first tile.
+    /// Core `tile_rect` / `tile_grid` / `quantize_zoom` are not changed.
     #[test]
     fn cairo_tile_placement_matches_full_render_at_147_percent() {
-        let Ok(engine) = Engine::new() else {
-            eprintln!("cairo placement: Engine::new skipped (no PDFium)");
-            return;
-        };
-        let path = crate::measure::write_measure_pdf(2).expect("measure PDF");
-        let session = crate::session::Session::open(&engine, &path).expect("open measure PDF");
+        let engine = Engine::new().expect("PDFium required for 147% cairo placement");
+        let path = crate::measure::write_sample_text_pdf(2).expect("sample text PDF");
+        let session = crate::session::Session::open(&engine, &path).expect("open sample text PDF");
         let id = session.doc_id();
         let zoom = 1.47f32;
         let full = engine
@@ -941,22 +1007,17 @@ mod tests {
             let cr = cairo::Context::new(&tile_surf).unwrap();
             cr.set_source_rgb(1.0, 1.0, 1.0);
             let _ = cr.paint();
+            // One allocation for every tile: same pointer, different pixels.
+            // A LAST-pointer cache then stamps column 0 into every full tile.
+            let mut scratch = Vec::new();
             for ty in 0..rows {
                 for tx in 0..cols {
                     let key = openpdf_core::TileKey::new(id, 0, zoom, tx, ty);
                     let rendered = engine.render_tile_blocking(key).expect("tile at 147%");
-                    // Same formula as paint_pages: page origin + tx/ty * tile_size.
-                    let x = f64::from(tx * tile);
-                    let y = f64::from(ty * tile);
-                    paint_rgba(
-                        &cr,
-                        x,
-                        y,
-                        rendered.width,
-                        rendered.height,
-                        &rendered.rgba,
-                        false,
-                    );
+                    scratch.clear();
+                    scratch.extend_from_slice(&rendered.rgba);
+                    let (x, y) = tile_dest_origin(0.0, 0.0, tx, ty, tile);
+                    paint_rgba(&cr, x, y, rendered.width, rendered.height, &scratch, false);
                 }
             }
         }

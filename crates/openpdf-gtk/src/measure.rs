@@ -281,6 +281,103 @@ pub fn isolate_xdg() -> PathBuf {
     dir
 }
 
+/// Letter-size PDF with repeating text so every 256px column is distinct at 147%.
+///
+/// `hello.pdf` is a single short line in the top-left tile; a LAST-pointer
+/// cache would still match a full-page composite of that document.
+pub fn write_sample_text_pdf(pages: usize) -> Result<PathBuf, String> {
+    let pages = pages.max(1);
+    let font_obj = 3 + pages * 2;
+
+    let mut kids = String::new();
+    for i in 0..pages {
+        let page_id = 3 + i * 2;
+        if i > 0 {
+            kids.push(' ');
+        }
+        kids.push_str(&format!("{page_id} 0 R"));
+    }
+    let catalog = b"1 0 obj\n<< /Type /Catalog /Pages 2 0 R >>\nendobj\n".to_vec();
+    let pages_obj =
+        format!("2 0 obj\n<< /Type /Pages /Kids [{kids}] /Count {pages} >>\nendobj\n").into_bytes();
+
+    let mut page_objs = Vec::new();
+    for i in 0..pages {
+        let page_id = 3 + i * 2;
+        let content_id = page_id + 1;
+        let n = i + 1;
+        let line = format!(
+            "openPDF sample - page {n} of {pages} - openPDF sample - page {n} of {pages} - openPDF sample"
+        );
+        let mut stream = String::from("BT\n/F1 18 Tf\n36 750 Td\n");
+        for row in 0..28 {
+            if row > 0 {
+                stream.push_str("0 -24 Td\n");
+            }
+            stream.push_str(&format!("({line} / row {row}) Tj\n"));
+        }
+        stream.push_str("ET\n");
+        let stream_bytes = stream.into_bytes();
+        let page = format!(
+            "{page_id} 0 obj\n<< /Type /Page /Parent 2 0 R /MediaBox [0 0 612 792] \
+             /Contents {content_id} 0 R /Resources << /Font << /F1 {font_obj} 0 R >> >> >>\nendobj\n"
+        );
+        let content = format!(
+            "{content_id} 0 obj\n<< /Length {} >>\nstream\n",
+            stream_bytes.len()
+        );
+        let mut content_obj = content.into_bytes();
+        content_obj.extend_from_slice(&stream_bytes);
+        if !stream_bytes.ends_with(b"\n") {
+            content_obj.push(b'\n');
+        }
+        content_obj.extend_from_slice(b"endstream\nendobj\n");
+        page_objs.push(page.into_bytes());
+        page_objs.push(content_obj);
+    }
+    let font = format!(
+        "{font_obj} 0 obj\n<< /Type /Font /Subtype /Type1 /BaseFont /Helvetica >>\nendobj\n"
+    )
+    .into_bytes();
+
+    let mut pdf = Vec::new();
+    pdf.extend_from_slice(b"%PDF-1.4\n%\xe2\xe3\xcf\xd3\n");
+    let mut offsets = vec![0u32; font_obj + 1];
+    let write_obj = |id: usize, bytes: &[u8], pdf: &mut Vec<u8>, offsets: &mut [u32]| {
+        offsets[id] = pdf.len() as u32;
+        pdf.extend_from_slice(bytes);
+    };
+    write_obj(1, &catalog, &mut pdf, &mut offsets);
+    write_obj(2, &pages_obj, &mut pdf, &mut offsets);
+    for (i, obj) in page_objs.iter().enumerate() {
+        write_obj(3 + i, obj, &mut pdf, &mut offsets);
+    }
+    write_obj(font_obj, &font, &mut pdf, &mut offsets);
+
+    let xref_at = pdf.len();
+    let nobj = font_obj + 1;
+    pdf.extend_from_slice(format!("xref\n0 {nobj}\n").as_bytes());
+    pdf.extend_from_slice(b"0000000000 65535 f \n");
+    for id in 1..nobj {
+        pdf.extend_from_slice(format!("{:010} 00000 n \n", offsets[id]).as_bytes());
+    }
+    pdf.extend_from_slice(
+        format!("trailer\n<< /Size {nobj} /Root 1 0 R >>\nstartxref\n{xref_at}\n%%EOF\n")
+            .as_bytes(),
+    );
+
+    let dest = std::env::temp_dir().join(format!(
+        "openpdf-sample-text-{}-{}.pdf",
+        std::process::id(),
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|d| d.as_nanos())
+            .unwrap_or(0)
+    ));
+    std::fs::write(&dest, pdf).map_err(|e| e.to_string())?;
+    Ok(dest)
+}
+
 /// Build a real multi-page PDF by repeating `corpus/hello.pdf` (no fat fixture).
 pub fn write_measure_pdf(pages: usize) -> Result<PathBuf, String> {
     let pages = pages.max(2);
@@ -394,6 +491,14 @@ mod tests {
         let path = write_measure_pdf(4).unwrap();
         let doc = Document::open(&path).unwrap();
         assert_eq!(doc.page_count(), 4);
+        let _ = std::fs::remove_file(path);
+    }
+
+    #[test]
+    fn write_sample_text_pdf_is_multi_page() {
+        let path = write_sample_text_pdf(8).unwrap();
+        let doc = Document::open(&path).unwrap();
+        assert_eq!(doc.page_count(), 8);
         let _ = std::fs::remove_file(path);
     }
 }

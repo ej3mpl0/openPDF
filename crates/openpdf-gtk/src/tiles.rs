@@ -45,10 +45,10 @@ pub fn quantize_zoom(zoom: f64) -> u32 {
 }
 
 pub fn page_pixel_size(size: PageSize, zoom: f64) -> (u32, u32) {
-    let z = zoom.max(0.05);
+    let z = f64::from(quantize_zoom(zoom)) / 1000.0;
     (
-        ((size.width * z).ceil() as u32).max(1),
-        ((size.height * z).ceil() as u32).max(1),
+        (size.width * z).round().max(1.0) as u32,
+        (size.height * z).round().max(1.0) as u32,
     )
 }
 
