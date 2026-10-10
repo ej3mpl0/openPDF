@@ -1,7 +1,10 @@
+use std::fmt;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::Arc;
 
-use lopdf::{Dictionary, Document as LopdfDocument, Object, ObjectId};
+use lopdf::{Dictionary, Document as LopdfDocument, LoadOptions, Object, ObjectId};
+use zeroize::Zeroizing;
 
 use crate::command::{normalize_rotation, Applied, Command, History};
 use crate::error::{Error, Result, SignedOp};
@@ -35,6 +38,82 @@ pub(crate) struct PageSlot {
     pub rotation: i32,
 }
 
+/// Password of an encrypted document, wiped from memory on drop.
+///
+/// Deliberately has no `Clone`, `Debug` or `Display`: there is exactly one
+/// copy per opened document (shared via `Arc` by clones of that `Document`),
+/// and it can never be printed. It is dropped when the last `Document` clone
+/// is dropped (closed).
+pub(crate) struct DocSecret(Zeroizing<String>);
+
+impl DocSecret {
+    pub(crate) fn as_str(&self) -> &str {
+        &self.0
+    }
+}
+
+/// Optional [`DocSecret`] holder with a redacted `Debug`.
+#[derive(Clone, Default)]
+pub(crate) struct PasswordSlot(Option<Arc<DocSecret>>);
+
+impl PasswordSlot {
+    pub(crate) fn new(password: Zeroizing<String>) -> Self {
+        Self(Some(Arc::new(DocSecret(password))))
+    }
+
+    pub(crate) fn get(&self) -> Option<&Arc<DocSecret>> {
+        self.0.as_ref()
+    }
+
+    pub(crate) fn as_str(&self) -> Option<&str> {
+        self.0.as_deref().map(DocSecret::as_str)
+    }
+}
+
+impl fmt::Debug for PasswordSlot {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str(if self.0.is_some() {
+            "PasswordSlot(<redacted>)"
+        } else {
+            "PasswordSlot(None)"
+        })
+    }
+}
+
+/// Parse `bytes` with lopdf, decrypting with `password` when given.
+///
+/// An encrypted file that cannot be decrypted is `PasswordRequired` (no
+/// password given) or `WrongPassword`, never `EmptyDocument`.
+pub(crate) fn load_lopdf(bytes: &[u8], password: Option<&str>) -> Result<LopdfDocument> {
+    let loaded = match password {
+        // lopdf's LoadOptions takes a plain String; that copy is lopdf's and
+        // short-lived, but it is not zeroized.
+        Some(pw) => LopdfDocument::load_mem_with_options(bytes, LoadOptions::with_password(pw)),
+        None => LopdfDocument::load_mem(bytes),
+    };
+    let doc = loaded.map_err(|e| match e {
+        lopdf::Error::InvalidPassword => Error::WrongPassword,
+        e => Error::from(e),
+    })?;
+    if doc.is_encrypted() {
+        return Err(if password.is_some() {
+            Error::WrongPassword
+        } else {
+            Error::PasswordRequired
+        });
+    }
+    Ok(doc)
+}
+
+/// Re-apply the document's encryption before writing, so a document opened
+/// with a password is never written out in plaintext by accident.
+pub(crate) fn reencrypt_for_write(doc: &mut LopdfDocument) -> Result<()> {
+    if let Some(state) = doc.encryption_state.take() {
+        doc.encrypt(&state)?;
+    }
+    Ok(())
+}
+
 /// Structure-level PDF document. Rendering and text go through [`crate::Engine`].
 #[derive(Clone, Debug)]
 pub struct Document {
@@ -46,6 +125,7 @@ pub struct Document {
     history: History,
     dirty: bool,
     signed: bool,
+    password: PasswordSlot,
 }
 
 impl Document {
@@ -55,23 +135,74 @@ impl Document {
         Self::from_bytes(bytes, Some(path.to_path_buf()))
     }
 
+    /// Open an unencrypted PDF (or one with an empty user password).
+    ///
+    /// Encrypted PDFs return [`Error::PasswordRequired`]; use
+    /// [`Document::from_bytes_with_password`].
     pub fn from_bytes(bytes: Vec<u8>, path: Option<PathBuf>) -> Result<Self> {
-        let inner = LopdfDocument::load_mem(&bytes)?;
-        Self::from_lopdf_inner(inner, bytes, path)
+        let inner = load_lopdf(&bytes, None)?;
+        Self::from_lopdf_inner(inner, bytes, path, PasswordSlot::default())
+    }
+
+    /// Open a PDF with its user or owner password.
+    ///
+    /// A wrong password is [`Error::WrongPassword`]. The password is kept
+    /// (zeroized on drop, never logged) so saves can re-encrypt and the render
+    /// engine can open the file. Unencrypted files ignore it.
+    pub fn from_bytes_with_password(
+        bytes: Vec<u8>,
+        path: Option<PathBuf>,
+        password: Zeroizing<String>,
+    ) -> Result<Self> {
+        let inner = load_lopdf(&bytes, Some(&password))?;
+        let slot = if inner.was_encrypted() {
+            PasswordSlot::new(password)
+        } else {
+            PasswordSlot::default()
+        };
+        Self::from_lopdf_inner(inner, bytes, path, slot)
+    }
+
+    /// File variant of [`Document::from_bytes_with_password`].
+    pub fn open_with_password(path: impl AsRef<Path>, password: Zeroizing<String>) -> Result<Self> {
+        let path = path.as_ref();
+        let bytes = std::fs::read(path)?;
+        Self::from_bytes_with_password(bytes, Some(path.to_path_buf()), password)
     }
 
     pub(crate) fn from_lopdf(inner: LopdfDocument, path: Option<PathBuf>) -> Result<Self> {
+        Self::from_lopdf_with(inner, path, PasswordSlot::default())
+    }
+
+    /// Like [`Document::from_lopdf`], keeping this document's password so an
+    /// encrypted source yields an encrypted result.
+    pub(crate) fn derive(&self, inner: LopdfDocument) -> Result<Self> {
+        Self::from_lopdf_with(inner, None, self.password.clone())
+    }
+
+    pub(crate) fn from_lopdf_with(
+        inner: LopdfDocument,
+        path: Option<PathBuf>,
+        password: PasswordSlot,
+    ) -> Result<Self> {
         let mut tmp = inner;
+        reencrypt_for_write(&mut tmp)?;
         let mut bytes = Vec::new();
         tmp.save_to(&mut bytes)?;
-        let inner = LopdfDocument::load_mem(&bytes)?;
-        Self::from_lopdf_inner(inner, bytes, path)
+        let inner = load_lopdf(&bytes, password.as_str())?;
+        let password = if inner.was_encrypted() {
+            password
+        } else {
+            PasswordSlot::default()
+        };
+        Self::from_lopdf_inner(inner, bytes, path, password)
     }
 
     fn from_lopdf_inner(
         inner: LopdfDocument,
         original: Vec<u8>,
         path: Option<PathBuf>,
+        password: PasswordSlot,
     ) -> Result<Self> {
         let slots = slots_from(&inner)?;
         let signed = contains_signature(&inner);
@@ -84,6 +215,7 @@ impl Document {
             history: History::new(),
             dirty: false,
             signed,
+            password,
         })
     }
 
@@ -140,9 +272,14 @@ impl Document {
         self.signed
     }
 
-    /// True when the trailer has an `/Encrypt` dictionary.
+    /// True when the file is encrypted (whether or not it was opened with a password).
     pub fn is_encrypted(&self) -> bool {
-        self.inner.is_encrypted()
+        self.inner.is_encrypted() || self.inner.was_encrypted()
+    }
+
+    /// Password this document was opened with, for the render engine and saves.
+    pub(crate) fn password(&self) -> &PasswordSlot {
+        &self.password
     }
 
     /// Signed documents are locked against rotate/delete/move and full rewrites.
@@ -351,7 +488,7 @@ impl Document {
     }
 
     pub(crate) fn reload_from_saved(&mut self, bytes: Vec<u8>) -> Result<()> {
-        let inner = LopdfDocument::load_mem(&bytes)?;
+        let inner = load_lopdf(&bytes, self.password.as_str())?;
         self.slots = slots_from(&inner)?;
         self.signed = contains_signature(&inner);
         self.inner = inner;

@@ -51,3 +51,4 @@ pub use signer::{
     usage_label, CertificateInfo, CertificateUsage, CertificateValidity, SignRequest,
     SignatureInfo, Signer, VisibleAppearance,
 };
+pub use zeroize::Zeroizing;

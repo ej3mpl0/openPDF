@@ -5,7 +5,7 @@ use lopdf::encryption::crypt_filters::{Aes256CryptFilter, CryptFilter};
 use lopdf::{EncryptionState, EncryptionVersion, Object, Permissions, StringFormat};
 use zeroize::Zeroizing;
 
-use crate::document::Document;
+use crate::document::{load_lopdf, Document, PasswordSlot};
 use crate::error::{Error, InvalidKind, Result, SignedOp};
 
 fn fill_random(buf: &mut [u8]) -> Result<()> {
@@ -176,10 +176,17 @@ pub fn protect(doc: &Document, opts: &ProtectOptions) -> Result<Document> {
         .encrypt(&state)
         .map_err(|e| Error::structure(e.to_string()))?;
     drop(state);
-    Document::from_lopdf(inner, None)
+    // Reopen with the user password so the result is usable (and renderable).
+    Document::from_lopdf_with(
+        inner,
+        None,
+        PasswordSlot::new(Zeroizing::new((*opts.user_password).clone())),
+    )
 }
 
-/// Decrypt with the user or owner password.
+/// Remove encryption. `doc` is normally opened with
+/// [`Document::from_bytes_with_password`]; `password` (user or owner) is
+/// checked again against the original file before the protection is dropped.
 pub fn unprotect(doc: &Document, password: &str) -> Result<Document> {
     if doc.is_signed() {
         return Err(Error::signed(SignedOp::Rewrite));
@@ -188,13 +195,15 @@ pub fn unprotect(doc: &Document, password: &str) -> Result<Document> {
         return Err(Error::invalid(InvalidKind::NotEncrypted));
     }
     if password.is_empty() {
-        return Err(Error::invalid(InvalidKind::PasswordRequired));
+        return Err(Error::PasswordRequired);
     }
-    let password = Zeroizing::new(password.to_string());
+    load_lopdf(doc.original_bytes(), Some(password))?;
     let mut inner = doc.assembled_lopdf()?;
-    inner
-        .decrypt(&password)
-        .map_err(|_| Error::invalid(InvalidKind::WrongPassword))?;
+    if inner.is_encrypted() {
+        // Not decrypted at open (cannot happen through the public API).
+        return Err(Error::PasswordRequired);
+    }
+    inner.encryption_state = None;
     inner.trailer.remove(b"Encrypt");
     Document::from_lopdf(inner, None)
 }
@@ -223,7 +232,7 @@ pub fn sanitize_metadata(doc: &Document) -> Result<Document> {
             catalog.remove(key);
         }
     }
-    Document::from_lopdf(inner, None)
+    doc.derive(inner)
 }
 
 #[cfg(test)]
@@ -247,7 +256,20 @@ mod tests {
         let locked = protect(&doc, &opts).unwrap();
         assert!(locked.is_encrypted());
         assert_eq!(locked.page_count(), 1);
-        let open = unprotect(&locked, "user-secret").unwrap();
+        let bytes = locked.to_bytes().unwrap();
+        assert!(matches!(
+            Document::from_bytes(bytes.clone(), None),
+            Err(Error::PasswordRequired)
+        ));
+        assert!(matches!(
+            Document::from_bytes_with_password(bytes.clone(), None, Zeroizing::new("x".into())),
+            Err(Error::WrongPassword)
+        ));
+        let reopened =
+            Document::from_bytes_with_password(bytes, None, Zeroizing::new("user-secret".into()))
+                .unwrap();
+        assert_eq!(reopened.page_count(), 1);
+        let open = unprotect(&reopened, "user-secret").unwrap();
         assert!(!open.is_encrypted());
         assert_eq!(open.page_count(), 1);
     }

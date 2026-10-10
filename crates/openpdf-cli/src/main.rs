@@ -4,11 +4,11 @@ use std::path::{Path, PathBuf};
 use anyhow::{bail, Context, Result};
 use clap::{value_parser, Arg, ArgAction, Command};
 use image::{ImageBuffer, Rgba};
+mod password;
 mod tools;
 
 use openpdf_core::{
-    init_i18n, merge_paths, parse_page_ranges, split, split_all, tr, tr_args, Document, Engine,
-    PageRange,
+    init_i18n, merge_paths, parse_page_ranges, split, split_all, tr, tr_args, Engine, PageRange,
 };
 
 pub(crate) fn intern(s: String) -> &'static str {
@@ -55,6 +55,15 @@ fn cli() -> Command {
                     .long("version")
                     .action(ArgAction::Version)
                     .help(l("Print version")),
+            )
+            .arg(
+                Arg::new("password-stdin")
+                    .long("password-stdin")
+                    .global(true)
+                    .action(ArgAction::SetTrue)
+                    .help(tr(
+                        "Read passwords from stdin, one per line, instead of prompting",
+                    )),
             )
             .subcommand_required(true)
             .arg_required_else_help(true)
@@ -182,6 +191,7 @@ fn main() {
 
 fn run() -> Result<()> {
     let matches = cli().get_matches();
+    password::set_from_stdin(matches.get_flag("password-stdin"));
     match matches.subcommand() {
         Some(("info", m)) => {
             let file = path_arg(m, "file");
@@ -223,9 +233,8 @@ pub(crate) fn path_arg(matches: &clap::ArgMatches, id: &str) -> PathBuf {
 }
 
 fn info(path: &Path) -> Result<()> {
-    let doc = Document::open(path).with_context(|| {
-        tr_args("open {path}", &[("path", &path.display().to_string())])
-    })?;
+    let doc = password::open(path)
+        .with_context(|| tr_args("open {path}", &[("path", &path.display().to_string())]))?;
     println!(
         "{}",
         tr_args("file: {path}", &[("path", &path.display().to_string())])
@@ -290,7 +299,8 @@ fn render(path: &Path, page_1: u32, zoom: f32, output: &Path) -> Result<()> {
         bail!("{}", tr("--page is 1-based"));
     }
     let engine = engine()?;
-    let doc = engine.open(path)?;
+    let doc = password::open(path)?;
+    engine.bind(&doc)?;
     let raster = engine.render_page(doc.id(), page_1 - 1, zoom)?;
     let img = ImageBuffer::<Rgba<u8>, _>::from_raw(raster.width, raster.height, raster.rgba)
         .context(tr("RGBA buffer size"))?;
@@ -306,7 +316,8 @@ fn render(path: &Path, page_1: u32, zoom: f32, output: &Path) -> Result<()> {
 
 fn text(path: &Path, page_1: Option<u32>) -> Result<()> {
     let engine = engine()?;
-    let doc = engine.open(path)?;
+    let doc = password::open(path)?;
+    engine.bind(&doc)?;
     match page_1 {
         None => {
             for i in 0..doc.page_count() {
@@ -342,7 +353,7 @@ fn merge(files: &[PathBuf], output: &Path) -> Result<()> {
 }
 
 fn split_cmd(file: &Path, output: &Path, pages: Option<&str>) -> Result<()> {
-    let doc = Document::open(file)?;
+    let doc = password::open(file)?;
     let ranges: Option<Vec<PageRange>> = pages
         .map(|spec| parse_page_ranges(spec, doc.page_count()))
         .transpose()?;

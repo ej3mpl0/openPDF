@@ -288,3 +288,106 @@ fn tempfile() -> PathBuf {
     std::fs::create_dir_all(&dir).unwrap();
     dir
 }
+
+fn run_stdin(args: &[&str], stdin: &str) -> std::process::Output {
+    use std::io::Write;
+    let mut child = Command::new(bin())
+        .args(args)
+        .env("LC_ALL", "C")
+        .env("LANG", "C")
+        .env_remove("LANGUAGE")
+        .stdin(std::process::Stdio::piped())
+        .stdout(std::process::Stdio::piped())
+        .stderr(std::process::Stdio::piped())
+        .spawn()
+        .expect("run openpdf");
+    child
+        .stdin
+        .take()
+        .unwrap()
+        .write_all(stdin.as_bytes())
+        .unwrap();
+    child.wait_with_output().unwrap()
+}
+
+#[test]
+fn no_plaintext_password_options() {
+    for cmd in ["protect", "unprotect"] {
+        let out = run(&[cmd, "--help"]);
+        let help = String::from_utf8_lossy(&out.stdout);
+        assert!(out.status.success(), "{help}");
+        for opt in ["--password <", "--user <", "--owner <"] {
+            assert!(!help.contains(opt), "{cmd} --help offers {opt}:\n{help}");
+        }
+        assert!(help.contains("--password-stdin"), "{help}");
+    }
+    let out = run(&[
+        "unprotect",
+        corpus("hello.pdf").to_str().unwrap(),
+        "--password",
+        "secret",
+        "-o",
+        "/dev/null",
+    ]);
+    assert!(!out.status.success());
+    assert!(!String::from_utf8_lossy(&out.stderr).contains("wrong password"));
+}
+
+#[test]
+fn protect_and_unprotect_via_password_stdin() {
+    let dir = std::env::temp_dir().join(format!("openpdf-pw-{}", std::process::id()));
+    std::fs::create_dir_all(&dir).unwrap();
+    let locked = dir.join("locked.pdf");
+    let open = dir.join("open.pdf");
+    let hello = corpus("hello.pdf");
+    let out = run_stdin(
+        &[
+            "protect",
+            "--password-stdin",
+            hello.to_str().unwrap(),
+            "-o",
+            locked.to_str().unwrap(),
+        ],
+        "ffi-secret-NEVER-ECHO-9f3a\nowner-pw\n",
+    );
+    assert!(
+        out.status.success(),
+        "{}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+
+    let out = run(&["info", locked.to_str().unwrap(), "--password-stdin"]);
+    assert!(!out.status.success());
+    let out = run_stdin(
+        &["info", "--password-stdin", locked.to_str().unwrap()],
+        "wrong\n",
+    );
+    let err = String::from_utf8_lossy(&out.stderr);
+    assert!(!out.status.success());
+    assert!(err.contains("wrong password"), "{err}");
+
+    let out = run_stdin(
+        &[
+            "unprotect",
+            "--password-stdin",
+            locked.to_str().unwrap(),
+            "-o",
+            open.to_str().unwrap(),
+        ],
+        "ffi-secret-NEVER-ECHO-9f3a\n",
+    );
+    let all = format!(
+        "{}{}",
+        String::from_utf8_lossy(&out.stdout),
+        String::from_utf8_lossy(&out.stderr)
+    );
+    assert!(out.status.success(), "{all}");
+    assert!(!all.contains("ffi-secret-NEVER-ECHO-9f3a"));
+    let out = run(&["info", open.to_str().unwrap()]);
+    assert!(
+        out.status.success(),
+        "{}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    std::fs::remove_dir_all(&dir).ok();
+}

@@ -232,7 +232,7 @@ pub(crate) fn extract_pages(doc: &Document, range: &PageRange) -> Result<Documen
     }
     strip_signatures(&mut src);
 
-    Document::from_lopdf(src, None)
+    doc.derive(src)
 }
 
 #[cfg(test)]
