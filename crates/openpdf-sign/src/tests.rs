@@ -369,6 +369,36 @@ fn sign_and_verify_corpus_keeps_prefix() {
 }
 
 #[test]
+fn apply_signer_twice_verifies_both_signatures() {
+    let Some(()) = with_softhsm(|| {
+        let signer = signer();
+        let certs = signer.list_certificates().unwrap();
+        let cert = certs.iter().find(|c| can_use(c)).unwrap_or(&certs[0]);
+        let request = SignRequest {
+            cert_id: cert.id.clone(),
+            reason: Some("first".into()),
+            location: Some("CI".into()),
+            contact: None,
+            appearance: None,
+        };
+        let mut doc = Document::open(corpus("hello.pdf")).unwrap();
+        doc.apply_signer(&signer, &request).unwrap();
+        let after_first = doc.bytes_for_signer().unwrap();
+        doc.apply_signer(&signer, &request).unwrap();
+        let after_second = doc.bytes_for_signer().unwrap();
+        assert!(after_second.starts_with(after_first.as_slice()));
+        let infos = verify_pdf(after_second.as_slice()).unwrap();
+        assert_eq!(infos.len(), 2, "expected both PAdES signatures");
+        assert!(
+            infos.iter().all(|i| i.valid == Some(true)),
+            "signatures: {infos:?}"
+        );
+    }) else {
+        return;
+    };
+}
+
+#[test]
 fn sign_visible_appearance() {
     let Some(()) = with_softhsm(|| {
         let signer = signer();

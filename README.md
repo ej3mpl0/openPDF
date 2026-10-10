@@ -6,6 +6,7 @@ Native Linux PDF app. Rust + GTK4/libadwaita, render with pdfium-render (BSD). M
 - `openpdf-cli`: `openpdf info|render|text|merge|split` plus organize (`insert`, `extract`, `replace`, `crop`), `optimize`, `protect`/`unprotect`/`sanitize`, `watermark`/`header`/`footer`/`number`, `from-images`/`to-images`
 - `openpdf-gtk`: UI (depends only on core)
 - `openpdf-sign`: PKCS#11 / PAdES backend (depends only on core)
+- `openpdf-ffi`: UniFFI entry point for future native macOS (Swift) and Windows (C#) UIs; owned-data APIs, signing stays in Rust
 
 Rule: gtk and sign depend on core, never on each other. The application
 binary constructs `Box<dyn Signer>` from `openpdf-sign` (with a UI
