@@ -98,6 +98,16 @@ jobs:
         env:
           OPENPDF_MEASURE_STARTUP_MS: ${{ matrix.measure_startup_core_ms }}
 
+      # The GUI measure runs with the SVG pixbuf loader ON, as the AppImage
+      # ships it (symbolic Adwaita icons go through librsvg, ~+8-14 MiB peak).
+      # Installed explicitly so the number does not depend on the runner image;
+      # run-measure.py fails if the loaders.cache in use lacks svg.
+      - name: Install SVG pixbuf loader and Adwaita icons (GUI measure)
+        if: runner.os == 'Linux'
+        run: |
+          sudo apt-get install -y --no-install-recommends \
+            librsvg2-common adwaita-icon-theme
+
       - name: Measure GUI
         if: runner.os == 'Linux'
         run: python3 .github/scripts/run-measure.py --kind gui --runs 5

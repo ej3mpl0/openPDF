@@ -185,6 +185,35 @@ def pin_prefix(cpus: str) -> list[str]:
     return []
 
 
+def pixbuf_loaders_cache() -> Path | None:
+    """The gdk-pixbuf loaders.cache GTK will use (GDK_PIXBUF_MODULE_FILE, else
+    pkg-config's gdk_pixbuf_cache_file, else the first system one)."""
+    env = os.environ.get("GDK_PIXBUF_MODULE_FILE")
+    if env:
+        return Path(env)
+    pc = shutil.which("pkg-config")
+    if pc:
+        out = subprocess.run([pc, "--variable=gdk_pixbuf_cache_file", "gdk-pixbuf-2.0"],
+                             text=True, capture_output=True, check=False).stdout.strip()
+        if out:
+            return Path(out)
+    for c in sorted(Path("/usr/lib").glob("*/gdk-pixbuf-2.0/*/loaders.cache")):
+        return c
+    return None
+
+
+def check_svg_loader() -> str | None:
+    """GUI numbers are gated with the SVG loader ON (as shipped). Error or None."""
+    cache = pixbuf_loaders_cache()
+    if cache is None or not cache.is_file():
+        return f"gdk-pixbuf loaders.cache not found ({cache}); install librsvg2-common"
+    text = cache.read_text(encoding="utf-8", errors="replace")
+    if not re.search(r'^"[^"]*pixbufloader[_-]?svg[^"]*\.so"', text, re.M):
+        return f"gdk-pixbuf loaders.cache {cache} has no svg loader; install librsvg2-common"
+    print(f"measure: svg pixbuf loader present in {cache}")
+    return None
+
+
 def run_gui(binary: Path, frames: str) -> tuple[int, str]:
     cmd = PIN + [str(binary), "--measure", frames]
     env = os.environ.copy()
@@ -281,6 +310,10 @@ def main(argv: list[str] | None = None) -> int:
         return fail(f"{kind} binary not found at {binary}; build it first "
                     f"(cargo build --release {'--workspace --locked' if kind == 'gui' else '-p openpdf-cli'})")
 
+    if kind == "gui" and sys.platform.startswith("linux"):
+        err = check_svg_loader()
+        if err:
+            return fail(err)
     print(f"measure: kind={kind} running {binary} runs={args.runs}")
     print(f"measure: limits median startup<={startup_limit} ms, max peak RSS<={ram_mib} MiB")
     print(f"measure: warmup={args.warmup} pin={' '.join(PIN) or 'off'}")
