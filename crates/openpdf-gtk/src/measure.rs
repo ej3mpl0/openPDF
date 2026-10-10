@@ -782,6 +782,15 @@ pub fn register_tile_buffer(ptr: usize, bytes: usize) {
     }
 }
 
+#[cfg(test)]
+fn gtk_tile_buffers_for_test() -> Vec<(usize, usize)> {
+    GTK_TILE_BUFFERS
+        .lock()
+        .ok()
+        .map(|g| g.clone())
+        .unwrap_or_default()
+}
+
 /// Unique tile bytes: engine cache ∪ GTK textures, each `Arc` once.
 pub fn unique_tile_bytes(engine: &[(usize, usize)], gtk: &[(usize, usize)]) -> usize {
     let mut seen: BTreeMap<usize, usize> = BTreeMap::new();
@@ -1666,12 +1675,45 @@ Pss:                  32 kB
 
     #[test]
     fn unique_tiles_count_shared_arc_once() {
-        let buf = std::sync::Arc::new(vec![0u8; 8192]);
-        let ptr = std::sync::Arc::as_ptr(&buf) as usize;
-        let engine = vec![(ptr, 8192)];
-        let gtk = vec![(ptr, 8192)];
-        assert_eq!(unique_tile_bytes(&engine, &gtk), 8192);
-        assert_eq!(unique_tile_bytes(&engine, &[(ptr + 1, 4096)]), 8192 + 4096);
+        use openpdf_core::{DocumentId, Tile, TileCache, TileKey};
+        use std::sync::Arc;
+
+        let tile = Arc::new(Tile {
+            key: TileKey::new(DocumentId(1), 0, 1.0, 0, 0),
+            width: 2,
+            height: 2,
+            rgba: vec![255; 4096],
+        });
+        let ptr = Arc::as_ptr(&tile) as usize;
+        let bytes = tile.byte_len();
+        assert_eq!(bytes, 4096);
+
+        let mut engine = TileCache::new(64 * 1024);
+        engine.insert(Arc::clone(&tile));
+        register_tile_buffer(ptr, bytes);
+
+        let engine_ids = engine.buffer_idents();
+        assert_eq!(engine_ids, vec![(ptr, bytes)]);
+        let gtk_ids: Vec<(usize, usize)> = gtk_tile_buffers_for_test()
+            .into_iter()
+            .filter(|(p, _)| *p == ptr)
+            .collect();
+        assert_eq!(gtk_ids, vec![(ptr, bytes)]);
+        assert_eq!(
+            unique_tile_bytes(&engine_ids, &gtk_ids),
+            bytes,
+            "same Arc in engine cache and GTK texture must count once"
+        );
+
+        let smaps = "\
+7f1000000000-7f1000200000 r-xp 00000000 08:01 1                          /usr/local/lib/libpdfium.so
+Rss:                2048 kB
+Pss:                2048 kB
+";
+        let pdfium = pdfium_mapping_kb_from_smaps(smaps);
+        assert_eq!(pdfium, 2048);
+        let ours = (unique_tile_bytes(&engine_ids, &gtk_ids) / 1024) as u64 + pdfium;
+        assert_eq!(ours, 4 + 2048);
     }
 
     #[test]
