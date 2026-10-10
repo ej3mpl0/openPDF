@@ -219,19 +219,24 @@ impl Session {
         }
     }
 
-    pub fn bytes_for_verify(&self) -> Result<Vec<u8>, BackendError> {
+    /// Same contract as [`openpdf_core::Document::original_bytes`] once Jian
+    /// makes that method `pub` on #25. Until then, read the file that was
+    /// opened. Never [`Document::to_bytes`] — that is `Signed(Rewrite)`.
+    pub fn original_bytes(&self) -> Result<Vec<u8>, BackendError> {
         if let Some(path) = self.path.borrow().as_ref() {
             if path.exists() {
                 return std::fs::read(path).map_err(BackendError::from);
             }
         }
-        // Fallback for unsaved buffers. `Document::original_bytes` is still
-        // `pub(crate)` until Jian's core PR lands.
-        if self.doc.borrow().is_signed() {
-            self.doc.borrow().to_incremental_bytes().map_err(core_err)
-        } else {
-            self.to_bytes()
-        }
+        // When `Document::original_bytes` is `pub`:
+        //   return Ok(self.doc.borrow().original_bytes().to_vec());
+        Err(BackendError::Invalid(openpdf_core::tr(
+            "Cannot verify: original file bytes are unavailable.",
+        )))
+    }
+
+    pub fn bytes_for_verify(&self) -> Result<Vec<u8>, BackendError> {
+        self.original_bytes()
     }
 
     pub fn apply_signer(
@@ -671,18 +676,19 @@ impl Opened {
         }
     }
 
-    /// Bytes for token-less verify. Never use [`Self::to_bytes`] on a signed
-    /// document — that is a full rewrite and returns `Signed(Rewrite)`.
-    ///
-    /// Prepared for `Document::original_bytes()` once that is `pub` on core
-    /// (#25). Until then, read the file that was opened.
-    pub fn bytes_for_verify(&self) -> Result<Vec<u8>, BackendError> {
+    /// Prepared for [`openpdf_core::Document::original_bytes`] (`pub` on #25).
+    /// Until that lands, this reads the opened path and errors if it cannot.
+    pub fn original_bytes(&self) -> Result<Vec<u8>, BackendError> {
         match self {
-            Self::Core(s) => s.bytes_for_verify(),
+            Self::Core(s) => s.original_bytes(),
             Self::Mock(_) => Err(BackendError::Invalid(openpdf_core::tr(
                 "Placeholder has no PDF bytes.",
             ))),
         }
+    }
+
+    pub fn bytes_for_verify(&self) -> Result<Vec<u8>, BackendError> {
+        self.original_bytes()
     }
 
     pub fn apply_signer(
@@ -906,7 +912,7 @@ mod tests {
             .expect("write sibling and reopen");
         assert_eq!(dest, dir.join("src-signed.pdf"));
         assert_eq!(session.path(), Some(dest.clone()));
-        let verify = session.bytes_for_verify().expect("verify bytes");
+        let verify = session.original_bytes().expect("verify original bytes");
         assert_eq!(verify, written, "verify must read the written sibling");
         assert_ne!(
             verify,

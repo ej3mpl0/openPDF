@@ -772,3 +772,6 @@ msgstr "el idioma de OCR {language} no está instalado. Instalados: {installed}.
 
 msgid "Saved signed PDF to {path}"
 msgstr "PDF firmado guardado en {path}"
+
+msgid "Cannot verify: original file bytes are unavailable."
+msgstr "No se puede verificar: no hay bytes originales del archivo."
