@@ -1,5 +1,6 @@
 // SPDX-License-Identifier: MPL-2.0
 mod about;
+mod chrome;
 mod home;
 mod preferences;
 mod sign;
@@ -491,9 +492,30 @@ const CSS: &str = r#"
 "#;
 
 const CSS_DESIGN: &str = r#"
-headerbar, tabbar, .mode-bar, .viewer-chrome {
+.tab-row, .tool-row, .status-bar, .rail-strip, tabbar, .mode-bar {
   background: #f8f9fa;
   color: #1a1c20;
+}
+
+.tab-row {
+  min-height: 36px;
+  padding-right: 4px;
+}
+
+.tool-row {
+  padding: 4px 8px;
+  border-top: 1px solid #e6e8ec;
+}
+
+.status-bar {
+  padding: 4px 12px;
+  border-top: 1px solid #e6e8ec;
+  min-height: 28px;
+}
+
+.rail-strip {
+  padding: 8px 4px;
+  border-right: 1px solid #e6e8ec;
 }
 
 .suggested-action {
@@ -568,7 +590,7 @@ headerbar, tabbar, .mode-bar, .viewer-chrome {
   padding: 12px 16px;
 }
 
-.dark headerbar, .dark tabbar, .dark .mode-bar, .dark .viewer-chrome {
+.dark .tab-row, .dark .tool-row, .dark .status-bar, .dark .rail-strip, .dark tabbar, .dark .mode-bar {
   background: #2a2c31;
   color: #ecedef;
 }

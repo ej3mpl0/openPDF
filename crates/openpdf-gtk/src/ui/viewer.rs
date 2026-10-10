@@ -17,9 +17,9 @@ use gtk4 as gtk;
 use libadwaita as adw;
 use openpdf_core::Priority;
 
-const PADDING: f64 = 18.0;
-const GAP: f64 = 14.0;
-const THUMB_WIDTH: f64 = 132.0;
+const PADDING: f64 = 40.0;
+const GAP: f64 = 20.0;
+const THUMB_WIDTH: f64 = 120.0;
 
 struct Shared {
     doc: Rc<Opened>,
@@ -90,7 +90,6 @@ impl DocumentView {
     }
 
     pub fn reveal_find(&self) {
-        self.search_bar.set_search_mode(true);
         self.search_entry.grab_focus();
     }
 
@@ -338,10 +337,22 @@ impl DocumentView {
     fn update_chrome(&self) {
         let n = self.shared.doc.page_count();
         let p = self.shared.current_page.get() + 1;
-        self.page_label
-            .set_text(&format!("{} {p} / {n}", t(self.lang, "Page")));
+        let line = t(self.lang, "Page {n} of {m}")
+            .replace("{n}", &p.to_string())
+            .replace("{m}", &n.to_string());
+        self.page_label.set_text(&line);
         self.zoom_label
-            .set_text(&format!("{:.0}%", self.shared.zoom.get() * 100.0));
+            .set_text(&format!("{:.0} %", self.shared.zoom.get() * 100.0));
+    }
+
+    pub fn set_fit_width(&self) {
+        self.shared.zoom_mode.set(ZoomMode::FitWidth);
+        self.relayout();
+    }
+
+    pub fn set_fit_page(&self) {
+        self.shared.zoom_mode.set(ZoomMode::FitPage);
+        self.relayout();
     }
 }
 
@@ -365,7 +376,13 @@ impl TileReady {
     }
 }
 
-pub fn build(doc: Rc<Opened>, settings: &Settings, lang: Lang) -> Rc<DocumentView> {
+pub fn build(
+    doc: Rc<Opened>,
+    settings: &Settings,
+    lang: Lang,
+    zoom_label: gtk::Label,
+    search_entry: gtk::SearchEntry,
+) -> Rc<DocumentView> {
     let tile_size = if settings.tile_size == 0 {
         DEFAULT_TILE_SIZE
     } else {
@@ -418,15 +435,55 @@ pub fn build(doc: Rc<Opened>, settings: &Settings, lang: Lang) -> Rc<DocumentVie
     thumbs_scroll.set_vexpand(true);
     thumbs_scroll.set_child(Some(&thumbs_area));
 
-    let sidebar = gtk::Box::new(gtk::Orientation::Vertical, 0);
-    let side_header = gtk::Label::new(Some(t(lang, "Thumbnails")));
-    side_header.add_css_class("caption");
-    side_header.add_css_class("dim-label");
-    side_header.set_margin_top(8);
-    side_header.set_margin_bottom(4);
-    sidebar.append(&side_header);
-    sidebar.append(&thumbs_scroll);
-    append_outline(&sidebar, &shared, lang);
+    let thumbs_col = gtk::Box::new(gtk::Orientation::Vertical, 0);
+    thumbs_col.append(&thumbs_scroll);
+
+    let sidebar = gtk::Box::new(gtk::Orientation::Horizontal, 0);
+    if !super::chrome::measuring() {
+        let strip = gtk::Box::new(gtk::Orientation::Vertical, 4);
+        strip.add_css_class("rail-strip");
+        let thumbs_btn = gtk::ToggleButton::new();
+        thumbs_btn.set_active(true);
+        thumbs_btn.add_css_class("flat");
+        thumbs_btn.set_tooltip_text(Some(t(lang, "Thumbnails")));
+        let outline_btn = gtk::ToggleButton::new();
+        outline_btn.add_css_class("flat");
+        outline_btn.set_group(Some(&thumbs_btn));
+        outline_btn.set_tooltip_text(Some(t(lang, "Bookmarks")));
+        let attach_btn = gtk::Button::new();
+        attach_btn.add_css_class("flat");
+        attach_btn.set_sensitive(false);
+        attach_btn.set_tooltip_text(Some(t(lang, "Attachments")));
+        strip.append(&thumbs_btn);
+        strip.append(&outline_btn);
+        strip.append(&attach_btn);
+        glib::idle_add_local_once(
+            clone!(@strong thumbs_btn, @strong outline_btn, @strong attach_btn => move || {
+                thumbs_btn.set_icon_name("view-paged-symbolic");
+                outline_btn.set_icon_name("view-list-symbolic");
+                attach_btn.set_icon_name("mail-attachment-symbolic");
+            }),
+        );
+        let stack = gtk::Stack::new();
+        stack.add_named(&thumbs_col, Some("thumbs"));
+        let outline_box = gtk::Box::new(gtk::Orientation::Vertical, 0);
+        append_outline(&outline_box, &shared, lang);
+        stack.add_named(&outline_box, Some("outline"));
+        thumbs_btn.connect_toggled(clone!(@strong stack => move |btn| {
+            if btn.is_active() {
+                stack.set_visible_child_name("thumbs");
+            }
+        }));
+        outline_btn.connect_toggled(clone!(@strong stack => move |btn| {
+            if btn.is_active() {
+                stack.set_visible_child_name("outline");
+            }
+        }));
+        sidebar.append(&strip);
+        sidebar.append(&stack);
+    } else {
+        sidebar.append(&thumbs_col);
+    }
 
     let content = gtk::Box::new(gtk::Orientation::Vertical, 0);
     let locked_banner = gtk::Label::new(Some(t(
@@ -450,91 +507,42 @@ pub fn build(doc: Rc<Opened>, settings: &Settings, lang: Lang) -> Rc<DocumentVie
         content.append(&banner);
     }
 
-    let measuring = gtk::gio::Application::default()
-        .and_then(|app| app.application_id())
-        .is_some_and(|id| id == crate::MEASURE_APP_ID);
-    if !measuring {
-        let mode_bar = gtk::Box::new(gtk::Orientation::Horizontal, 6);
-        mode_bar.add_css_class("mode-bar");
-        mode_bar.set_margin_start(8);
-        mode_bar.set_margin_end(8);
-        let view_mode = gtk::ToggleButton::with_label(t(lang, "View"));
-        view_mode.set_active(true);
-        view_mode.add_css_class("mode-btn");
-        view_mode.add_css_class("pill");
-        view_mode.add_css_class("suggested-action");
-        mode_bar.append(&view_mode);
-        for (label, action) in [
-            (t(lang, "Comment"), None),
-            (t(lang, "Fill and sign"), Some("app.sign")),
-            (t(lang, "Organize pages"), None),
-            (t(lang, "Edit"), None),
-            (t(lang, "Protect"), None),
-            (t(lang, "Tools"), None),
-        ] {
-            let btn = gtk::Button::with_label(label);
-            btn.add_css_class("mode-btn");
-            btn.add_css_class("flat");
-            btn.add_css_class("pill");
-            if let Some(name) = action {
-                btn.connect_clicked(move |w| {
-                    let _ = w.activate_action(name, None);
-                });
-            } else {
-                btn.set_sensitive(false);
-                btn.set_tooltip_text(Some(t(lang, "Waiting on openpdf-core")));
-            }
-            mode_bar.append(&btn);
-        }
-        content.append(&mode_bar);
+    let prev = gtk::Button::new();
+    let next = gtk::Button::new();
+    let rotate_btn = gtk::Button::new();
+    let delete_btn = gtk::Button::new();
+    let zoom_out = gtk::Button::new();
+    let zoom_in = gtk::Button::new();
+    for btn in [&prev, &next, &rotate_btn, &delete_btn, &zoom_out, &zoom_in] {
+        btn.set_visible(false);
     }
 
-    let chrome = gtk::Box::new(gtk::Orientation::Horizontal, 8);
-    chrome.add_css_class("viewer-chrome");
-    chrome.set_margin_start(8);
-    chrome.set_margin_end(8);
-    chrome.set_margin_top(6);
-    chrome.set_margin_bottom(6);
-    let prev = gtk::Button::new();
-    prev.add_css_class("flat");
-    let next = gtk::Button::new();
-    next.add_css_class("flat");
     let page_label = gtk::Label::new(None);
     page_label.add_css_class("dim-label");
-    let rotate_btn = gtk::Button::new();
-    rotate_btn.add_css_class("flat");
-    rotate_btn.set_tooltip_text(Some(t(lang, "Rotate page")));
-    let delete_btn = gtk::Button::new();
-    delete_btn.add_css_class("flat");
-    delete_btn.set_tooltip_text(Some(t(lang, "Delete page")));
-    let zoom_out = gtk::Button::new();
-    zoom_out.add_css_class("flat");
-    let zoom_in = gtk::Button::new();
-    zoom_in.add_css_class("flat");
-    let zoom_label = gtk::Label::new(None);
-    zoom_label.add_css_class("dim-label");
-    chrome.append(&prev);
-    chrome.append(&page_label);
-    chrome.append(&next);
-    chrome.append(&rotate_btn);
-    chrome.append(&delete_btn);
-    let spacer = gtk::Box::new(gtk::Orientation::Horizontal, 0);
-    spacer.set_hexpand(true);
-    chrome.append(&spacer);
-    chrome.append(&zoom_out);
-    chrome.append(&zoom_label);
-    chrome.append(&zoom_in);
+    page_label.set_xalign(0.0);
+    page_label.set_hexpand(true);
 
-    let search_entry = gtk::SearchEntry::new();
-    search_entry.set_placeholder_text(Some(t(lang, "Find in document")));
     let search_bar = gtk::SearchBar::new();
     search_bar.set_child(Some(&search_entry));
-    search_bar.set_show_close_button(true);
+    search_bar.set_show_close_button(false);
     search_bar.connect_entry(&search_entry);
+    search_bar.set_visible(false);
 
-    content.append(&chrome);
+    let status = gtk::Box::new(gtk::Orientation::Horizontal, 8);
+    status.add_css_class("status-bar");
+    status.append(&page_label);
+    let fit_w = gtk::Button::new();
+    fit_w.add_css_class("flat");
+    fit_w.set_tooltip_text(Some(t(lang, "Fit width")));
+    let fit_p = gtk::Button::new();
+    fit_p.add_css_class("flat");
+    fit_p.set_tooltip_text(Some(t(lang, "Fit page")));
+    status.append(&fit_w);
+    status.append(&fit_p);
+
     content.append(&search_bar);
     content.append(&pages_scroll);
+    content.append(&status);
 
     let split = adw::OverlaySplitView::new();
     split.set_sidebar(Some(&sidebar));
@@ -568,15 +576,18 @@ pub fn build(doc: Rc<Opened>, settings: &Settings, lang: Lang) -> Rc<DocumentVie
     view.update_chrome();
     view.refresh_lock_chrome();
     crate::measure::note_idle_load_pending();
-    glib::idle_add_local_once(clone!(@strong view => move || {
-        view.prev_btn.set_icon_name("go-up-symbolic");
-        view.next_btn.set_icon_name("go-down-symbolic");
-        view.rotate_btn.set_icon_name("object-rotate-right-symbolic");
-        view.delete_btn.set_icon_name("edit-delete-symbolic");
-        view.zoom_out_btn.set_icon_name("zoom-out-symbolic");
-        view.zoom_in_btn.set_icon_name("zoom-in-symbolic");
-        crate::measure::note_idle_load_finished();
-    }));
+    let skip_icons = super::chrome::measuring();
+    glib::idle_add_local_once(
+        clone!(@strong view, @strong fit_w, @strong fit_p => move || {
+            if !skip_icons {
+                fit_w.set_icon_name("zoom-fit-best-symbolic");
+                fit_p.set_icon_name("view-fullscreen-symbolic");
+            }
+            crate::measure::note_idle_load_finished();
+        }),
+    );
+    fit_w.connect_clicked(clone!(@strong view => move |_| view.set_fit_width()));
+    fit_p.connect_clicked(clone!(@strong view => move |_| view.set_fit_page()));
 
     pages_area.set_draw_func(clone!(@strong view => move |_, cr, _, _| {
         paint_pages(cr, &view);
@@ -819,8 +830,11 @@ fn paint_pages(cr: &cairo::Context, view: &DocumentView) {
     view.shared.doc.request_tiles(&preview, Priority::Adjacent);
 
     for page in &layout.pages {
-        cr.set_source_rgba(0.078, 0.094, 0.122, 0.12);
-        cr.rectangle(page.x + 2.0, page.y + 3.0, page.width, page.height);
+        cr.set_source_rgba(0.078, 0.094, 0.122, 0.18);
+        cr.rectangle(page.x + 3.0, page.y + 5.0, page.width, page.height);
+        let _ = cr.fill();
+        cr.set_source_rgba(0.078, 0.094, 0.122, 0.08);
+        cr.rectangle(page.x + 1.0, page.y + 2.0, page.width, page.height);
         let _ = cr.fill();
         cr.set_source_rgb(1.0, 1.0, 1.0);
         cr.rectangle(page.x, page.y, page.width, page.height);

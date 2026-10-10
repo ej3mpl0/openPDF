@@ -330,6 +330,9 @@ msgstr "Comentar"
 msgid "Fill and sign"
 msgstr "Rellenar y firmar"
 
+msgid "Organize"
+msgstr "Organizar"
+
 msgid "Organize pages"
 msgstr "Organizar páginas"
 
@@ -437,6 +440,21 @@ msgstr "App de PDF local. Sin cuentas, sin nube, sin telemetría."
 
 msgid "Find in document"
 msgstr "Buscar en el documento"
+
+msgid "Find in document Ctrl+F"
+msgstr "Buscar en el documento Ctrl+F"
+
+msgid "Page {n} of {m}"
+msgstr "Página {n} de {m}"
+
+msgid "Save"
+msgstr "Guardar"
+
+msgid "Print"
+msgstr "Imprimir"
+
+msgid "Attachments"
+msgstr "Adjuntos"
 
 msgid "No matches"
 msgstr "Sin resultados"

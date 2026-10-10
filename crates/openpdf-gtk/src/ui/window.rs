@@ -39,6 +39,8 @@ struct Ctx {
     current: Rc<RefCell<Option<Rc<DocumentView>>>>,
     home_slot: gtk::Box,
     home_filled: Rc<Cell<bool>>,
+    zoom_label: gtk::Label,
+    search_entry: gtk::SearchEntry,
 }
 
 #[derive(Clone)]
@@ -61,7 +63,7 @@ impl OpenPdfWindow {
 
         let window = adw::ApplicationWindow::new(app);
         window.set_title(Some(t(lang, "openPDF")));
-        window.set_default_size(1180, 800);
+        window.set_default_size(1280, 800);
 
         let toast = adw::ToastOverlay::new();
         let tab_view = adw::TabView::new();
@@ -69,26 +71,33 @@ impl OpenPdfWindow {
 
         let tab_bar = adw::TabBar::new();
         tab_bar.set_view(Some(&tab_view));
-        tab_bar.set_autohide(true);
 
-        let header = adw::HeaderBar::new();
-        let open_btn = gtk::Button::from_icon_name("document-open-symbolic");
-        open_btn.set_tooltip_text(Some(t(lang, "Open…")));
-        header.pack_start(&open_btn);
-
-        let sidebar_btn = gtk::ToggleButton::new();
-        sidebar_btn.set_icon_name("sidebar-show-symbolic");
-        sidebar_btn.set_tooltip_text(Some(t(lang, "Thumbnails")));
-        sidebar_btn.set_active(settings.borrow().show_thumbnails);
-        header.pack_start(&sidebar_btn);
-
-        let menu_btn = gtk::MenuButton::new();
-        menu_btn.set_menu_model(Some(&app_menu(lang)));
-        header.pack_end(&menu_btn);
+        let menu = app_menu(lang);
+        let measuring = super::chrome::measuring();
+        let tools = if measuring {
+            None
+        } else {
+            Some(super::chrome::tool_row(lang, &menu))
+        };
+        let zoom_label = tools
+            .as_ref()
+            .map(|t| t.zoom_label.clone())
+            .unwrap_or_else(|| gtk::Label::new(None));
+        let search_entry = tools
+            .as_ref()
+            .map(|t| t.search_entry.clone())
+            .unwrap_or_else(gtk::SearchEntry::new);
+        let settings_btn = tools.as_ref().map(|t| t.settings_btn.clone());
 
         let toolbar = adw::ToolbarView::new();
-        toolbar.add_top_bar(&header);
-        toolbar.add_top_bar(&tab_bar);
+        let tab_row = super::chrome::tab_row(&tab_bar, {
+            let app = app.clone();
+            move || app.activate_action("open", None)
+        });
+        toolbar.add_top_bar(&tab_row);
+        if let Some(tools) = &tools {
+            toolbar.add_top_bar(&tools.root);
+        }
         toast.set_child(Some(&tab_view));
         toolbar.set_content(Some(&toast));
         window.set_content(Some(&toolbar));
@@ -108,35 +117,11 @@ impl OpenPdfWindow {
             current: current.clone(),
             home_slot: home_slot.clone(),
             home_filled: home_filled.clone(),
+            zoom_label: zoom_label.clone(),
+            search_entry: search_entry.clone(),
         };
 
         install_actions(app, &ctx);
-
-        let open_cb = {
-            let ctx = ctx.clone();
-            move || open_file_dialog(&ctx)
-        };
-        open_btn.connect_clicked({
-            let open_cb = open_cb.clone();
-            move |_| open_cb()
-        });
-
-        sidebar_btn.connect_toggled({
-            let ctx = ctx.clone();
-            move |btn| {
-                ctx.settings.borrow_mut().show_thumbnails = btn.is_active();
-                let _ = settings::save(&ctx.settings.borrow());
-                if let Some(view) = ctx.current.borrow().as_ref() {
-                    view.set_sidebar(btn.is_active());
-                }
-            }
-        });
-
-        // Chrome only until after present(): recent-files I/O and the tools
-        // list stay off the first frame. `--measure` never fills this tab.
-        let home_page = tab_view.append(&home_slot);
-        home_page.set_title(t(lang, "openPDF"));
-        tab_view.set_page_pinned(&home_page, true);
 
         tab_view.connect_selected_page_notify({
             let current = current.clone();
@@ -161,17 +146,21 @@ impl OpenPdfWindow {
         });
 
         crate::measure::note_idle_load_pending();
-        window.add_tick_callback(clone!(@strong menu_btn => move |w, _| {
-            let menu_btn = menu_btn.clone();
+        window.add_tick_callback(move |w, _| {
             let w = w.clone();
+            let settings_btn = settings_btn.clone();
             glib::idle_add_local_once(move || {
-                super::register_deferred_icons();
-                menu_btn.set_icon_name("open-menu-symbolic");
-                w.set_icon_name(Some(crate::APP_ID));
+                if !super::chrome::measuring() {
+                    super::register_deferred_icons();
+                    if let Some(btn) = settings_btn {
+                        btn.set_icon_name("preferences-system-symbolic");
+                    }
+                    w.set_icon_name(Some(crate::APP_ID));
+                }
                 crate::measure::note_idle_load_finished();
             });
             glib::ControlFlow::Break
-        }));
+        });
 
         Self { window, ctx }
     }
@@ -203,6 +192,7 @@ impl OpenPdfWindow {
         if self.ctx.home_filled.replace(true) {
             return;
         }
+        let skip_tab = self.ctx.current.borrow().is_some();
         let ctx = self.ctx.clone();
         let home = home::build(
             ctx.settings.clone(),
@@ -240,6 +230,10 @@ impl OpenPdfWindow {
             },
         );
         self.ctx.home_slot.append(&home.root);
+        if !skip_tab {
+            let page = self.ctx.tab_view.append(&self.ctx.home_slot);
+            page.set_title(t(self.ctx.settings.borrow().lang(), "openPDF"));
+        }
     }
 
     pub fn present(&self) {
@@ -305,7 +299,18 @@ fn install_actions(app: &adw::Application, ctx: &Ctx) {
     add_win_action(&ctx.window, "zoom-in", ctx, |v| v.zoom_in());
     add_win_action(&ctx.window, "zoom-out", ctx, |v| v.zoom_out());
     add_win_action(&ctx.window, "toggle-sidebar", ctx, |v| v.toggle_sidebar());
-    add_win_action(&ctx.window, "find", ctx, |v| v.reveal_find());
+    let find = gio::SimpleAction::new("find", None);
+    find.connect_activate({
+        let search = ctx.search_entry.clone();
+        let current = ctx.current.clone();
+        move |_, _| {
+            search.grab_focus();
+            if let Some(v) = current.borrow().as_ref() {
+                v.reveal_find();
+            }
+        }
+    });
+    ctx.window.add_action(&find);
     add_win_action(&ctx.window, "next-page", ctx, |v| v.next_page());
     add_win_action(&ctx.window, "prev-page", ctx, |v| v.prev_page());
     add_win_action(&ctx.window, "rotate", ctx, |v| {
@@ -415,7 +420,13 @@ fn add_opened(ctx: &Ctx, opened: Opened) {
     let lang = ctx.settings.borrow().lang();
     let locked = opened.is_locked();
     let placeholder = opened.is_placeholder();
-    let view = viewer::build(Rc::new(opened), &ctx.settings.borrow(), lang);
+    let view = viewer::build(
+        Rc::new(opened),
+        &ctx.settings.borrow(),
+        lang,
+        ctx.zoom_label.clone(),
+        ctx.search_entry.clone(),
+    );
     let page = ctx.tab_view.append(view.widget());
     page.set_title(&view.title());
     if let Some(path) = view.path() {
