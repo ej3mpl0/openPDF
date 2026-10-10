@@ -1,0 +1,8 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<gresources>
+  <!-- Top-bar icons only. Menus / tools / zoom load after the first frame. -->
+  <gresource prefix="/io/github/ej3mpl0/openpdf/icons">
+    <file alias="scalable/actions/document-open-symbolic.svg">icons/scalable/actions/document-open-symbolic.svg</file>
+    <file alias="scalable/actions/sidebar-show-symbolic.svg">icons/scalable/actions/sidebar-show-symbolic.svg</file>
+  </gresource>
+</gresources>

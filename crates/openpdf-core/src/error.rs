@@ -5,7 +5,11 @@ use crate::i18n::{tr, tr_args};
 
 /// Crate-wide error type. Variants are stable so the GTK UI can localize them
 /// itself; [`Display`] uses the shared gettext catalog.
+///
+/// `#[non_exhaustive]` so additive variants (`PinCancelled`, …) do not break
+/// downstream `match` expressions that include a wildcard arm.
 #[derive(Debug)]
+#[non_exhaustive]
 pub enum Error {
     Io(io::Error),
     Structure(String),
@@ -21,6 +25,14 @@ pub enum Error {
     EmptyDocument,
     Invalid(InvalidKind),
     Sign(String),
+    /// PKCS#11 (or another token backend) could not be loaded.
+    SignerUnavailable {
+        reason: SignerUnavailableReason,
+    },
+    /// The user dismissed the PIN dialog or submitted an empty field.
+    /// Unit variant — no payload. The token was not touched. UIs treat
+    /// this as a silent cancel. Distinct from [`Error::Cancelled`].
+    PinCancelled,
     /// The signer backend cannot produce this PAdES level yet. Never downgraded.
     SignLevelUnsupported {
         level: crate::signer::PadesLevel,
@@ -30,11 +42,39 @@ pub enum Error {
     Timestamp(TimestampErrorKind),
     /// The caller cancelled the operation through a [`crate::CancelToken`].
     /// Not a failure: the UI should treat it as a no-op. Nothing was written.
+    /// Distinct from [`Error::PinCancelled`].
     Cancelled,
     /// The PDF already has a signature; `op` would invalidate it.
     Signed {
         op: SignedOp,
     },
+}
+
+/// Why [`Error::SignerUnavailable`] fired. Match this; do not parse [`Display`].
+///
+/// `#[non_exhaustive]` so later reasons (pinpad, slot, …) do not break
+/// downstream `match` expressions that include a wildcard arm.
+#[derive(Clone, Debug, PartialEq, Eq)]
+#[non_exhaustive]
+pub enum SignerUnavailableReason {
+    /// No PKCS#11 module on the search path / `OPENPDF_PKCS11_MODULE`.
+    ModuleNotFound,
+    /// A module path was found but `dlopen` / cryptoki load failed.
+    LoadFailed {
+        /// Path that failed (`OPENPDF_PKCS11_MODULE` or a searched default).
+        module: String,
+        /// System/loader error text (not localized).
+        detail: String,
+    },
+}
+
+impl SignerUnavailableReason {
+    pub fn load_failed(module: impl Into<String>, detail: impl Into<String>) -> Self {
+        Self::LoadFailed {
+            module: module.into(),
+            detail: detail.into(),
+        }
+    }
 }
 
 /// User-facing invalid-input cases. Match this instead of parsing [`Display`].
@@ -210,6 +250,8 @@ impl Error {
             ),
             Error::Cancelled => tr("operation cancelled"),
             Error::Sign(m) => tr_args("sign: {detail}", &[("detail", &tr(m))]),
+            Error::SignerUnavailable { reason } => describe_signer_unavailable(reason),
+            Error::PinCancelled => tr("PIN entry was cancelled"),
             Error::Signed { op } => tr_args(
                 "document is signed; {op} would invalidate the signature (incremental save only)",
                 &[("op", &tr(op.msgid()))],
@@ -290,12 +332,33 @@ impl Error {
     pub fn signed(op: SignedOp) -> Self {
         Error::Signed { op }
     }
+
+    pub fn signer_unavailable(reason: SignerUnavailableReason) -> Self {
+        Error::SignerUnavailable { reason }
+    }
+
+    /// PIN dismiss or [`crate::CancelToken`]. Not a failure — stay silent.
+    /// [`Error::Cancelled`] and [`Error::PinCancelled`] are both silent and distinct.
+    pub fn is_silent_cancel(&self) -> bool {
+        matches!(self, Error::PinCancelled | Error::Cancelled)
+    }
+}
+
+/// Translated text for [`Error::SignerUnavailable`]. The UI must not build this.
+pub fn describe_signer_unavailable(reason: &SignerUnavailableReason) -> String {
+    match reason {
+        SignerUnavailableReason::ModuleNotFound => tr("PKCS#11 module not available"),
+        SignerUnavailableReason::LoadFailed { module, detail } => tr_args(
+            "Could not load the PKCS#11 module {module}: {detail}",
+            &[("module", module), ("detail", detail)],
+        ),
+    }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::i18n::{set_locale, tr};
+    use crate::i18n::{set_locale, tr, tr_args};
 
     #[test]
     fn display_follows_locale() {
@@ -313,6 +376,7 @@ mod tests {
 
     #[test]
     fn ui_can_match_structured_errors() {
+        let _g = crate::test_support::locale_test_guard();
         let err = Error::signed(SignedOp::Rotate);
         assert!(matches!(
             err,
@@ -322,5 +386,105 @@ mod tests {
         ));
         let err = Error::invalid(InvalidKind::CertIdRequired);
         assert!(matches!(err, Error::Invalid(InvalidKind::CertIdRequired)));
+        let err = Error::signer_unavailable(SignerUnavailableReason::ModuleNotFound);
+        assert!(matches!(
+            err,
+            Error::SignerUnavailable {
+                reason: SignerUnavailableReason::ModuleNotFound
+            }
+        ));
+        set_locale("en");
+        assert_eq!(err.to_string(), "PKCS#11 module not available");
+        assert_eq!(
+            describe_signer_unavailable(&SignerUnavailableReason::load_failed(
+                "/usr/lib/softhsm/libsofthsm2.so",
+                "libfoo.so: cannot open shared object file",
+            )),
+            "Could not load the PKCS#11 module /usr/lib/softhsm/libsofthsm2.so: libfoo.so: cannot open shared object file"
+        );
+        set_locale("es");
+        assert_ne!(
+            describe_signer_unavailable(&SignerUnavailableReason::ModuleNotFound),
+            "PKCS#11 module not available"
+        );
+        set_locale("en");
+        assert!(matches!(Error::PinCancelled, Error::PinCancelled));
+    }
+
+    #[test]
+    fn pin_cancelled_is_structured_not_sign() {
+        let _g = crate::test_support::locale_test_guard();
+        set_locale("en");
+        // Unit variant: no payload. `Error::PinCancelled` (not `PinCancelled(_)`).
+        let err = Error::PinCancelled;
+        assert!(matches!(err, Error::PinCancelled));
+        assert_eq!(err.to_string(), "PIN entry was cancelled");
+        assert!(!matches!(err, Error::Sign(_)));
+        assert!(err.is_silent_cancel());
+        set_locale("es");
+        assert_eq!(
+            Error::PinCancelled.to_string(),
+            tr("PIN entry was cancelled")
+        );
+        assert_ne!(Error::PinCancelled.to_string(), "PIN entry was cancelled");
+        set_locale("en");
+        let cancel = Error::Cancelled;
+        assert!(matches!(cancel, Error::Cancelled));
+        assert!(cancel.is_silent_cancel());
+        assert!(cancel.is_cancelled());
+        assert!(!matches!(cancel, Error::PinCancelled));
+        assert!(!matches!(cancel, Error::Sign(_)));
+        assert_eq!(cancel.to_string(), "operation cancelled");
+        set_locale("es");
+        assert_eq!(Error::Cancelled.to_string(), tr("operation cancelled"));
+        assert_ne!(Error::Cancelled.to_string(), "operation cancelled");
+        set_locale("en");
+    }
+
+    #[test]
+    fn load_failed_carries_module_path_and_system_detail() {
+        let _g = crate::test_support::locale_test_guard();
+        let reason = SignerUnavailableReason::load_failed(
+            "/usr/lib/softhsm/libsofthsm2.so",
+            "libfoo.so: cannot open shared object file",
+        );
+        assert!(matches!(
+            reason,
+            SignerUnavailableReason::LoadFailed {
+                ref module,
+                ref detail,
+            } if module == "/usr/lib/softhsm/libsofthsm2.so"
+                && detail == "libfoo.so: cannot open shared object file"
+        ));
+        let err = Error::signer_unavailable(reason.clone());
+        set_locale("en");
+        let en = describe_signer_unavailable(&reason);
+        assert_eq!(
+            en,
+            "Could not load the PKCS#11 module /usr/lib/softhsm/libsofthsm2.so: libfoo.so: cannot open shared object file"
+        );
+        assert_eq!(err.to_string(), en);
+        set_locale("es");
+        let es = describe_signer_unavailable(&reason);
+        assert!(
+            es.contains("/usr/lib/softhsm/libsofthsm2.so"),
+            "GTK error must keep the module path: {es}"
+        );
+        assert!(
+            es.contains("libfoo.so: cannot open shared object file"),
+            "GTK error must keep the system detail: {es}"
+        );
+        assert_eq!(
+            es,
+            tr_args(
+                "Could not load the PKCS#11 module {module}: {detail}",
+                &[
+                    ("module", "/usr/lib/softhsm/libsofthsm2.so"),
+                    ("detail", "libfoo.so: cannot open shared object file"),
+                ]
+            )
+        );
+        assert_ne!(es, en);
+        set_locale("en");
     }
 }

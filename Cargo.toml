@@ -5,17 +5,27 @@ members = [
     "crates/openpdf-cli",
     "crates/openpdf-gtk",
     "crates/openpdf-sign",
+    "crates/openpdf-app",
+    "crates/openpdf-ffi",
 ]
 
 [workspace.package]
 edition = "2021"
 license = "MPL-2.0"
 version = "0.1.0"
+# MSRV = Rust in org.freedesktop.Sdk.Extension.rust-stable//26.08 (GNOME 51 Flatpak SDK).
+rust-version = "1.98.0"
 
 [workspace.dependencies]
 openpdf-core = { path = "crates/openpdf-core" }
+openpdf-sign = { path = "crates/openpdf-sign" }
+# Exact 0.29.4: uniffi-bindgen-cs v0.10.0+v0.29.4 reads this metadata format.
+uniffi = "=0.29.4"
 
 [profile.release]
 lto = true
 codegen-units = 1
 strip = true
+
+[profile.release.package.openpdf-ffi]
+strip = false

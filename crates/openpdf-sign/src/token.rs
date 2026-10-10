@@ -205,6 +205,7 @@ impl Pkcs11Signer {
         picked: &PickedCert,
         request: &SignRequest,
     ) -> Result<Vec<u8>> {
+        request.check_cancelled()?;
         let module = self
             .modules
             .get(picked.module_index)
@@ -215,7 +216,6 @@ impl Pkcs11Signer {
             .or_else(|_| module.ctx.open_ro_session(picked.slot))
             .map_err(pkcs11_err)?;
 
-        // Last check before the PIN dialog.
         request.check_cancelled()?;
         let pin: SecretPin = self.pin.request_pin(&picked.token_label)?;
         {
@@ -245,6 +245,7 @@ impl Signer for Pkcs11Signer {
     }
 
     fn sign(&self, pdf: &[u8], request: &SignRequest) -> Result<Vec<u8>> {
+        request.check_cancel()?;
         if request.cert_id.trim().is_empty() {
             return Err(Error::invalid(InvalidKind::CertIdRequired));
         }

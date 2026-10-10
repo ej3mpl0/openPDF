@@ -16,7 +16,8 @@ use der::{Encode, Sequence};
 use openpdf_core::test_support::with_locale;
 use openpdf_core::{
     describe_certificate, format_verify_result, format_verify_results, pin_prompt_text, tr,
-    Document, Error, PadesLevel, PinProvider, SecretPin, SignRequest, Signer, VisibleAppearance,
+    CancelToken, Document, Error, PadesLevel, PinProvider, SecretPin, SignRequest, Signer,
+    VisibleAppearance, CANCEL_NOTICE,
 };
 use x509_cert::name::Name;
 use x509_cert::serial_number::SerialNumber;
@@ -383,6 +384,51 @@ fn sign_visible_appearance() {
     };
 }
 
+/// GUI path: write the signed bytes to a sibling, reopen that file, verify
+/// the on-disk original. `Document::to_bytes` must not be used (Signed Rewrite).
+#[test]
+fn sign_writes_sibling_reopen_and_verify_original_bytes() {
+    let Some(()) = with_softhsm(|| {
+        let signer = signer();
+        let certs = signer.list_certificates().unwrap();
+        let cert = certs.iter().find(|c| can_use(c)).unwrap_or(&certs[0]);
+        let dir = std::env::temp_dir().join(format!(
+            "openpdf-e2e-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        fs::create_dir_all(&dir).unwrap();
+        let src = dir.join("hello.pdf");
+        fs::copy(corpus("hello.pdf"), &src).unwrap();
+        let original = fs::read(&src).unwrap();
+        let request = SignRequest::new(cert.id.clone()).with_reason("gui e2e");
+        let signed = signer.sign(&original, &request).expect("sign");
+        let dest = dir.join("hello-signed.pdf");
+        fs::write(&dest, &signed).expect("write sibling");
+        let reopened = Document::open(&dest).expect("reopen signed sibling");
+        assert!(reopened.is_signed(), "reopened file must be locked");
+        assert!(
+            matches!(
+                reopened.to_bytes(),
+                Err(Error::Signed {
+                    op: SignedOp::Rewrite
+                })
+            ),
+            "verify must not call to_bytes on a signed document"
+        );
+        let disk = fs::read(&dest).expect("original file bytes");
+        let infos = verify_pdf(&disk).expect("verify on-disk bytes");
+        assert_eq!(infos.len(), 1);
+        assert_eq!(infos[0].valid, Some(true));
+        let _ = fs::remove_dir_all(&dir);
+    }) else {
+        return;
+    };
+}
+
 #[test]
 fn unknown_cert_id_fails() {
     let Some(()) = with_softhsm(|| {
@@ -475,4 +521,88 @@ fn pades_bt_without_tsa_url_is_a_typed_error_not_a_downgrade() {
     }) else {
         return;
     };
+}
+
+#[test]
+fn cancelled_request_is_silent_before_pin() {
+    let pdf = fs::read(corpus("hello.pdf")).unwrap();
+    let token = CancelToken::new();
+    token.cancel();
+    let request = SignRequest::new("any").with_cancel(token);
+    let mut called = false;
+    let err = crate::pades::sign_incremental(&pdf, &request, "x", None, |_| {
+        called = true;
+        Ok(Vec::new())
+    })
+    .unwrap_err();
+    assert!(matches!(err, Error::Cancelled));
+    assert!(err.is_silent_cancel());
+    assert!(!matches!(err, Error::PinCancelled));
+    assert!(
+        !called,
+        "cancel before PIN/CMS must not produce a signature"
+    );
+
+    let Some(()) = with_softhsm(|| {
+        let signer = signer();
+        let cert = &signer.list_certificates().unwrap()[0];
+        let token = CancelToken::new();
+        token.cancel();
+        let request = SignRequest::new(cert.id.clone()).with_cancel(token);
+        assert!(matches!(signer.sign(&pdf, &request), Err(Error::Cancelled)));
+    }) else {
+        return;
+    };
+}
+
+/// Fake slow TSA: poll CancelToken while "waiting" for a timestamp.
+#[test]
+fn cancel_during_fake_slow_tsa_leaves_document_untouched() {
+    use std::time::Instant;
+
+    struct SlowTsa;
+    impl Signer for SlowTsa {
+        fn list_certificates(&self) -> openpdf_core::Result<Vec<openpdf_core::CertificateInfo>> {
+            Ok(Vec::new())
+        }
+        fn sign(&self, _pdf: &[u8], request: &SignRequest) -> openpdf_core::Result<Vec<u8>> {
+            request.check_cancelled()?;
+            request.check_cancelled()?;
+            request
+                .cancel_token()
+                .cloned()
+                .unwrap_or_default()
+                .wait(Duration::from_secs(5))?;
+            Ok(_pdf.to_vec())
+        }
+        fn verify(&self, _pdf: &[u8]) -> openpdf_core::Result<Vec<openpdf_core::SignatureInfo>> {
+            Ok(Vec::new())
+        }
+    }
+
+    let pdf = fs::read(corpus("hello.pdf")).unwrap();
+    let mut doc = Document::from_bytes(pdf, None).unwrap();
+    let token = CancelToken::new();
+    let request = SignRequest::new("tsa")
+        .with_level(PadesLevel::BT)
+        .with_cancel(token.clone());
+    let handle = std::thread::spawn({
+        let token = token.clone();
+        move || {
+            std::thread::sleep(Duration::from_millis(80));
+            token.cancel();
+            Instant::now()
+        }
+    });
+    let err = doc.apply_signer(&SlowTsa, &request).unwrap_err();
+    let cancelled_at = handle.join().unwrap();
+    let noticed = Instant::now().saturating_duration_since(cancelled_at);
+    assert!(
+        noticed < CANCEL_NOTICE,
+        "TSA wait must notice cancel within {CANCEL_NOTICE:?}, took {noticed:?}"
+    );
+    assert!(matches!(err, Error::Cancelled));
+    assert!(err.is_silent_cancel());
+    assert!(!matches!(err, Error::PinCancelled));
+    assert!(!doc.is_signed());
 }

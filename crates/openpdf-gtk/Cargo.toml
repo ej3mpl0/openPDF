@@ -2,7 +2,19 @@
 name = "openpdf-gtk"
 version.workspace = true
 edition.workspace = true
+rust-version.workspace = true
 license.workspace = true
+description = "Native Linux UI for openPDF (GTK4 + libadwaita)"
+
+[lib]
+name = "openpdf_gtk"
+path = "src/lib.rs"
 
 [dependencies]
-openpdf-core = { path = "../openpdf-core" }
+openpdf-core.workspace = true
+gtk4 = { version = "0.8", features = ["v4_14"] }
+libadwaita = { version = "0.6", features = ["v1_5"] }
+zeroize = { version = "1", features = ["alloc"] }
+
+[dev-dependencies]
+openpdf-core = { workspace = true, features = ["test-support"] }

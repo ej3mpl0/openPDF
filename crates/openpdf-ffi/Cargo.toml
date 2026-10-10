@@ -1,0 +1,29 @@
+[package]
+name = "openpdf-ffi"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+description = "UniFFI entry point for native openPDF UIs (Swift, C#)"
+
+[lib]
+name = "openpdf_ffi"
+crate-type = ["lib", "cdylib", "staticlib"]
+
+[features]
+default = []
+# Pulls clap so CI / local scripts can run `cargo run -p openpdf-ffi --features bindgen --bin uniffi-bindgen`.
+bindgen = ["uniffi/cli"]
+
+[dependencies]
+openpdf-core = { workspace = true }
+openpdf-sign = { workspace = true }
+sha2 = "0.10"
+thiserror = "2"
+uniffi = { workspace = true }
+zeroize = { version = "1", features = ["alloc"] }
+
+[[bin]]
+name = "uniffi-bindgen"
+path = "uniffi-bindgen.rs"
+required-features = ["bindgen"]

@@ -1,8 +1,58 @@
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::Arc;
+use std::time::{Duration, Instant};
+
 use lopdf::{Dictionary, Document as LopdfDocument, Object};
 
 use crate::document::Document;
 use crate::error::{Error, InvalidKind, Result};
 use crate::i18n::{tr, tr_args};
+
+/// Backends must observe [`CancelToken::cancel`] within this bound (before the
+/// PIN prompt, before a TSA request, and while waiting on the TSA).
+pub const CANCEL_NOTICE: Duration = Duration::from_millis(200);
+
+const CANCEL_SLICE: Duration = Duration::from_millis(50);
+
+/// Shared cancel flag for one signing attempt. Clone is an `Arc` clone.
+///
+/// GTK Cancel and [`Signer::sign`] share one token. Cancel is silent: not an
+/// error toast, document untouched.
+#[derive(Clone, Debug, Default)]
+pub struct CancelToken {
+    cancelled: Arc<AtomicBool>,
+}
+
+impl CancelToken {
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    /// Signal cancel. [`Signer::sign`] must notice within [`CANCEL_NOTICE`].
+    pub fn cancel(&self) {
+        self.cancelled.store(true, Ordering::SeqCst);
+    }
+
+    pub fn is_cancelled(&self) -> bool {
+        self.cancelled.load(Ordering::SeqCst)
+    }
+
+    /// Block up to `limit`, returning [`Error::Cancelled`] within
+    /// [`CANCEL_NOTICE`] of [`Self::cancel`]. Used while waiting on a TSA.
+    pub fn wait(&self, limit: Duration) -> Result<()> {
+        let start = Instant::now();
+        loop {
+            if self.is_cancelled() {
+                return Err(Error::Cancelled);
+            }
+            let elapsed = start.elapsed();
+            if elapsed >= limit {
+                return Ok(());
+            }
+            std::thread::sleep(CANCEL_SLICE.min(limit - elapsed));
+        }
+    }
+}
 
 /// Visible appearance for a certificate signature. Coordinates are PDF points.
 #[derive(Clone, Debug, Default)]
@@ -109,6 +159,11 @@ impl SignRequest {
         self
     }
 
+    /// Alias for [`Self::with_cancel`].
+    pub fn with_cancel_token(self, token: CancelToken) -> Self {
+        self.with_cancel(token)
+    }
+
     /// [`Error::Cancelled`] if the request's token has been cancelled.
     pub fn check_cancelled(&self) -> Result<()> {
         match &self.cancel {
@@ -117,29 +172,20 @@ impl SignRequest {
         }
     }
 
+    /// Alias for [`Self::check_cancelled`].
+    pub fn check_cancel(&self) -> Result<()> {
+        self.check_cancelled()
+    }
+
+    /// Token shared with the GTK Cancel button, if any.
+    pub fn cancel_token(&self) -> Option<&CancelToken> {
+        self.cancel.as_ref()
+    }
+
     /// TSA URL for B-T (`http://` or `https://`).
     pub fn with_tsa_url(mut self, url: impl Into<String>) -> Self {
         self.tsa_url = Some(url.into());
         self
-    }
-}
-
-/// Shared cancellation flag. Clone it, hand one copy to [`SignRequest::with_cancel`]
-/// and call [`CancelToken::cancel`] from any thread.
-#[derive(Clone, Debug, Default)]
-pub struct CancelToken(std::sync::Arc<std::sync::atomic::AtomicBool>);
-
-impl CancelToken {
-    pub fn new() -> Self {
-        Self::default()
-    }
-
-    pub fn cancel(&self) {
-        self.0.store(true, std::sync::atomic::Ordering::SeqCst);
-    }
-
-    pub fn is_cancelled(&self) -> bool {
-        self.0.load(std::sync::atomic::Ordering::SeqCst)
     }
 }
 
@@ -252,6 +298,19 @@ pub trait Signer: Send + Sync {
     fn verify(&self, pdf: &[u8]) -> Result<Vec<SignatureInfo>>;
 }
 
+/// Token-less PDF signature verification. No PIN, token, or certificate list.
+///
+/// The application binary (not the GTK UI crate) implements this via
+/// `openpdf-sign` and hands `Box<dyn Verifier>` to the UI — the same injection
+/// pattern as [`Signer`]. GTK must not depend on `openpdf-sign`.
+///
+/// Per-signature failures stay inside [`SignatureInfo`] (`valid`, and
+/// `invalid_reason` when the backend provides it). [`Err`] is only for
+/// whole-document failures (unparseable PDF).
+pub trait Verifier: Send + Sync {
+    fn verify(&self, pdf: &[u8]) -> Result<Vec<SignatureInfo>>;
+}
+
 /// User-facing PIN prompt for a token (translated).
 pub fn pin_prompt_text(token_label: &str) -> String {
     tr_args("Enter PIN for token \"{token}\"", &[("token", token_label)])
@@ -267,9 +326,30 @@ pub fn usage_label(usage: &CertificateUsage) -> String {
     }
 }
 
-/// One-line certificate description for a picker (translated).
-pub fn describe_certificate(info: &CertificateInfo) -> String {
-    let usages = if info.usage.is_empty() {
+/// Common Name from a Distinguished Name.
+///
+/// `O=AC DNIE,CN=Maria Garcia (FIRMA),C=ES` → `Maria Garcia (FIRMA)`.
+/// Slash-separated `/CN=...` forms are accepted. Falls back to `subject`.
+pub fn certificate_common_name(subject: &str) -> String {
+    for part in subject.split([',', '/']) {
+        let part = part.trim();
+        let rest = part
+            .strip_prefix("CN=")
+            .or_else(|| part.strip_prefix("cn="))
+            .or_else(|| part.strip_prefix("CN ="))
+            .or_else(|| part.strip_prefix("cn ="));
+        if let Some(cn) = rest {
+            let cn = cn.trim();
+            if !cn.is_empty() {
+                return cn.to_string();
+            }
+        }
+    }
+    subject.trim().to_string()
+}
+
+fn certificate_usage_text(info: &CertificateInfo) -> String {
+    if info.usage.is_empty() {
         tr("unspecified usage")
     } else {
         info.usage
@@ -277,20 +357,47 @@ pub fn describe_certificate(info: &CertificateInfo) -> String {
             .map(usage_label)
             .collect::<Vec<_>>()
             .join(", ")
-    };
-    let validity = match (&info.validity.not_before, &info.validity.not_after) {
+    }
+}
+
+fn certificate_validity_text(info: &CertificateInfo) -> String {
+    match (&info.validity.not_before, &info.validity.not_after) {
         (Some(a), Some(b)) => tr_args(
             "valid {not_before} to {not_after}",
             &[("not_before", a), ("not_after", b)],
         ),
         _ => tr("validity unknown"),
-    };
+    }
+}
+
+/// One-line certificate description for a picker (translated).
+///
+/// Uses the raw `subject` DN. For a picker row title use
+/// [`certificate_common_name`]; for the subtitle use
+/// [`describe_certificate_detail`] after formatting validity instants.
+pub fn describe_certificate(info: &CertificateInfo) -> String {
+    let usages = certificate_usage_text(info);
+    let validity = certificate_validity_text(info);
     tr_args(
         "{subject} — {usage} — {validity}",
         &[
             ("subject", &info.subject),
             ("usage", &usages),
             ("validity", &validity),
+        ],
+    )
+}
+
+/// Picker subtitle: usage and validity only (no raw DN).
+///
+/// Validity strings are used as stored. The UI should replace RFC 3339
+/// `…Z` values with a locale/local-time form before calling this.
+pub fn describe_certificate_detail(info: &CertificateInfo) -> String {
+    tr_args(
+        "{usage} — {validity}",
+        &[
+            ("usage", &certificate_usage_text(info)),
+            ("validity", &certificate_validity_text(info)),
         ],
     )
 }
@@ -344,17 +451,20 @@ impl Document {
     /// Already-signed documents are passed through without a full rewrite so the
     /// existing signature bytes stay intact; the backend must append incrementally.
     pub fn apply_signer(&mut self, signer: &dyn Signer, request: &SignRequest) -> Result<()> {
+        request.check_cancel()?;
         if request.cert_id.trim().is_empty() {
             return Err(Error::invalid(InvalidKind::CertIdRequired));
         }
         let input = self.bytes_for_signer()?;
+        request.check_cancel()?;
         let signed = signer.sign(&input, request)?;
+        request.check_cancel()?;
         *self = Document::from_bytes(signed, self.path().map(|p| p.to_path_buf()))?;
         Ok(())
     }
 
     /// Bytes handed to a [`Signer`]: rewrite only when the document is still unsigned.
-    pub(crate) fn bytes_for_signer(&self) -> Result<Vec<u8>> {
+    pub fn bytes_for_signer(&self) -> Result<Vec<u8>> {
         if self.is_signed() {
             if self.is_dirty() {
                 self.to_incremental_bytes()
@@ -471,6 +581,7 @@ mod tests {
         }
 
         fn sign(&self, pdf: &[u8], request: &SignRequest) -> Result<Vec<u8>> {
+            request.check_cancel()?;
             let cert = self
                 .certs
                 .iter()
@@ -485,10 +596,7 @@ mod tests {
         fn verify(&self, pdf: &[u8]) -> Result<Vec<SignatureInfo>> {
             let doc = LopdfDocument::load_mem(pdf)?;
             if contains_signature(&doc) {
-                Ok(vec![SignatureInfo {
-                    name: Some("stub".into()),
-                    ..SignatureInfo::default()
-                }])
+                Ok(vec![SignatureInfo::new(Some("stub".into()), None, None)])
             } else {
                 Ok(Vec::new())
             }
@@ -509,6 +617,81 @@ mod tests {
             SignRequest::new("c").with_level(PadesLevel::BT).level,
             PadesLevel::BT
         );
+    }
+
+    #[test]
+    fn cancelled_apply_signer_is_silent_and_leaves_document_untouched() {
+        let mut doc = Document::open(corpus("hello.pdf")).unwrap();
+        let before = doc.original_bytes().to_vec();
+        let token = CancelToken::new();
+        token.cancel();
+        let req = signing_request().with_cancel(token);
+        let err = doc
+            .apply_signer(
+                &TokenSigner {
+                    certs: dnie_certs(),
+                },
+                &req,
+            )
+            .unwrap_err();
+        assert!(matches!(err, Error::Cancelled));
+        assert!(err.is_silent_cancel());
+        assert!(!matches!(err, Error::PinCancelled));
+        assert!(!matches!(err, Error::Sign(_)));
+        assert_eq!(doc.original_bytes(), before.as_slice());
+        assert!(!doc.is_signed());
+    }
+
+    /// Fake slow TSA: wait as if RFC 3161 were outstanding. Cancel must land
+    /// within [`CANCEL_NOTICE`] and leave the document untouched.
+    #[test]
+    fn cancel_during_fake_slow_tsa_notices_within_200ms() {
+        struct SlowTsa;
+        impl Signer for SlowTsa {
+            fn list_certificates(&self) -> Result<Vec<CertificateInfo>> {
+                Ok(Vec::new())
+            }
+            fn sign(&self, _pdf: &[u8], request: &SignRequest) -> Result<Vec<u8>> {
+                request.check_cancelled()?;
+                request.check_cancelled()?;
+                request
+                    .cancel_token()
+                    .cloned()
+                    .unwrap_or_default()
+                    .wait(Duration::from_secs(5))?;
+                Ok(_pdf.to_vec())
+            }
+            fn verify(&self, _pdf: &[u8]) -> Result<Vec<SignatureInfo>> {
+                Ok(Vec::new())
+            }
+        }
+
+        let mut doc = Document::open(corpus("hello.pdf")).unwrap();
+        let before = doc.original_bytes().to_vec();
+        let token = CancelToken::new();
+        let req = SignRequest::new("tsa-cert")
+            .with_level(PadesLevel::BT)
+            .with_cancel(token.clone());
+        let handle = std::thread::spawn({
+            let token = token.clone();
+            move || {
+                std::thread::sleep(Duration::from_millis(80));
+                token.cancel();
+                Instant::now()
+            }
+        });
+        let err = doc.apply_signer(&SlowTsa, &req).unwrap_err();
+        let cancelled_at = handle.join().unwrap();
+        let noticed = Instant::now().saturating_duration_since(cancelled_at);
+        assert!(
+            noticed < CANCEL_NOTICE,
+            "TSA wait must notice cancel within {CANCEL_NOTICE:?}, took {noticed:?}"
+        );
+        assert!(matches!(err, Error::Cancelled));
+        assert!(err.is_silent_cancel());
+        assert!(!matches!(err, Error::PinCancelled));
+        assert_eq!(doc.original_bytes(), before.as_slice());
+        assert!(!doc.is_signed());
     }
 
     #[test]
@@ -612,6 +795,23 @@ mod tests {
     }
 
     #[test]
+    fn verifier_is_object_safe_and_has_no_token() {
+        struct PdfOnly;
+        impl Verifier for PdfOnly {
+            fn verify(&self, pdf: &[u8]) -> Result<Vec<SignatureInfo>> {
+                if !pdf.starts_with(b"%PDF") {
+                    return Err(Error::structure("unparseable PDF"));
+                }
+                Ok(vec![SignatureInfo::new(None, None, None).with_valid(Some(false))])
+            }
+        }
+        let v: std::sync::Arc<dyn Verifier> = std::sync::Arc::new(PdfOnly);
+        let infos = v.verify(b"%PDF-1.4").unwrap();
+        assert_eq!(infos[0].valid, Some(false));
+        assert!(v.verify(b"not-a-pdf").is_err());
+    }
+
+    #[test]
     fn pin_prompt_and_usage_follow_catalog() {
         with_locale("en", || {
             assert_eq!(
@@ -673,14 +873,58 @@ mod tests {
     }
 
     #[test]
-    fn verify_result_follows_catalog() {
-        let info = SignatureInfo {
-            name: Some("Ana".into()),
-            reason: Some("agree".into()),
-            location: Some("Madrid".into()),
-            valid: Some(true),
-            timestamp: None,
+    fn certificate_common_name_peels_cn() {
+        assert_eq!(
+            certificate_common_name("O=AC DNIE,CN=Maria Garcia (FIRMA),C=ES"),
+            "Maria Garcia (FIRMA)"
+        );
+        assert_eq!(
+            certificate_common_name("CN=CITIZEN (SIGNING)"),
+            "CITIZEN (SIGNING)"
+        );
+        assert_eq!(
+            certificate_common_name("/C=ES/O=AC DNIE/CN=Maria Garcia (FIRMA)"),
+            "Maria Garcia (FIRMA)"
+        );
+        assert_eq!(certificate_common_name("no-cn-here"), "no-cn-here");
+    }
+
+    #[test]
+    fn describe_certificate_detail_omits_the_dn() {
+        let info = CertificateInfo {
+            id: "1".into(),
+            subject: "O=AC DNIE,CN=Maria Garcia (FIRMA),C=ES".into(),
+            issuer: "CN=CA".into(),
+            validity: CertificateValidity {
+                not_before: Some("10/01/2020 01:00:00".into()),
+                not_after: Some("01/01/2030 01:00:00".into()),
+            },
+            usage: vec![CertificateUsage::Signing],
         };
+        with_locale("en", || {
+            assert_eq!(
+                certificate_common_name(&info.subject),
+                "Maria Garcia (FIRMA)"
+            );
+            assert_eq!(
+                describe_certificate_detail(&info),
+                "Signing — valid 10/01/2020 01:00:00 to 01/01/2030 01:00:00"
+            );
+            assert!(
+                !describe_certificate_detail(&info).contains("O=AC DNIE"),
+                "picker subtitle must not repeat the raw DN"
+            );
+        });
+    }
+
+    #[test]
+    fn verify_result_follows_catalog() {
+        let info = SignatureInfo::new(
+            Some("Ana".into()),
+            Some("agree".into()),
+            Some("Madrid".into()),
+        )
+        .with_valid(Some(true));
         with_locale("en", || {
             assert_eq!(
                 format_verify_result(&info),
