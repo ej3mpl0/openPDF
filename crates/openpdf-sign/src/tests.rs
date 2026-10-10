@@ -16,7 +16,7 @@ use der::{Encode, Sequence};
 use openpdf_core::test_support::with_locale;
 use openpdf_core::{
     describe_certificate, format_verify_result, format_verify_results, pin_prompt_text, tr,
-    Document, Error, PinProvider, SecretPin, SignRequest, Signer, VisibleAppearance,
+    Document, Error, PinProvider, SecretPin, SignRequest, SignedOp, Signer, VisibleAppearance,
 };
 use x509_cert::name::Name;
 use x509_cert::serial_number::SerialNumber;
@@ -388,6 +388,57 @@ fn sign_visible_appearance() {
         assert!(signed.starts_with(&original));
         let infos = signer.verify(&signed).unwrap();
         assert_eq!(infos[0].valid, Some(true));
+    }) else {
+        return;
+    };
+}
+
+/// GUI path: write the signed bytes to a sibling, reopen that file, verify
+/// the on-disk original. `Document::to_bytes` must not be used (Signed Rewrite).
+#[test]
+fn sign_writes_sibling_reopen_and_verify_original_bytes() {
+    let Some(()) = with_softhsm(|| {
+        let signer = signer();
+        let certs = signer.list_certificates().unwrap();
+        let cert = certs.iter().find(|c| can_use(c)).unwrap_or(&certs[0]);
+        let dir = std::env::temp_dir().join(format!(
+            "openpdf-e2e-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        fs::create_dir_all(&dir).unwrap();
+        let src = dir.join("hello.pdf");
+        fs::copy(corpus("hello.pdf"), &src).unwrap();
+        let original = fs::read(&src).unwrap();
+        let request = SignRequest {
+            cert_id: cert.id.clone(),
+            reason: Some("gui e2e".into()),
+            location: None,
+            contact: None,
+            appearance: None,
+        };
+        let signed = signer.sign(&original, &request).expect("sign");
+        let dest = dir.join("hello-signed.pdf");
+        fs::write(&dest, &signed).expect("write sibling");
+        let reopened = Document::open(&dest).expect("reopen signed sibling");
+        assert!(reopened.is_signed(), "reopened file must be locked");
+        assert!(
+            matches!(
+                reopened.to_bytes(),
+                Err(Error::Signed {
+                    op: SignedOp::Rewrite
+                })
+            ),
+            "verify must not call to_bytes on a signed document"
+        );
+        let disk = fs::read(&dest).expect("original file bytes");
+        let infos = verify_pdf(&disk).expect("verify on-disk bytes");
+        assert_eq!(infos.len(), 1);
+        assert_eq!(infos[0].valid, Some(true));
+        let _ = fs::remove_dir_all(&dir);
     }) else {
         return;
     };

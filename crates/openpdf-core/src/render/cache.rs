@@ -67,13 +67,19 @@ impl TileCache {
         self.map.insert(tile.key, tile);
     }
 
+    pub fn remove(&mut self, key: &TileKey) -> bool {
+        let Some(old) = self.map.remove(key) else {
+            return false;
+        };
+        self.used = self.used.saturating_sub(old.byte_len());
+        if let Some(pos) = self.order.iter().position(|k| k == key) {
+            self.order.remove(pos);
+        }
+        true
+    }
+
     pub fn invalidate_doc(&mut self, doc: DocumentId) {
-        let keys: Vec<TileKey> = self
-            .map
-            .keys()
-            .filter(|k| k.doc == doc)
-            .copied()
-            .collect();
+        let keys: Vec<TileKey> = self.map.keys().filter(|k| k.doc == doc).copied().collect();
         for key in keys {
             if let Some(old) = self.map.remove(&key) {
                 self.used = self.used.saturating_sub(old.byte_len());
@@ -123,14 +129,15 @@ mod tests {
         cache.insert(tile(1, 2, 4));
         cache.insert(tile(1, 3, 4));
         assert_eq!(cache.len(), 3);
-        assert!(cache.get(&TileKey {
-            doc: DocumentId(1),
-            page: 0,
-            zoom_q: 1000,
-            x: 0,
-            y: 0,
-        })
-        .is_none());
+        assert!(cache
+            .get(&TileKey {
+                doc: DocumentId(1),
+                page: 0,
+                zoom_q: 1000,
+                x: 0,
+                y: 0,
+            })
+            .is_none());
         assert!(cache
             .get(&TileKey {
                 doc: DocumentId(1),

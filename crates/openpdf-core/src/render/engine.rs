@@ -243,11 +243,13 @@ fn handle_cmd(
             reply,
         } => {
             let result = match docs.get(&id) {
-                Some(b) => pdfium_bind::render_page(&b.doc, page, zoom).map(|(w, h, rgba)| Raster {
-                    width: w,
-                    height: h,
-                    rgba,
-                }),
+                Some(b) => {
+                    pdfium_bind::render_page(&b.doc, page, zoom).map(|(w, h, rgba)| Raster {
+                        width: w,
+                        height: h,
+                        rgba,
+                    })
+                }
                 None => Err(Error::invalid(InvalidKind::DocumentNotBound)),
             };
             let _ = reply.send(result);
@@ -416,6 +418,19 @@ impl Engine {
 
     pub fn cache_get(&self, key: &TileKey) -> Option<Arc<Tile>> {
         worker().ok()?.cache.lock().ok()?.get(key)
+    }
+
+    /// Drop decoded tiles that are no longer on screen (thumbnail strip).
+    pub fn drop_tiles(&self, keys: impl IntoIterator<Item = TileKey>) {
+        let Ok(h) = worker() else {
+            return;
+        };
+        let Ok(mut cache) = h.cache.lock() else {
+            return;
+        };
+        for key in keys {
+            cache.remove(&key);
+        }
     }
 
     pub fn try_recv(&self) -> Option<TileEvent> {

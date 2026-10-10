@@ -1,4 +1,3 @@
-# openPDF gettext template. English msgids; translations go in po/{lang}.po
 msgid ""
 msgstr ""
 "Project-Id-Version: openpdf 0.1.0\n"
@@ -232,6 +231,9 @@ msgstr ""
 msgid "{subject} — {usage} — {validity}"
 msgstr ""
 
+msgid "{usage} — {validity}"
+msgstr ""
+
 msgid "Enter PIN for token \"{token}\""
 msgstr ""
 
@@ -413,4 +415,265 @@ msgid "--at is 1-based"
 msgstr ""
 
 msgid "crop box must be llx,lly,urx,ury"
+msgstr ""
+
+msgid "--measure opens the real libadwaita window (needs a display or xvfb-run), loads a multi-page PDF, waits until every visible page tile and every visible thumbnail has been painted, then prints startup time and peak RSS and exits non-zero if over the documented limits."
+msgstr ""
+
+msgid "256 px tiles and a cache cap keep RAM low on large PDFs."
+msgstr ""
+
+msgid "About openPDF"
+msgstr ""
+
+msgid "Advanced"
+msgstr ""
+
+msgid "Bookmarks"
+msgstr ""
+
+msgid "Choose a signing certificate. The token will ask for the PIN if needed."
+msgstr ""
+
+msgid "Comment"
+msgstr ""
+
+msgid "Continuous"
+msgstr ""
+
+msgid "Could not read the file: {detail}"
+msgstr ""
+
+msgid "Could not read this PDF: {detail}"
+msgstr ""
+
+msgid "Could not render the page: {detail}"
+msgstr ""
+
+msgid "Could not sign the document: {detail}"
+msgstr ""
+
+msgid "Dark"
+msgstr ""
+
+msgid "Default zoom"
+msgstr ""
+
+msgid "Delete page"
+msgstr ""
+
+msgid "Edit"
+msgstr ""
+
+msgid "English"
+msgstr ""
+
+msgid "Fast, local PDF reader for Linux"
+msgstr ""
+
+msgid "Fill and sign"
+msgstr ""
+
+msgid "Find in document"
+msgstr ""
+
+msgid "Fit page"
+msgstr ""
+
+msgid "Fit width"
+msgstr ""
+
+msgid "General"
+msgstr ""
+
+msgid "Language"
+msgstr ""
+
+msgid "Language applies the next time the window opens."
+msgstr ""
+
+msgid "Light"
+msgstr ""
+
+msgid "Local PDF app. No accounts, no cloud, no telemetry."
+msgstr ""
+
+msgid "No certificates found. openpdf-sign talks to the token; this window never asks for a PIN."
+msgstr ""
+
+msgid "No matches"
+msgstr ""
+
+msgid "No recent files"
+msgstr ""
+
+msgid "Not a signing certificate"
+msgstr ""
+
+msgid "Open"
+msgstr ""
+
+msgid "Open PDF"
+msgstr ""
+
+msgid "Open a PDF before signing."
+msgstr ""
+
+msgid "Open sample document"
+msgstr ""
+
+msgid "Open…"
+msgstr ""
+
+msgid "Organize pages"
+msgstr ""
+
+msgid "Other"
+msgstr ""
+
+msgid "PDF documents"
+msgstr ""
+
+msgid "PDF;Reader;Viewer;"
+msgstr ""
+
+msgid "Page"
+msgstr ""
+
+msgid "Page edits need a real document."
+msgstr ""
+
+msgid "Page layout"
+msgstr ""
+
+msgid "Placeholder has no PDF bytes."
+msgstr ""
+
+msgid "Preferences"
+msgstr ""
+
+msgid "Preview uses a placeholder renderer because PDFium is not available."
+msgstr ""
+
+msgid "Protect"
+msgstr ""
+
+msgid "Quit"
+msgstr ""
+
+msgid "Recent files"
+msgstr ""
+
+msgid "Restore last session"
+msgstr ""
+
+msgid "Rotate page"
+msgstr ""
+
+msgid "Show thumbnail sidebar"
+msgstr ""
+
+msgid "Sign with certificate"
+msgstr ""
+
+msgid "Sign with certificate…"
+msgstr ""
+
+msgid "Signed document — read-only. Rotate, delete and reorder are disabled."
+msgstr ""
+
+msgid "Single page"
+msgstr ""
+
+msgid "Spanish"
+msgstr ""
+
+msgid "System"
+msgstr ""
+
+msgid "Theme"
+msgstr ""
+
+msgid "This document is signed; {op} is disabled."
+msgstr ""
+
+msgid "Thumbnails"
+msgstr ""
+
+msgid "Tile cache (MiB)"
+msgstr ""
+
+msgid "Tile size (px)"
+msgstr ""
+
+msgid "Tools"
+msgstr ""
+
+msgid "View"
+msgstr ""
+
+msgid "Viewing"
+msgstr ""
+
+msgid "Waiting on openpdf-core"
+msgstr ""
+
+msgid "file not found: {path}"
+msgstr ""
+
+msgid "openPDF"
+msgstr ""
+
+msgid "page {page} is out of range ({count} pages)"
+msgstr ""
+
+msgid "tile outside page"
+msgstr ""
+
+msgid "Signing goes through openpdf-core’s Signer trait (openpdf-sign). This UI never links that crate."
+msgstr ""
+
+msgid "Cancel"
+msgstr ""
+
+msgid "Enter PIN"
+msgstr ""
+
+msgid "No certificates found."
+msgstr ""
+
+msgid "PKCS#11 module not available"
+msgstr ""
+
+msgid "Could not load the PKCS#11 module {module}: {detail}"
+msgstr ""
+
+msgid "Loading certificates…"
+msgstr ""
+
+msgid "Could not list certificates."
+msgstr ""
+
+msgid "Unlock"
+msgstr ""
+
+msgid "PIN entry was cancelled"
+msgstr ""
+
+msgid "Signing…"
+msgstr ""
+
+msgid "Signing failed"
+msgstr ""
+
+msgid "Verification failed"
+msgstr ""
+
+msgid "PIN must be requested off the GTK thread"
+msgstr ""
+
+msgid "Saved signed PDF to {path}"
+msgstr ""
+
+msgid "Cannot verify: original file bytes are unavailable."
 msgstr ""
