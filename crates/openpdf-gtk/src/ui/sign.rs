@@ -24,7 +24,7 @@ pub fn present_picker(
     let win = adw::Window::new();
     win.set_transient_for(Some(parent));
     win.set_modal(true);
-    win.set_default_size(420, 360);
+    win.set_default_size(520, 560);
     win.set_title(Some(t(lang, "Sign with certificate")));
 
     let header = adw::HeaderBar::new();
@@ -118,6 +118,9 @@ fn show_certificate_list(
     col.append(&note);
     col.append(&group);
     let scroll = gtk::ScrolledWindow::new();
+    scroll.set_vexpand(true);
+    scroll.set_policy(gtk::PolicyType::Never, gtk::PolicyType::Automatic);
+    scroll.set_min_content_height(280);
     scroll.set_child(Some(&col));
     toolbar.set_content(Some(&scroll));
 }
@@ -130,8 +133,8 @@ fn certificate_row(
 ) -> adw::ActionRow {
     let can_sign = certificate_can_sign(&cert);
     let row = adw::ActionRow::new();
-    row.set_title(&escape(&cert.subject));
-    let mut subtitle = describe_certificate(&cert);
+    row.set_title(&escape(&certificate_cn(&cert.subject)));
+    let mut subtitle = describe_certificate_local(&cert);
     if !can_sign {
         subtitle.push_str(" · ");
         subtitle.push_str(t(lang, "Not a signing certificate"));
@@ -167,4 +170,61 @@ fn escape(s: &str) -> String {
     s.replace('&', "&amp;")
         .replace('<', "&lt;")
         .replace('>', "&gt;")
+}
+
+/// Row title: holder's CN, not the raw DN. Core `describe_certificate` still
+/// owns the subtitle; we only peel `CN=` here until Jian extends the helper.
+pub(crate) fn certificate_cn(subject: &str) -> String {
+    for part in subject.split([',', '/']) {
+        let part = part.trim();
+        let rest = part
+            .strip_prefix("CN=")
+            .or_else(|| part.strip_prefix("cn="))
+            .or_else(|| part.strip_prefix("CN ="));
+        if let Some(cn) = rest {
+            let cn = cn.trim();
+            if !cn.is_empty() {
+                return cn.to_string();
+            }
+        }
+    }
+    subject.trim().to_string()
+}
+
+fn format_cert_time(raw: &str) -> String {
+    let raw = raw.trim();
+    if let Ok(dt) = gtk::glib::DateTime::from_iso8601(raw, None) {
+        if let Ok(local) = dt.to_local() {
+            if let Ok(s) = local.format("%x %X") {
+                return s.to_string();
+            }
+        }
+    }
+    raw.to_string()
+}
+
+fn describe_certificate_local(cert: &CertificateInfo) -> String {
+    let mut info = cert.clone();
+    if let Some(a) = info.validity.not_before.as_mut() {
+        *a = format_cert_time(a);
+    }
+    if let Some(b) = info.validity.not_after.as_mut() {
+        *b = format_cert_time(b);
+    }
+    describe_certificate(&info)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn certificate_cn_takes_the_common_name() {
+        assert_eq!(
+            certificate_cn("O=AC DNIE,CN=María García (FIRMA),C=ES"),
+            "María García (FIRMA)"
+        );
+        assert_eq!(certificate_cn("CN=CITIZEN (SIGNING)"), "CITIZEN (SIGNING)");
+        assert_eq!(certificate_cn("no-cn-here"), "no-cn-here");
+    }
 }
