@@ -29,8 +29,7 @@ use super::viewer::{self, DocumentView};
 
 #[derive(Clone)]
 struct Ctx {
-    /// Created on the first document open, not at window construction, so the
-    /// first frame is not blocked on PDFium.
+    /// Process-wide Engine created in `main` (font warmup already running).
     engine: Rc<RefCell<Option<Engine>>>,
     signer: Arc<dyn Signer>,
     verifier: Arc<dyn Verifier>,
@@ -55,11 +54,12 @@ impl OpenPdfWindow {
         settings: Settings,
         signer: Arc<dyn Signer>,
         verifier: Arc<dyn Verifier>,
+        engine: Option<Engine>,
     ) -> Self {
         let lang = settings.lang();
         let settings = Rc::new(RefCell::new(settings));
         let current = Rc::new(RefCell::new(None));
-        let engine = Rc::new(RefCell::new(None));
+        let engine = Rc::new(RefCell::new(engine));
 
         let window = adw::ApplicationWindow::new(app);
         window.set_title(Some(t(lang, "openPDF")));
@@ -403,12 +403,7 @@ fn open_sample(ctx: &Ctx) {
 }
 
 fn ensure_engine(ctx: &Ctx) -> Option<Engine> {
-    let mut slot = ctx.engine.borrow_mut();
-    if slot.is_none() {
-        *slot = Engine::new().ok();
-        crate::measure::mark_pdfium_loaded();
-    }
-    slot.clone()
+    ctx.engine.borrow().clone()
 }
 
 fn open_path_inner(ctx: &Ctx, path: &Path) {
