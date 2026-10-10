@@ -13,7 +13,8 @@ die() { echo "check-notices: FAIL $kind $pkg: $*" >&2; exit 1; }
 case "$kind" in
   appimage)
     tmp="$(mktemp -d)"; trap 'rm -rf "$tmp"' EXIT
-    (cd "$tmp" && "$(realpath "$pkg")" --appimage-extract "usr/$NOTICES_REL" >/dev/null) \
+    abs="$(realpath "$pkg")"
+    (cd "$tmp" && "$abs" --appimage-extract "usr/$NOTICES_REL" >/dev/null) \
       || die "--appimage-extract failed"
     [[ -s "$tmp/squashfs-root/usr/$NOTICES_REL" ]] || die "usr/$NOTICES_REL missing or empty"
     grep -q "Part 2: Non-Rust components" "$tmp/squashfs-root/usr/$NOTICES_REL" || die "incomplete notices"
