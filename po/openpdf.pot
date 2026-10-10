@@ -414,3 +414,9 @@ msgstr ""
 
 msgid "crop box must be llx,lly,urx,ury"
 msgstr ""
+
+msgid "PKCS#11 module not available"
+msgstr ""
+
+msgid "Could not load the PKCS#11 module"
+msgstr ""

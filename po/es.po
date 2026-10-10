@@ -414,3 +414,9 @@ msgstr "--at empieza en 1"
 
 msgid "crop box must be llx,lly,urx,ury"
 msgstr "el recorte debe ser llx,lly,urx,ury"
+
+msgid "PKCS#11 module not available"
+msgstr "Módulo PKCS#11 no disponible"
+
+msgid "Could not load the PKCS#11 module"
+msgstr "No se pudo cargar el módulo PKCS#11"
