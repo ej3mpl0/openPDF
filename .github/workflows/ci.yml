@@ -235,7 +235,7 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        variant: [plain, nodbuswait, minimal, fcwarm, nogl, default, default-nodri3, default-wayland]
+        variant: [plain, nodbuswait, minimal, fcwarm, nogl, default, default-nodri3, default-wayland, vulkan-wayland]
         shard: [1, 2, 3]
     defaults:
       run:
@@ -296,7 +296,16 @@ jobs:
             default-wayland)
               echo "OPENPDF_NO_GSK_CAIRO=1" >> "$GITHUB_ENV"
               echo "OPENPDF_WAYLAND=1" >> "$GITHUB_ENV"
-              allow="GDK_BACKEND=wayland WAYLAND_DISPLAY=wayland-ci" ;;
+              echo "OPENPDF_MEASURE_RSS_BREAKDOWN=1" >> "$GITHUB_ENV"
+              allow="GDK_BACKEND=wayland WAYLAND_DISPLAY=wayland-ci OPENPDF_MEASURE_RSS_BREAKDOWN=1" ;;
+            # vulkan-wayland: same weston headless, but GSK_RENDERER=vulkan on Mesa lavapipe. Crash GATE.
+            # VK_DRIVER_FILES/VK_ICD_FILENAMES (lvp_icd) are exported after mesa-vulkan-drivers is installed.
+            vulkan-wayland)
+              echo "OPENPDF_NO_GSK_CAIRO=1" >> "$GITHUB_ENV"
+              echo "OPENPDF_WAYLAND=1" >> "$GITHUB_ENV"
+              echo "OPENPDF_GSK=vulkan" >> "$GITHUB_ENV"
+              echo "OPENPDF_MEASURE_RSS_BREAKDOWN=1" >> "$GITHUB_ENV"
+              allow="GDK_BACKEND=wayland WAYLAND_DISPLAY=wayland-ci GSK_RENDERER=vulkan OPENPDF_MEASURE_RSS_BREAKDOWN=1" ;;  # VK_DRIVER_FILES/VK_ICD_FILENAMES: not watched by env-parity (logged in the lavapipe step)
             nodbuswait)
               echo "OPENPDF_MEASURE_WRAP=dbus-run-session --" >> "$GITHUB_ENV"
               echo "GTK_A11Y=none" >> "$GITHUB_ENV"
@@ -339,6 +348,16 @@ jobs:
           command -v eglinfo >/dev/null || { echo "::error::eglinfo not installed"; exit 1; }
           echo "GTK version: $(pkg-config --modversion gtk4)" | tee -a "$GITHUB_STEP_SUMMARY"
 
+      - name: Install Mesa lavapipe + vulkan-tools (vulkan-wayland only)
+        if: steps.gui.outputs.skip == 'false' && matrix.variant == 'vulkan-wayland'
+        run: |
+          sudo apt-get install -y --no-install-recommends mesa-vulkan-drivers vulkan-tools
+          icd=$(ls /usr/share/vulkan/icd.d/lvp_icd*.json 2>/dev/null | head -1)
+          [ -n "$icd" ] || { echo "::error::lavapipe ICD (lvp_icd*.json) not found"; ls -l /usr/share/vulkan/icd.d || true; exit 1; }
+          echo "lavapipe ICD: $icd"
+          echo "VK_DRIVER_FILES=$icd" >> "$GITHUB_ENV"
+          echo "VK_ICD_FILENAMES=$icd" >> "$GITHUB_ENV"
+
       - name: GL renderer (glxinfo -B under the same xvfb)
         if: steps.gui.outputs.skip == 'false'
         run: |
@@ -349,8 +368,8 @@ jobs:
           echo "gl_renderer=$(echo "${gl:-unknown}" | tr ' ' '_')" > cold/$TAG.gl
 
       # default-wayland: weston headless with the GL renderer, so clients get EGL (llvmpipe).
-      - name: Start weston headless (default-wayland only)
-        if: steps.gui.outputs.skip == 'false' && matrix.variant == 'default-wayland'
+      - name: Start weston headless (default-wayland, vulkan-wayland)
+        if: steps.gui.outputs.skip == 'false' && (matrix.variant == 'default-wayland' || matrix.variant == 'vulkan-wayland')
         run: |
           weston --version | tee -a "$GITHUB_STEP_SUMMARY"
           if [ -z "${XDG_RUNTIME_DIR:-}" ]; then echo "::error::XDG_RUNTIME_DIR unset on runner"; exit 1; fi
@@ -394,6 +413,17 @@ jobs:
           echo "GL_RENDERER(eglinfo)=${gl:-unknown}"
           [ -n "$gl" ] && echo "gl_renderer=$(echo "$gl" | tr ' ' '_')" > cold/$TAG.gl || true
 
+      # vulkan-wayland: Vulkan device as a client of the same weston sees it, before drop_caches.
+      - name: Vulkan device (vulkaninfo --summary under the same weston, vulkan-wayland only)
+        if: steps.gui.outputs.skip == 'false' && matrix.variant == 'vulkan-wayland'
+        run: |
+          [ -S "$XDG_RUNTIME_DIR/wayland-ci" ] || { echo "::error::weston socket gone"; exit 1; }
+          env -u DISPLAY WAYLAND_DISPLAY=wayland-ci MESA_SHADER_CACHE_DISABLE=true vulkaninfo --summary 2>&1 | tee vulkaninfo.txt || true
+          dev=$(sed -n 's/^ *deviceName *= *//p' vulkaninfo.txt | head -1)
+          drv=$(sed -n 's/^ *driverInfo *= *//p' vulkaninfo.txt | head -1)
+          echo "VK device=${dev:-unknown} driverInfo=${drv:-unknown}"
+          echo "gl_renderer=vk:$(echo "${dev:-unknown}" | tr ' ' '_')" > cold/$TAG.gl
+
       - name: "~/.cache snapshot (before first launch)"
         if: steps.gui.outputs.skip == 'false'
         run: |
@@ -423,6 +453,7 @@ jobs:
             straced=1
           fi
           [ -n "${OPENPDF_NO_GSK_CAIRO:-}" ] && unset GSK_RENDERER
+          [ -n "${OPENPDF_GSK:-}" ] && export GSK_RENDERER="$OPENPDF_GSK"
           if [ -n "${OPENPDF_WAYLAND:-}" ]; then export GDK_BACKEND=wayland WAYLAND_DISPLAY=wayland-ci; unset DISPLAY; fi
           export GDB_BASE_WRAP="${OPENPDF_MEASURE_WRAP:-}"
           export OPENPDF_MEASURE_WRAP="$wrap $PWD/.github/scripts/env-dump.sh"
@@ -438,6 +469,7 @@ jobs:
           echo "exit_code=$rc child_exit=${crc:-$rc}" >> "cold/$TAG.txt"
           .github/scripts/gdb-on-signal.sh "${crc:-$rc}" first
           g=$(grep -o 'gsk_renderer=[^ ]*' measure-1.log | tail -1 || true); echo "${g:-gsk_renderer=not_printed}" | tee -a "cold/$TAG.txt"
+          .github/scripts/rss-classes.sh measure-1.log | tee -a "cold/$TAG.txt"
           [ "$rc" = 0 ] || exit "$rc"
           printf 'variant=%s\nstraced=%s\n' "${{ matrix.variant }}" "$straced" >> "cold/$TAG.txt"
           if [ "$straced" = 1 ]; then
@@ -477,6 +509,7 @@ jobs:
             straced=1
           fi
           [ -n "${OPENPDF_NO_GSK_CAIRO:-}" ] && unset GSK_RENDERER
+          [ -n "${OPENPDF_GSK:-}" ] && export GSK_RENDERER="$OPENPDF_GSK"
           if [ -n "${OPENPDF_WAYLAND:-}" ]; then export GDK_BACKEND=wayland WAYLAND_DISPLAY=wayland-ci; unset DISPLAY; fi
           export GDB_BASE_WRAP="${OPENPDF_MEASURE_WRAP:-}"
           export OPENPDF_MEASURE_WRAP="$wrap $PWD/.github/scripts/env-dump.sh"
@@ -492,6 +525,7 @@ jobs:
           echo "exit_code=$rc child_exit=${crc:-$rc}" >> "cold/$TAG.second"
           .github/scripts/gdb-on-signal.sh "${crc:-$rc}" second
           g=$(grep -o 'gsk_renderer=[^ ]*' measure-2.log | tail -1 || true); echo "${g:-gsk_renderer=not_printed}" | tee -a "cold/$TAG.second"
+          .github/scripts/rss-classes.sh measure-2.log | tee -a "cold/$TAG.second"
           printf 'straced=%s\n' "$straced" >> "cold/$TAG.second"
           if [ "$straced" = 1 ]; then
             python3 .github/scripts/strace-summary.py strace/trace-second.txt | tee strace/summary-second.md
@@ -537,7 +571,7 @@ jobs:
 
       # Launch logs, exit codes, gdb backtraces for the crash gate (cold-start-default-crash).
       - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
-        if: always() && startsWith(matrix.variant, 'default') && steps.gui.outputs.skip == 'false'
+        if: always() && (startsWith(matrix.variant, 'default') || matrix.variant == 'vulkan-wayland') && steps.gui.outputs.skip == 'false'
         with:
           name: crash-${{ env.TAG }}
           path: crash/
@@ -599,24 +633,24 @@ jobs:
     steps:
       - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
         with:
-          pattern: crash-default-*
+          pattern: crash-*
           path: crash
 
       # Gate: default-wayland (and default-nodri3) must exit 0, log no Gsk:ERROR/CRITICAL,
       # and must print a non-cairo gsk_renderer (else it did not exercise GL).
       # Plain Xvfb `default` is informational only: Xvfb lacks DRI3.
-      - name: default-wayland / default-nodri3 exit 0, no CRITICAL, GL renderer; default informational
+      - name: default-wayland / default-nodri3 (GL) + vulkan-wayland (Vulkan) exit 0, no CRITICAL; default informational
         run: |
           shopt -s nullglob
-          dirs=(crash/crash-default-*)
+          dirs=(crash/crash-*)
           if [ ${#dirs[@]} -eq 0 ]; then
             if [ "${{ needs.cold-start.result }}" = skipped ]; then echo "::notice::cold-start skipped"; exit 0; fi
-            echo "::warning::no crash-default-* artifacts (GUI not built on this branch?)"; exit 0
+            echo "::warning::no crash-* artifacts (GUI not built on this branch?)"; exit 0
           fi
-          rc=0; seen_wl=0
+          rc=0; seen_wl=0; seen_vk=0
           for d in "${dirs[@]}"; do
             t=${d#crash/crash-}; v=${t%-*}
-            case "$v" in default-wayland|default-nodri3) gate=1; [ "$v" = default-wayland ] && seen_wl=1 ;; *) gate=0 ;; esac
+            case "$v" in default-wayland|default-nodri3|vulkan-wayland) gate=1; [ "$v" = default-wayland ] && seen_wl=1; [ "$v" = vulkan-wayland ] && seen_vk=1 ;; *) gate=0 ;; esac
             for l in first second; do
               n=1; [ "$l" = second ] && n=2
               log="$d/measure-$n.log"; code=$(cat "$d/$l.rc" 2>/dev/null || echo missing)
@@ -626,7 +660,11 @@ jobs:
                 why="$why; $(grep -m1 -oE '(Gsk:ERROR|Gsk-CRITICAL|Gdk-CRITICAL).*' "$log" | cut -c1-200)"
               fi
               g=$(grep -o 'gsk_renderer=[^ ]*' "$log" 2>/dev/null | tail -1)
-              if [ "$code" = 0 ] && { [ -z "$g" ] || echo "$g" | grep -qi cairo; }; then
+              if [ "$v" = vulkan-wayland ]; then
+                if [ "$code" = 0 ] && ! echo "$g" | grep -qi vulkan; then
+                  why="$why; did not exercise Vulkan (${g:-gsk_renderer not printed})"
+                fi
+              elif [ "$code" = 0 ] && { [ -z "$g" ] || echo "$g" | grep -qi cairo; }; then
                 why="$why; did not exercise GL (${g:-gsk_renderer not printed})"
               fi
               if [ -z "$why" ]; then echo "$t $l launch: ok ($g)"
@@ -636,6 +674,7 @@ jobs:
             done
           done
           [ $seen_wl = 1 ] || { echo "::error::no default-wayland artifacts"; rc=1; }
+          [ $seen_vk = 1 ] || { echo "::error::no vulkan-wayland artifacts"; rc=1; }
           exit $rc
 
   cold-start-summary:
@@ -655,7 +694,7 @@ jobs:
         run: |
           python3 - <<'PY2'
           import glob, os, statistics
-          variants = ["plain", "nodbuswait", "minimal", "fcwarm", "nogl", "default", "default-nodri3", "default-wayland"]
+          variants = ["plain", "nodbuswait", "minimal", "fcwarm", "nogl", "default", "default-nodri3", "default-wayland", "vulkan-wayland"]
           import re
           def mine(v, ext):
               return [f for f in sorted(glob.glob(f"cold/{v}-*{ext}")) if re.fullmatch(re.escape(v) + r"-\d+" + re.escape(ext), os.path.basename(f))]
@@ -690,7 +729,21 @@ jobs:
                   extra.append(f"s{sh}:gl={dg.get('gl_renderer','?')},gsk={d.get('gsk_renderer','?')},mesa={dg.get('mesa_shader_cache','?')},rss={d.get('peak_rss_mb','?')},exit={d.get('exit_code','?')}/{d2.get('exit_code','?')}")
               out.append(f"| {v} | {' '.join(first) or '-'} | {med} | {' '.join(second) or '-'} | {' '.join(extra)} |")
           out += ["", "`*` = under strace (slower; not in the median). `default` = GTK-chosen renderer, informational only; the limit stays on cairo. `nogl` is diagnostic only.",
-                  "Crash gate: `default-wayland` (weston headless, GL) and `default-nodri3` gate; a crash in Xvfb `default` is informational (reason: Xvfb lacks DRI3)."]
+                  "Crash gate: `default-wayland` (weston headless, GL) and `default-nodri3` gate (must use a GL GSK renderer); `vulkan-wayland` (weston headless, lavapipe) gates and must use a Vulkan GSK renderer; a crash in Xvfb `default` is informational (reason: Xvfb lacks DRI3)."]
+          out += ["", "### Peak RSS (MiB) per launch, informational (no limit on GL/Vulkan; cairo keeps its own limit)", "",
+                  "| variant | shard | first | second | smaps classes, first launch (KiB; mesa = top-15 mappings matching mesa/gallium/llvm/lvp) |", "|---|---|---:|---:|---|"]
+          def mib(d):
+              if "peak_rss_mb" in d: return d["peak_rss_mb"]
+              if "peak_rss_bytes" in d: return f"{float(d['peak_rss_bytes'])/1048576:.1f}"
+              return "-"
+          for v in ["plain", "default-wayland", "vulkan-wayland"]:
+              for f in mine(v, ".txt"):
+                  d = kv(f)
+                  if d.get("skipped"): continue
+                  sh = os.path.basename(f)[len(v) + 1:-4]
+                  d2 = kv(f[:-4] + ".second") if os.path.exists(f[:-4] + ".second") else {}
+                  cls = " ".join(f"{k[4:]}={d[k]}" for k in ("rss_heap_kb", "rss_tiles_kb", "rss_pdfium_kb", "rss_mesa_kb", "rss_other_kb") if k in d) or "-"
+                  out.append(f"| {v}{' (cairo)' if v == 'plain' else ''} | {sh} | {mib(d)} | {mib(d2)} | {cls} |")
           if skipped: out.append(f"{skipped} job(s) skipped (GUI placeholder).")
           text = "\n".join(out) + "\n"
           print(text)
