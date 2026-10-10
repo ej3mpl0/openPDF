@@ -2,17 +2,28 @@ use std::sync::{Arc, Mutex};
 
 use openpdf_core::{
     init_i18n, tr, CertificateInfo, Error, Result, SignRequest, SignatureInfo, Signer,
-    SignerUnavailableReason,
+    SignerUnavailableReason, Verifier,
 };
 use openpdf_gtk::measure::{self, DEFAULT_MEASURE_PAGES};
 use openpdf_gtk::GtkPinProvider;
 use openpdf_sign::{Pkcs11Config, Pkcs11Signer};
 
+/// Token-less PAdES verify. Lives here (with `openpdf-sign`) so `openpdf-gtk`
+/// never loads a PKCS#11 module to check signatures.
+struct PdfVerifier;
+
+impl Verifier for PdfVerifier {
+    fn verify(&self, pdf: &[u8]) -> Result<Vec<SignatureInfo>> {
+        openpdf_sign::verify_pdf(pdf)
+    }
+}
+
 /// Compose the real PKCS#11 signer with the GTK PIN dialog.
 ///
 /// `openpdf-gtk` (the UI library) never depends on `openpdf-sign`. This binary
 /// is the only place that links both. If no PKCS#11 module is installed,
-/// signing is unavailable and the reader still starts.
+/// signing is unavailable and the reader still starts. The UI verifies
+/// through [`PdfVerifier`], not through this signer.
 fn try_load_signer() -> Result<Arc<dyn Signer>> {
     match Pkcs11Signer::new(Pkcs11Config::default(), GtkPinProvider) {
         Ok(signer) => Ok(Arc::new(signer)),
@@ -139,11 +150,16 @@ fn main() {
             openpdf_gtk::run(
                 Some(path.into()),
                 Box::new(LazyPkcs11::new(try_load_signer)),
+                Box::new(PdfVerifier),
             );
         }
         None => {
             init_i18n();
-            openpdf_gtk::run(None, Box::new(LazyPkcs11::new(try_load_signer)));
+            openpdf_gtk::run(
+                None,
+                Box::new(LazyPkcs11::new(try_load_signer)),
+                Box::new(PdfVerifier),
+            );
         }
     }
 }
@@ -233,26 +249,31 @@ mod tests {
             }
         });
         let pdf = stub_signed_pdf();
-        let infos = lazy
+        let infos = PdfVerifier
             .verify(&pdf)
             .expect("verify must not need a PKCS#11 module");
         assert_eq!(
             calls.load(Ordering::SeqCst),
             0,
-            "verify must not call the PKCS#11 loader"
+            "token-less Verifier must not construct LazyPkcs11"
         );
         assert!(
             !infos.is_empty(),
             "signed PDF must still produce SignatureInfo"
         );
         assert_eq!(infos[0].valid, Some(false));
+        // Signer::verify is also token-less (defense in depth).
+        let via_signer = lazy
+            .verify(&pdf)
+            .expect("Signer::verify must not load PKCS#11 either");
+        assert_eq!(calls.load(Ordering::SeqCst), 0);
+        assert_eq!(via_signer[0].valid, Some(false));
     }
 
     /// Incremental /Type /Sig dictionary so verify runs without SoftHSM.
     fn stub_signed_pdf() -> Vec<u8> {
         use lopdf::{Dictionary, Document, IncrementalDocument, Object};
-        let hello = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
-            .join("../../corpus/hello.pdf");
+        let hello = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../corpus/hello.pdf");
         let pdf = std::fs::read(&hello).expect("corpus/hello.pdf");
         let prev = Document::load_mem(&pdf).unwrap();
         let mut inc = IncrementalDocument::create_from(pdf, prev);

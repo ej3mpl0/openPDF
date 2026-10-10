@@ -2,7 +2,8 @@
 //!
 //! Rendering and document I/O go through `openpdf-core`. This crate never
 //! depends on `openpdf-sign`. The `openpdf-gtk` binary (package `openpdf-app`)
-//! constructs `Pkcs11Signer` and injects `Box<dyn Signer>`. A
+//! constructs `Pkcs11Signer` / the token-less `Verifier` and injects
+//! `Box<dyn Signer>` plus `Box<dyn Verifier>`. A
 //! [`backend::MockDocument`] remains for unit tests when PDFium is missing.
 
 /// Desktop / D-Bus / AppStream id. Matches `data/io.github.ej3mpl0.openpdf.*`
