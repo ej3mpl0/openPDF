@@ -667,11 +667,13 @@ fn read_proc(path: &str) -> String {
 
 /// Snapshot `/proc/self/smaps_rollup` + top 15 mappings (merged by path).
 pub fn format_rss_breakdown() -> String {
-    format_rss_breakdown_from_parts_full(
+    let smaps = read_proc("/proc/self/smaps");
+    format_rss_breakdown_with_heap(
         &read_proc("/proc/self/smaps_rollup"),
-        &read_proc("/proc/self/smaps"),
+        &smaps,
         openpdf_core::Engine::tile_cache_bytes_used(),
         crate::paint::texture_cache_bytes(),
+        heap_accounting_from_smaps(&smaps),
     )
 }
 
@@ -688,6 +690,25 @@ pub fn format_rss_breakdown_from_parts_full(
     smaps: &str,
     tiles_bytes: usize,
     texture_bytes: usize,
+) -> String {
+    // Fixture path: do not subtract live GTK_TILE_BUFFERS / Engine cache /
+    // HEAP_KB_BEFORE_DOC — those are process-global and other --lib tests
+    // pollute them.
+    format_rss_breakdown_with_heap(
+        rollup,
+        smaps,
+        tiles_bytes,
+        texture_bytes,
+        heap_accounting_from_parts(smaps, 0, 0, 0),
+    )
+}
+
+fn format_rss_breakdown_with_heap(
+    rollup: &str,
+    smaps: &str,
+    tiles_bytes: usize,
+    texture_bytes: usize,
+    heap: HeapAccounting,
 ) -> String {
     let mut out = String::from("rss_breakdown=1\n");
     for (key, kb) in parse_smaps_rollup(rollup) {
@@ -711,7 +732,6 @@ pub fn format_rss_breakdown_from_parts_full(
     let textures_kb = (texture_bytes / 1024) as u64;
     out.push_str(&format!("rss_class_tiles_kb={tiles_kb}\n"));
     out.push_str(&format!("rss_class_textures_kb={textures_kb}\n"));
-    let heap = heap_accounting_from_smaps(smaps);
     out.push_str(&format!("heap_kb_before_doc={}\n", heap.heap_kb_before_doc));
     out.push_str(&format!("heap_kb_after_doc={}\n", heap.heap_kb_after_doc));
     out.push_str(&format!("ours_tiles_kb={}\n", heap.ours_tiles_kb));
@@ -870,11 +890,12 @@ pub fn ours_doc_kb() -> u64 {
 }
 
 pub fn heap_accounting_from_smaps(smaps: &str) -> HeapAccounting {
-    let before = heap_kb_before_doc();
+    heap_accounting_from_parts(smaps, heap_kb_before_doc(), ours_tiles_kb(), ours_doc_kb())
+}
+
+fn heap_accounting_from_parts(smaps: &str, before: u64, tiles: u64, doc: u64) -> HeapAccounting {
     let after = heap_anon_kb_from_smaps(smaps);
-    let tiles = ours_tiles_kb();
     let pdfium = pdfium_mapping_kb_from_smaps(smaps);
-    let doc = ours_doc_kb();
     let unexplained = after as i64 - before as i64 - tiles as i64 - doc as i64;
     HeapAccounting {
         heap_kb_before_doc: before,
@@ -1656,6 +1677,9 @@ mod tests {
 
     #[test]
     fn parse_smaps_and_format_top15() {
+        // Process-global tile registry / Engine cache must not change fixture
+        // unexplained (CI `cargo test --workspace` shares this process).
+        register_tile_buffer(0x0ff1_ce, 8 * 1024 * 1024, 1000);
         let rollup = "Rss:                4096 kB\nPss:                3000 kB\nPrivate_Dirty:      1024 kB\n";
         let smaps = "\
 7f0000000000-7f0000100000 rw-p 00000000 00:00 0                          [heap]
