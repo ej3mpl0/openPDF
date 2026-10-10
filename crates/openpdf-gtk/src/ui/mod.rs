@@ -337,8 +337,8 @@ fn install_accels(app: &adw::Application) {
     app.set_accels_for_action("win.redo", &["<Ctrl><Shift>z"]);
 }
 
-/// Bundle the three header symbolic icons and pin IconTheme to Adwaita so GTK
-/// does not walk every installed theme before the first `from_icon_name`.
+/// Bundle toolbar / header symbolic icons so Xvfb without a full Adwaita
+/// theme does not show the `image-missing` placeholder.
 fn register_icons() {
     let bytes = include_bytes!(concat!(env!("OUT_DIR"), "/icons.gresource"));
     match gtk::gio::Resource::from_data(&gtk::glib::Bytes::from_static(bytes)) {

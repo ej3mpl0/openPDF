@@ -666,3 +666,15 @@ msgstr "El diálogo de PIN necesita una pantalla"
 
 msgid "PIN entry was cancelled"
 msgstr "Se canceló la introducción del PIN"
+
+msgid "Signing…"
+msgstr "Firmando…"
+
+msgid "Signing failed"
+msgstr "La firma falló"
+
+msgid "Verification failed"
+msgstr "La verificación falló"
+
+msgid "PIN must be requested off the GTK thread"
+msgstr "El PIN debe pedirse fuera del hilo de GTK"

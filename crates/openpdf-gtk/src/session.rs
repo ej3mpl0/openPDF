@@ -139,6 +139,17 @@ impl Session {
         self.doc.borrow().to_bytes().map_err(core_err)
     }
 
+    /// Bytes handed to [`Signer::sign`] on a worker thread. Matches
+    /// [`Document::apply_signer`]: incremental for an already-signed file.
+    pub fn bytes_for_sign(&self) -> Result<Vec<u8>, BackendError> {
+        let doc = self.doc.borrow();
+        if doc.is_signed() {
+            doc.to_incremental_bytes().map_err(core_err)
+        } else {
+            doc.to_bytes().map_err(core_err)
+        }
+    }
+
     pub fn apply_signer(
         &self,
         signer: &dyn Signer,
@@ -491,6 +502,15 @@ impl Opened {
         }
     }
 
+    pub fn bytes_for_sign(&self) -> Result<Vec<u8>, BackendError> {
+        match self {
+            Self::Core(s) => s.bytes_for_sign(),
+            Self::Mock(_) => Err(BackendError::Invalid(openpdf_core::tr(
+                "Placeholder has no PDF bytes.",
+            ))),
+        }
+    }
+
     pub fn apply_signer(
         &self,
         signer: &dyn Signer,
@@ -594,5 +614,65 @@ mod tests {
         assert!(!session.doc.borrow().is_read_only());
         assert!(!session.is_locked());
         session.doc.borrow().ensure_editable().unwrap();
+    }
+
+    /// GTK placement (`tx * tile`, `ty * tile`) vs a single full-page render
+    /// at 147% zoom. Core `tile_rect` is not modified; this only checks our
+    /// offsets against `Engine::render_page`.
+    #[test]
+    fn tiled_placement_matches_full_render_at_147_percent() {
+        let Ok(engine) = Engine::new() else {
+            return;
+        };
+        let path = match crate::measure::write_measure_pdf(2) {
+            Ok(p) => p,
+            Err(_) => return,
+        };
+        let session = Session::open(&engine, &path).unwrap();
+        let id = session.doc_id();
+        let zoom = 1.47f32;
+        let full = match engine.render_page(id, 0, zoom) {
+            Ok(r) => r,
+            Err(_) => {
+                let _ = std::fs::remove_file(&path);
+                return;
+            }
+        };
+        let tile = crate::tiles::DEFAULT_TILE_SIZE;
+        let (cols, rows) = crate::tiles::tile_grid(full.width, full.height, tile);
+        assert!(
+            cols >= 2 && rows >= 2,
+            "147% A4-ish page must span several tiles, got {cols}x{rows} of {}x{}",
+            full.width,
+            full.height
+        );
+        let mut composite = vec![0u8; full.width as usize * full.height as usize * 4];
+        for ty in 0..rows {
+            for tx in 0..cols {
+                let key = openpdf_core::TileKey::new(id, 0, zoom, tx, ty);
+                let rendered = engine
+                    .render_tile_blocking(key)
+                    .expect("tile render at 147%");
+                crate::tiles::place_tile_rgba(
+                    &mut composite,
+                    full.width,
+                    full.height,
+                    &rendered.rgba,
+                    rendered.width,
+                    rendered.height,
+                    tx,
+                    ty,
+                    tile,
+                );
+            }
+        }
+        let _ = std::fs::remove_file(&path);
+        let mismatch = crate::tiles::pixel_mismatch_ratio(&composite, &full.rgba, 12);
+        assert!(
+            mismatch < 0.01,
+            "tiled composite at 147% diverges from full render ({:.2}% pixels, max Δ {})",
+            mismatch * 100.0,
+            crate::tiles::max_channel_delta(&composite, &full.rgba)
+        );
     }
 }
