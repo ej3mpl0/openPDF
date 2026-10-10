@@ -310,6 +310,15 @@ msgstr ""
 msgid "wrong password"
 msgstr ""
 
+msgid "The result will be protected with the password of «{file}»"
+msgstr ""
+
+msgid "The result will open without a password but keep the restrictions of «{file}»"
+msgstr ""
+
+msgid "The result will keep the protection of «{file}»"
+msgstr ""
+
 msgid "document is not encrypted"
 msgstr ""
 

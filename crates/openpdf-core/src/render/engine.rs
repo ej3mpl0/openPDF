@@ -9,6 +9,7 @@ use pdfium_render::prelude::{PdfDocument, Pdfium};
 
 use crate::document::{DocSecret, Document, DocumentId};
 use crate::error::{Error, InvalidKind, Result};
+use zeroize::Zeroizing;
 
 use super::cache::TileCache;
 use super::pdfium::{self as pdfium_bind};
@@ -256,11 +257,13 @@ fn handle_cmd(
             reply,
         } => {
             let result = match docs.get(&id) {
-                Some(b) => pdfium_bind::render_page(&b.doc, page, zoom).map(|(w, h, rgba)| Raster {
-                    width: w,
-                    height: h,
-                    rgba,
-                }),
+                Some(b) => {
+                    pdfium_bind::render_page(&b.doc, page, zoom).map(|(w, h, rgba)| Raster {
+                        width: w,
+                        height: h,
+                        rgba,
+                    })
+                }
                 None => Err(Error::invalid(InvalidKind::DocumentNotBound)),
             };
             let _ = reply.send(result);
@@ -360,6 +363,16 @@ impl Engine {
 
     pub fn open(&self, path: impl AsRef<Path>) -> Result<Document> {
         let doc = Document::open(path)?;
+        self.bind(&doc)?;
+        Ok(doc)
+    }
+
+    pub fn open_with_password(
+        &self,
+        path: impl AsRef<Path>,
+        password: Zeroizing<String>,
+    ) -> Result<Document> {
+        let doc = Document::open_with_password(path, password)?;
         self.bind(&doc)?;
         Ok(doc)
     }
