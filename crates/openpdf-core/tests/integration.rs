@@ -1,7 +1,8 @@
 use std::time::Duration;
 
 use openpdf_core::{
-    blank_document, merge, split_all, Document, Engine, Priority, TileKey, TileRequest, TILE_SIZE,
+    blank_document, merge, split_all, Document, Engine, Priority, TileEvent, TileKey, TileRequest,
+    TILE_SIZE,
 };
 
 fn corpus(name: &str) -> std::path::PathBuf {
@@ -142,4 +143,52 @@ fn open_and_tile_large_pdf() {
     let tile_t = t2.elapsed();
     assert!(tile.width > 0 && tile.height > 0);
     eprintln!("large pdf tile={tile_t:?} {}x{}", tile.width, tile.height);
+}
+
+/// GUI initial view for the 32-page letter corpus: zoom 1.27 → 4×4 tiles (16).
+#[test]
+fn visible_queue_returns_top_left_before_the_rest() {
+    let Some(engine) = engine_or_skip() else {
+        return;
+    };
+    let doc = blank_document(32).unwrap();
+    engine.bind(&doc).unwrap();
+    engine.begin_frame().unwrap();
+
+    let zoom = 1.27;
+    let mut reqs = Vec::with_capacity(16);
+    for y in 0..4 {
+        for x in 0..4 {
+            reqs.push(TileRequest::visible(TileKey::new(doc.id(), 0, zoom, x, y)));
+        }
+    }
+    let t0 = std::time::Instant::now();
+    engine.request_tiles(reqs).unwrap();
+
+    let mut first = None;
+    let mut first_ms = 0.0;
+    let mut n = 0u32;
+    let deadline = t0 + Duration::from_secs(5);
+    while n < 16 && std::time::Instant::now() < deadline {
+        if let Some(TileEvent::Ready(t)) = engine.recv_timeout(Duration::from_millis(200)) {
+            if first.is_none() {
+                first = Some(t.key);
+                first_ms = t0.elapsed().as_secs_f64() * 1000.0;
+            }
+            n += 1;
+        }
+    }
+    let all_ms = t0.elapsed().as_secs_f64() * 1000.0;
+    let first_key = first.expect("no tile arrived");
+    assert_eq!(
+        (first_key.x, first_key.y),
+        (0, 0),
+        "queue must render the first-requested (top-left) visible tile first"
+    );
+    assert_eq!(n, 16, "expected all 16 visible tiles");
+    assert!(
+        first_ms + 0.05 < all_ms,
+        "queue must return the first tile before finishing the rest (first_ms={first_ms:.3} all_ms={all_ms:.3})"
+    );
+    eprintln!("visible queue first_ms={first_ms:.3} all_ms={all_ms:.3} n={n}");
 }
