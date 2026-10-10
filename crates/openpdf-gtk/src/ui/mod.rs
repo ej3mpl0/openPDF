@@ -1,5 +1,6 @@
 // SPDX-License-Identifier: MPL-2.0
 mod about;
+mod chrome;
 mod home;
 mod preferences;
 mod sign;
@@ -263,7 +264,9 @@ fn watch_measure(
             let startup_ms = measure::ui_all_visible_painted_ms();
             let idle_done = measure::ui_idle_loads_done_ms();
             let first_frame = marks.first_frame.get();
-            if first_frame > 0 && idle_done == 0 && elapsed.saturating_sub(first_frame) > MAX_IDLE_LOAD_MS
+            if first_frame > 0
+                && idle_done == 0
+                && elapsed.saturating_sub(first_frame) > MAX_IDLE_LOAD_MS
             {
                 finish_measure(
                     &app,
@@ -394,6 +397,9 @@ fn install_accels(app: &adw::Application) {
 }
 
 fn register_icons() {
+    if chrome::measuring() {
+        return;
+    }
     register_icon_blob(
         include_bytes!(concat!(env!("OUT_DIR"), "/icons-chrome.gresource")),
         "icons-chrome",
@@ -416,6 +422,7 @@ pub(crate) fn register_deferred_icons() {
             include_bytes!(concat!(env!("OUT_DIR"), "/icons-deferred.gresource")),
             "icons-deferred",
         );
+        load_design_css();
     });
 }
 
@@ -427,8 +434,27 @@ fn register_icon_blob(bytes: &'static [u8], label: &str) {
 }
 
 fn load_css() {
+    if chrome::measuring() {
+        return;
+    }
+    add_css(CSS);
+}
+
+/// Home / picker / mode-bar rules. Skipped in `--measure` so peak RSS stays
+/// under 150 MiB; the real app loads this with the deferred icons.
+pub(crate) fn load_design_css() {
+    let measuring = gtk::gio::Application::default()
+        .and_then(|app| app.application_id())
+        .is_some_and(|id| id == crate::MEASURE_APP_ID);
+    if measuring {
+        return;
+    }
+    add_css(CSS_DESIGN);
+}
+
+fn add_css(css: &str) {
     let provider = gtk::CssProvider::new();
-    provider.load_from_string(CSS);
+    provider.load_from_string(css);
     if let Some(display) = gtk::gdk::Display::default() {
         gtk::style_context_add_provider_for_display(
             &display,
@@ -442,23 +468,148 @@ const CSS: &str = r#"
 @define-color accent_color #0e7c66;
 @define-color accent_bg_color #0e7c66;
 @define-color accent_fg_color #ffffff;
+@define-color window_fg_color #1a1c20;
+@define-color highlight_color #ffe07a;
 
 .page-canvas {
-  background: #c8c5bf;
+  background: #ebedf0;
 }
 .dark .page-canvas {
-  background: #1c1c1c;
+  background: #1f2024;
 }
 
 .thumb-canvas {
-  background: transparent;
+  background: #f4f5f7;
+}
+.dark .thumb-canvas {
+  background: #1f2024;
 }
 
 .placeholder-banner {
-  padding: 6px 12px;
-  background: alpha(@accent_bg_color, 0.15);
-  color: @window_fg_color;
-  font-size: 0.9em;
+  padding: 8px 12px;
+  background: #ddf0ea;
+  color: #0a5e4d;
+}
+
+.dark .placeholder-banner {
+  background: #1e4a40;
+  color: #8fe6cf;
+}
+"#;
+
+const CSS_DESIGN: &str = r#"
+.tab-row, .tool-row, .status-bar, .rail-strip, tabbar, .mode-bar {
+  background: #f8f9fa;
+  color: #1a1c20;
+}
+
+.tab-row {
+  min-height: 36px;
+  padding-right: 4px;
+}
+
+.tool-row {
+  padding: 4px 8px;
+  border-top: 1px solid #e6e8ec;
+}
+
+.status-bar {
+  padding: 4px 12px;
+  border-top: 1px solid #e6e8ec;
+  min-height: 28px;
+}
+
+.rail-strip {
+  padding: 8px 4px;
+  border-right: 1px solid #e6e8ec;
+}
+
+.suggested-action {
+  background: #0e7c66;
+  color: #ffffff;
+  border-radius: 999px;
+  padding: 6px 16px;
+}
+
+.suggested-action:hover {
+  background: #0a5e4d;
+}
+
+.pill {
+  border-radius: 999px;
+}
+
+.dark .suggested-action {
+  background: #3cc4a2;
+  color: #0b1f1a;
+}
+
+.mode-bar {
+  padding: 4px 8px;
+}
+
+.mode-btn {
+  padding: 4px 12px;
+  border-radius: 999px;
+}
+
+.drop-card {
+  border: 1.5px dashed #d3d7de;
+  border-radius: 12px;
+  padding: 28px 24px;
+  background: #ffffff;
+}
+
+.home-card {
+  background: #ffffff;
+  border-radius: 12px;
+  padding: 16px;
+  box-shadow: 0 1px 2px rgba(20, 24, 31, 0.08), 0 6px 20px rgba(20, 24, 31, 0.06);
+}
+
+.tool-card {
+  background: #ffffff;
+  border-radius: 12px;
+  padding: 14px 16px;
+  box-shadow: 0 1px 2px rgba(20, 24, 31, 0.08);
+}
+
+.cert-row {
+  border: 1px solid #d3d7de;
+  border-radius: 8px;
+  padding: 10px 12px;
+  margin: 4px 0;
+  background: #ffffff;
+}
+
+.cert-row.selected {
+  background: #ddf0ea;
+  border-color: #0e7c66;
+}
+
+.cert-dialog {
+  background: #ffffff;
+  border-radius: 12px;
+}
+
+.sign-footer {
+  padding: 12px 16px;
+}
+
+.dark .tab-row, .dark .tool-row, .dark .status-bar, .dark .rail-strip, .dark tabbar, .dark .mode-bar {
+  background: #2a2c31;
+  color: #ecedef;
+}
+
+.dark .drop-card, .dark .home-card, .dark .tool-card, .dark .cert-row, .dark .cert-dialog {
+  background: #2a2c31;
+  color: #ecedef;
+  border-color: #3a3d44;
+}
+
+.dark .cert-row.selected {
+  background: #1e4a40;
+  border-color: #3cc4a2;
 }
 "#;
 

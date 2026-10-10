@@ -525,6 +525,9 @@ msgstr ""
 msgid "Open…"
 msgstr ""
 
+msgid "Organize"
+msgstr ""
+
 msgid "Organize pages"
 msgstr ""
 
@@ -676,4 +679,34 @@ msgid "Saved signed PDF to {path}"
 msgstr ""
 
 msgid "Cannot verify: original file bytes are unavailable."
+msgstr ""
+
+msgid "Find in document Ctrl+F"
+msgstr ""
+
+msgid "Page {n} of {m}"
+msgstr ""
+
+msgid "Save"
+msgstr ""
+
+msgid "Print"
+msgstr ""
+
+msgid "Attachments"
+msgstr ""
+
+msgid "Drag a PDF here"
+msgstr ""
+
+msgid "or open from your computer"
+msgstr ""
+
+msgid "Sign and save a copy"
+msgstr ""
+
+msgid "A signed copy is saved. The original is not modified."
+msgstr ""
+
+msgid "Certificates stay on this computer. openPDF does not send them anywhere."
 msgstr ""

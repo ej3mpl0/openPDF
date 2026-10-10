@@ -1,4 +1,5 @@
 // SPDX-License-Identifier: MPL-2.0
+use std::cell::RefCell;
 use std::rc::Rc;
 use std::sync::Arc;
 
@@ -105,53 +106,121 @@ fn show_certificate_list(
     }
     let note = gtk::Label::new(Some(t(
         lang,
-        "Choose a signing certificate. The token will ask for the PIN if needed.",
+        "Certificates stay on this computer. openPDF does not send them anywhere.",
     )));
     note.add_css_class("dim-label");
     note.set_wrap(true);
-    note.set_margin_top(12);
-    note.set_margin_start(12);
-    note.set_margin_end(12);
-    let group = adw::PreferencesGroup::new();
+    note.set_xalign(0.0);
+    note.set_margin_top(16);
+    note.set_margin_start(16);
+    note.set_margin_end(16);
+
+    let pin_note = gtk::Label::new(Some(t(
+        lang,
+        "Choose a signing certificate. The token will ask for the PIN if needed.",
+    )));
+    pin_note.add_css_class("dim-label");
+    pin_note.set_wrap(true);
+    pin_note.set_xalign(0.0);
+    pin_note.set_margin_start(16);
+    pin_note.set_margin_end(16);
+
+    let selected: Rc<RefCell<Option<String>>> = Rc::new(RefCell::new(None));
+    let list = gtk::Box::new(gtk::Orientation::Vertical, 8);
+    list.set_margin_start(16);
+    list.set_margin_end(16);
+    list.set_margin_top(12);
+
+    let mut first_radio: Option<gtk::CheckButton> = None;
     for cert in certs {
-        group.add(&certificate_row(lang, cert, win, on_pick.clone()));
+        let can_sign = certificate_can_sign(&cert);
+        let radio = gtk::CheckButton::new();
+        if let Some(first) = &first_radio {
+            radio.set_group(Some(first));
+        } else {
+            first_radio = Some(radio.clone());
+        }
+        let row = adw::ActionRow::new();
+        row.add_css_class("cert-row");
+        row.set_title(&escape(&certificate_common_name(&cert.subject)));
+        let mut subtitle = describe_certificate_local(&cert);
+        if !can_sign {
+            subtitle.push_str(" · ");
+            subtitle.push_str(t(lang, "Not a signing certificate"));
+        }
+        row.set_subtitle(&escape(&subtitle));
+        row.set_sensitive(can_sign);
+        row.set_activatable(can_sign);
+        row.add_prefix(&radio);
+        let radio_for_row = radio.clone();
+        row.connect_activated(move |_| {
+            radio_for_row.set_active(true);
+        });
+        let id = cert.id.clone();
+        let selected_c = selected.clone();
+        let row_c = row.clone();
+        radio.set_sensitive(can_sign);
+        radio.connect_toggled(move |btn| {
+            if btn.is_active() {
+                *selected_c.borrow_mut() = Some(id.clone());
+                row_c.add_css_class("selected");
+            } else {
+                row_c.remove_css_class("selected");
+            }
+        });
+        if can_sign && selected.borrow().is_none() {
+            radio.set_active(true);
+        }
+        list.append(&row);
     }
+
+    let copy_note = gtk::Label::new(Some(t(
+        lang,
+        "A signed copy is saved. The original is not modified.",
+    )));
+    copy_note.add_css_class("dim-label");
+    copy_note.set_wrap(true);
+    copy_note.set_xalign(0.0);
+    copy_note.set_margin_start(16);
+    copy_note.set_margin_end(16);
+    copy_note.set_margin_top(8);
+
+    let footer = gtk::Box::new(gtk::Orientation::Horizontal, 8);
+    footer.add_css_class("sign-footer");
+    footer.set_halign(gtk::Align::End);
+    let cancel = gtk::Button::with_label(t(lang, "Cancel"));
+    cancel.add_css_class("pill");
+    let win_cancel = win.clone();
+    cancel.connect_clicked(move |_| {
+        win_cancel.close();
+    });
+    let sign_btn = gtk::Button::with_label(t(lang, "Sign and save a copy"));
+    sign_btn.add_css_class("suggested-action");
+    sign_btn.add_css_class("pill");
+    let win_sign = win.clone();
+    let selected_sign = selected.clone();
+    sign_btn.connect_clicked(move |_| {
+        if let Some(id) = selected_sign.borrow().clone() {
+            on_pick(sign_request_for(id));
+            win_sign.close();
+        }
+    });
+    footer.append(&cancel);
+    footer.append(&sign_btn);
+
     let col = gtk::Box::new(gtk::Orientation::Vertical, 8);
+    col.add_css_class("cert-dialog");
     col.append(&note);
-    col.append(&group);
+    col.append(&pin_note);
+    col.append(&list);
+    col.append(&copy_note);
+    col.append(&footer);
     let scroll = gtk::ScrolledWindow::new();
     scroll.set_vexpand(true);
     scroll.set_policy(gtk::PolicyType::Never, gtk::PolicyType::Automatic);
     scroll.set_min_content_height(280);
     scroll.set_child(Some(&col));
     toolbar.set_content(Some(&scroll));
-}
-
-fn certificate_row(
-    lang: Lang,
-    cert: CertificateInfo,
-    win: &adw::Window,
-    on_pick: Rc<impl Fn(SignRequest) + 'static>,
-) -> adw::ActionRow {
-    let can_sign = certificate_can_sign(&cert);
-    let row = adw::ActionRow::new();
-    row.set_title(&escape(&certificate_common_name(&cert.subject)));
-    let mut subtitle = describe_certificate_local(&cert);
-    if !can_sign {
-        subtitle.push_str(" · ");
-        subtitle.push_str(t(lang, "Not a signing certificate"));
-    }
-    row.set_subtitle(&escape(&subtitle));
-    row.set_sensitive(can_sign);
-    row.set_activatable(can_sign);
-    if can_sign {
-        let win_c = win.clone();
-        row.connect_activated(move |_| {
-            on_pick(sign_request_for(cert.id.clone()));
-            win_c.close();
-        });
-    }
-    row
 }
 
 /// Sync helper for tests. The window signs on a worker via

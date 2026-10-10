@@ -1,0 +1,5 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 256 256" role="img" aria-label="openPDF">
+  <path d="M68 20H160L212 72V212A24 24 0 0 1 188 236H68A24 24 0 0 1 44 212V44A24 24 0 0 1 68 20Z" fill="#ffffff" stroke="#c4c9d1" stroke-width="4"/>
+  <path d="M160 20V60A12 12 0 0 0 172 72H212Z" fill="#0e7c66"/>
+  <path d="M172.4 136.1A46 46 0 1 1 139.9 103.6" fill="none" stroke="#0e7c66" stroke-width="22" stroke-linecap="round"/>
+</svg>
