@@ -835,6 +835,10 @@ pub(crate) fn tile_dest_origin(
 }
 
 /// Convert unpremultiplied RGBA8 to cairo ARgb32 (BGRA on little-endian).
+///
+/// Do not cache this by the source pointer: the tile cache recycles `Vec`
+/// allocations, so a later tile can reuse the first tile's address and every
+/// column would stamp the same pixels (`openPDF sample - paF sample - pa`).
 fn rgba_to_cairo_argb(rgba: &[u8], width: u32, height: u32) -> Option<(Vec<u8>, i32)> {
     let w = width as i32;
     let h = height as i32;
@@ -870,7 +874,7 @@ pub(crate) fn paint_rgba(
     rgba: &[u8],
     real_page_tile: bool,
 ) {
-    let Some((data, stride)) = rgba_to_cairo_argb_cached(rgba, width, height) else {
+    let Some((data, stride)) = rgba_to_cairo_argb(rgba, width, height) else {
         return;
     };
     if let Ok(surface) = cairo::ImageSurface::create_for_data(
@@ -887,28 +891,6 @@ pub(crate) fn paint_rgba(
             crate::measure::mark_first_tile_painted();
         }
     }
-}
-
-/// Last-tile BGRA cache keyed by the source pointer. The engine recycles
-/// `Vec` allocations, so a later tile can reuse an earlier address and this
-/// stamps the previous pixels into the wrong slot.
-fn rgba_to_cairo_argb_cached(rgba: &[u8], width: u32, height: u32) -> Option<(Vec<u8>, i32)> {
-    thread_local! {
-        static LAST: std::cell::RefCell<Option<(usize, usize, i32, Vec<u8>)>> =
-            std::cell::RefCell::new(None);
-    }
-    let key = (rgba.as_ptr() as usize, rgba.len());
-    LAST.with(|slot| {
-        let mut slot = slot.borrow_mut();
-        if let Some((ptr, len, stride, cached)) = slot.as_ref() {
-            if *ptr == key.0 && *len == key.1 {
-                return Some((cached.clone(), *stride));
-            }
-        }
-        let (data, stride) = rgba_to_cairo_argb(rgba, width, height)?;
-        *slot = Some((key.0, key.1, stride, data.clone()));
-        Some((data, stride))
-    })
 }
 
 fn run_search(view: &DocumentView, query: &str) {
