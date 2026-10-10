@@ -3,13 +3,13 @@
 
 usage: env-parity.py BASELINE MEASURED [MEASURED...] --allow KEY=VALUE ...
 
-Compares XDG_*, FONTCONFIG_*, GTK_*, GDK_*, GSK_RENDERER. A difference fails
+Compares XDG_*, FONTCONFIG_*, GTK_*, GDK_*, LIBGL_*, GSK_RENDERER, WAYLAND_DISPLAY. A difference fails
 (exit 1) unless KEY is a declared per-variant exception whose measured value is
 exactly VALUE. All exceptions and differences are printed."""
 import re
 import sys
 
-WATCH = re.compile(r"^(XDG_|FONTCONFIG_|GTK_|GDK_)|^GSK_RENDERER$")
+WATCH = re.compile(r"^(XDG_|FONTCONFIG_|GTK_|GDK_|LIBGL_)|^(GSK_RENDERER|WAYLAND_DISPLAY)$")
 
 
 def load(p):
