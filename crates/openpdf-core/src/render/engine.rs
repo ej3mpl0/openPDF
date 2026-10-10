@@ -717,6 +717,19 @@ mod no_empty_tiles_tests {
                                 "tile {w}x{h} r{rot} @{z}: {}x{}",
                                 t.width, t.height
                             )),
+                            Ok(t)
+                                if {
+                                    let (tw, th, _, _) = tile_rect(pw, ph, x, y, TILE_SIZE);
+                                    (t.width, t.height) != (tw, th)
+                                } =>
+                            {
+                                bad.push(format!(
+                                    "tile {w}x{h} r{rot} @{z} ({x},{y}): {}x{} != tile_rect {:?}",
+                                    t.width,
+                                    t.height,
+                                    tile_rect(pw, ph, x, y, TILE_SIZE)
+                                ))
+                            }
                             Err(e) if x >= c || y >= r => {
                                 bad.push(format!("out-of-grid tile ({x},{y}) wrong error {e}"))
                             }

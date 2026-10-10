@@ -6,6 +6,7 @@ use crate::i18n::{tr, tr_args};
 /// Crate-wide error type. Variants are stable so the GTK UI can localize them
 /// itself; [`Display`] uses the shared gettext catalog.
 #[derive(Debug)]
+#[non_exhaustive]
 pub enum Error {
     Io(io::Error),
     Structure(String),
@@ -29,6 +30,7 @@ pub enum Error {
 
 /// User-facing invalid-input cases. Match this instead of parsing [`Display`].
 #[derive(Clone, Debug, PartialEq, Eq)]
+#[non_exhaustive]
 pub enum InvalidKind {
     CertIdRequired,
     RangeInverted {
