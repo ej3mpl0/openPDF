@@ -951,6 +951,29 @@ impl PaintTile {
             PaintPixels::Mock(t) => &t.pixels,
         }
     }
+
+    /// Move a refcounted view of the pixel buffer into `glib::Bytes::from_owned`.
+    pub(crate) fn pixel_owner(&self) -> PixelOwner {
+        match &self.pixels {
+            PaintPixels::Core(t) => PixelOwner::Core(Arc::clone(t)),
+            PaintPixels::Mock(t) => PixelOwner::Mock(Arc::clone(t)),
+        }
+    }
+}
+
+/// `AsRef<[u8]>` over the core/mock tile so `Bytes::from_owned` copies no pixels.
+pub(crate) enum PixelOwner {
+    Core(Arc<Tile>),
+    Mock(Arc<TileBitmap>),
+}
+
+impl AsRef<[u8]> for PixelOwner {
+    fn as_ref(&self) -> &[u8] {
+        match self {
+            Self::Core(t) => &t.rgba,
+            Self::Mock(t) => &t.pixels,
+        }
+    }
 }
 
 pub fn sample_pdf_path() -> Option<PathBuf> {

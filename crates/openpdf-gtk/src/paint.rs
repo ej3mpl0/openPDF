@@ -1,19 +1,25 @@
 // SPDX-License-Identifier: MPL-2.0
-//! Single construction point for tile / thumb / preview raster surfaces.
+//! Single construction point for tile / thumb / preview rasters.
 //!
-//! GSK ngl/gl uploads cairo image surfaces via `gdk_texture_new_for_surface`.
-//! A 0×N or N×0 surface trips `width > 0` and then
-//! `gsk_gl_driver_cache_texture: texture_id > 0`. A surface whose width or
-//! height exceeds [`MAX_CAIRO_DIM`] (or a context reused after `finish`)
-//! leaves `cairo_status != SUCCESS`; GSK then emits
-//! `gsk_render_node_draw` CRITICAL. Every caller goes through these helpers.
+//! Tiles become [`gdk::MemoryTexture`] from core RGBA via `glib::Bytes::from_owned`
+//! (no pixel copy). The GTK tile cache stores those textures. Snapshot paints
+//! with `append_texture` / `append_scaled_texture` — no cairo surface per tile.
+//!
+//! 0×N / N×0 / &gt;32767 still return None so GSK ngl never sees a 0-wide
+//! texture or an INVALID_SIZE cairo node.
+
+use std::collections::{HashMap, VecDeque};
+use std::sync::atomic::{AtomicUsize, Ordering};
 
 use gtk::cairo;
 use gtk::gdk;
-use gtk::gdk::prelude::PaintableExt;
+use gtk::gdk::prelude::{PaintableExt, TextureExt};
+use gtk::glib;
 use gtk::graphene;
 use gtk::prelude::*;
 use gtk4 as gtk;
+
+use crate::tiles::TileKey;
 
 /// cairo `CAIRO_MAX_IMAGE_SIZE`. Device pixels above this yield INVALID_SIZE.
 pub const MAX_CAIRO_DIM: i32 = 32767;
@@ -96,7 +102,133 @@ pub fn image_surface_from_rgba(
     Some(surface)
 }
 
-/// Append a texture node only when the bounds have positive size.
+/// Host bytes currently held by GTK [`TextureCache`] instances (w×h×4).
+static TEXTURE_CACHE_BYTES: AtomicUsize = AtomicUsize::new(0);
+
+pub fn texture_cache_bytes() -> usize {
+    TEXTURE_CACHE_BYTES.load(Ordering::Relaxed)
+}
+
+fn publish_texture_bytes(bytes: usize) {
+    TEXTURE_CACHE_BYTES.store(bytes, Ordering::Relaxed);
+}
+
+/// RGBA/BGRA bytes → [`gdk::MemoryTexture`] with no extra pixel copy.
+///
+/// `pixels` is moved into `glib::Bytes::from_owned`. 0 / oversize / short
+/// buffers return `None`.
+pub fn memory_texture_from_owned(
+    width: u32,
+    height: u32,
+    pixels: impl AsRef<[u8]> + Send + 'static,
+) -> Option<gdk::MemoryTexture> {
+    if width == 0 || height == 0 {
+        return None;
+    }
+    if width > MAX_CAIRO_DIM as u32 || height > MAX_CAIRO_DIM as u32 {
+        return None;
+    }
+    if !gtk::is_initialized_main_thread() {
+        return None;
+    }
+    let stride = (width as usize).checked_mul(4)?;
+    let need = stride.checked_mul(height as usize)?;
+    if pixels.as_ref().len() < need {
+        return None;
+    }
+    debug_assert!(
+        valid_cairo_size(width as i32, height as i32, 1),
+        "tile texture {width}x{height} must be a valid size"
+    );
+    let bytes = glib::Bytes::from_owned(pixels);
+    Some(gdk::MemoryTexture::new(
+        width as i32,
+        height as i32,
+        gdk::MemoryFormat::R8g8b8a8,
+        &bytes,
+        stride,
+    ))
+}
+
+/// LRU of [`gdk::Texture`]. Budget is texture bytes (`width * height * 4`).
+pub struct TextureCache {
+    map: HashMap<TileKey, gdk::Texture>,
+    order: VecDeque<TileKey>,
+    bytes: usize,
+    max_bytes: usize,
+}
+
+impl TextureCache {
+    pub fn new(max_bytes: usize) -> Self {
+        Self {
+            map: HashMap::new(),
+            order: VecDeque::new(),
+            bytes: 0,
+            max_bytes: max_bytes.max(1),
+        }
+    }
+
+    pub fn bytes(&self) -> usize {
+        self.bytes
+    }
+
+    pub fn set_max_bytes(&mut self, max_bytes: usize) {
+        self.max_bytes = max_bytes.max(1);
+        self.evict();
+        publish_texture_bytes(self.bytes);
+    }
+
+    pub fn clear(&mut self) {
+        self.map.clear();
+        self.order.clear();
+        self.bytes = 0;
+        publish_texture_bytes(0);
+    }
+
+    pub fn get(&mut self, key: &TileKey) -> Option<gdk::Texture> {
+        let tile = self.map.get(key).cloned()?;
+        if let Some(pos) = self.order.iter().position(|k| k == key) {
+            self.order.remove(pos);
+            self.order.push_back(*key);
+        }
+        Some(tile)
+    }
+
+    pub fn insert(&mut self, key: TileKey, texture: gdk::Texture) {
+        let add = texture_byte_len(&texture);
+        if let Some(old) = self.map.remove(&key) {
+            self.bytes = self.bytes.saturating_sub(texture_byte_len(&old));
+            if let Some(pos) = self.order.iter().position(|k| k == &key) {
+                self.order.remove(pos);
+            }
+        }
+        self.bytes += add;
+        self.map.insert(key, texture);
+        self.order.push_back(key);
+        self.evict();
+        publish_texture_bytes(self.bytes);
+    }
+
+    fn evict(&mut self) {
+        while self.bytes > self.max_bytes {
+            if let Some(old_key) = self.order.pop_front() {
+                if let Some(old) = self.map.remove(&old_key) {
+                    self.bytes = self.bytes.saturating_sub(texture_byte_len(&old));
+                }
+            } else {
+                break;
+            }
+        }
+    }
+}
+
+fn texture_byte_len(texture: &gdk::Texture) -> usize {
+    (texture.width().max(0) as usize)
+        .saturating_mul(texture.height().max(0) as usize)
+        .saturating_mul(4)
+}
+
+/// Append a texture node only when the bounds have a valid size.
 pub fn append_texture(
     snapshot: &gtk::Snapshot,
     texture: &gdk::Texture,
@@ -105,14 +237,36 @@ pub fn append_texture(
     width: f32,
     height: f32,
 ) {
-    if width <= 0.0 || height <= 0.0 {
+    if !valid_texture_bounds(width, height) {
         return;
     }
-    debug_assert!(
-        width > 0.0 && height > 0.0,
-        "texture node {width}x{height} must be non-zero"
-    );
     snapshot.append_texture(texture, &graphene::Rect::new(x, y, width, height));
+}
+
+/// Scale a (usually preview) texture into `width`×`height`.
+pub fn append_scaled_texture(
+    snapshot: &gtk::Snapshot,
+    texture: &gdk::Texture,
+    x: f32,
+    y: f32,
+    width: f32,
+    height: f32,
+) {
+    if !valid_texture_bounds(width, height) {
+        return;
+    }
+    snapshot.append_scaled_texture(
+        texture,
+        gtk::gsk::ScalingFilter::Linear,
+        &graphene::Rect::new(x, y, width, height),
+    );
+}
+
+fn valid_texture_bounds(width: f32, height: f32) -> bool {
+    if width <= 0.0 || height <= 0.0 {
+        return false;
+    }
+    valid_cairo_size(width.ceil() as i32, height.ceil() as i32, 1)
 }
 
 /// `gtk_snapshot_append_cairo` only when bounds are a valid cairo size.
@@ -249,5 +403,21 @@ mod tests {
         assert!(w <= f64::from(MAX_CAIRO_DIM));
         assert!(h <= f64::from(MAX_CAIRO_DIM));
         assert!(image_surface_from_rgba(MAX_CAIRO_DIM as u32 + 1, 8, &[0; 4]).is_none());
+    }
+
+    #[test]
+    fn memory_texture_rejects_zero_and_oversize() {
+        let Some(()) = crate::test_gtk::on_gtk_thread(|| {
+            assert!(memory_texture_from_owned(0, 16, vec![0u8; 4]).is_none());
+            assert!(memory_texture_from_owned(16, 0, vec![0u8; 4]).is_none());
+            assert!(memory_texture_from_owned(MAX_CAIRO_DIM as u32 + 1, 8, vec![0u8; 4]).is_none());
+            let pix = vec![255u8; 4];
+            let tex = memory_texture_from_owned(1, 1, pix).expect("1x1 texture");
+            assert_eq!(tex.width(), 1);
+            assert_eq!(tex.height(), 1);
+        }) else {
+            eprintln!("memory_texture sizes: skipped (no GTK display)");
+            return;
+        };
     }
 }

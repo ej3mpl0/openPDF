@@ -5,7 +5,7 @@ use std::rc::Rc;
 use crate::i18n::t;
 use crate::measure::{MIN_THUMB_TILES, MIN_VISIBLE_TILES};
 use crate::paint;
-use crate::session::Opened;
+use crate::session::{Opened, PaintTile};
 use crate::settings::{PageLayoutMode, Settings, ZoomMode};
 use crate::tiles::{
     layout_continuous, layout_single, thumb_request_viewport, visible_tiles, PageLayout, TileKey,
@@ -14,6 +14,7 @@ use crate::tiles::{
 use crate::ui::canvas::Canvas;
 use crate::{Lang, PageSize};
 use gtk::cairo;
+use gtk::gdk;
 use gtk::glib::{self, clone};
 use gtk::prelude::*;
 use gtk4 as gtk;
@@ -34,6 +35,7 @@ struct Shared {
     layout: RefCell<PageLayout>,
     thumb_layout: RefCell<PageLayout>,
     last_visible: RefCell<Vec<TileKey>>,
+    textures: RefCell<paint::TextureCache>,
 }
 
 pub struct DocumentView {
@@ -330,6 +332,7 @@ impl DocumentView {
         self.thumbs_area
             .set_content_height(thumbs.content_height.ceil().max(1.0) as i32);
         *self.shared.thumb_layout.borrow_mut() = thumbs;
+        self.shared.textures.borrow_mut().clear();
         self.pages_area.queue_draw();
         self.thumbs_area.queue_draw();
         self.update_chrome();
@@ -351,6 +354,7 @@ impl DocumentView {
     pub fn apply_viewport_cache_size(&self, logical_w: u32, logical_h: u32, scale: f64) {
         let bytes = openpdf_core::viewport_cache_bytes(logical_w, logical_h, scale);
         self.shared.doc.set_cache_bytes(bytes);
+        self.shared.textures.borrow_mut().set_max_bytes(bytes);
     }
 
     #[cfg(test)]
@@ -416,6 +420,7 @@ pub fn build(doc: Rc<Opened>, settings: &Settings, lang: Lang) -> Rc<DocumentVie
             10.0,
         )),
         last_visible: RefCell::new(Vec::new()),
+        textures: RefCell::new(paint::TextureCache::new(crate::tiles::DEFAULT_CACHE_BYTES)),
         doc,
     });
 
@@ -551,17 +556,17 @@ pub fn build(doc: Rc<Opened>, settings: &Settings, lang: Lang) -> Rc<DocumentVie
     view.update_chrome();
     view.refresh_lock_chrome();
 
-    pages_area.set_draw(clone!(@strong view => move |cr, w, h| {
-        if w <= 0 || h <= 0 || !paint::context_ok(cr) {
+    pages_area.set_snapshot(clone!(@strong view => move |snapshot, w, h| {
+        if w <= 0 || h <= 0 {
             return;
         }
-        paint_pages(cr, &view);
+        snapshot_pages(snapshot, &view);
     }));
-    thumbs_area.set_draw(clone!(@strong view => move |cr, w, h| {
-        if w <= 0 || h <= 0 || !paint::context_ok(cr) {
+    thumbs_area.set_snapshot(clone!(@strong view => move |snapshot, w, h| {
+        if w <= 0 || h <= 0 {
             return;
         }
-        paint_thumbs(cr, &view);
+        snapshot_thumbs(snapshot, &view);
         view.thumbs_area.set_content_height(
             view.shared
                 .thumb_layout
@@ -789,11 +794,14 @@ fn thumb_tile_keys(view: &DocumentView) -> Vec<TileKey> {
     )
 }
 
-fn paint_pages(cr: &cairo::Context, view: &DocumentView) {
+fn snapshot_pages(snapshot: &gtk::Snapshot, view: &DocumentView) {
     let layout = view.shared.layout.borrow();
-
-    cr.set_source_rgb(0.78, 0.77, 0.75);
-    let _ = cr.paint();
+    let cw = view.pages_area.width().max(1) as f32;
+    let ch = view.pages_area.height().max(1) as f32;
+    snapshot.append_color(
+        &gdk::RGBA::new(0.78, 0.77, 0.75, 1.0),
+        &gtk::graphene::Rect::new(0.0, 0.0, cw, ch),
+    );
 
     let keys = page_tile_keys(view);
     if *view.shared.last_visible.borrow() != keys {
@@ -809,86 +817,149 @@ fn paint_pages(cr: &cairo::Context, view: &DocumentView) {
         view.shared.doc.request_tiles(&preview, Priority::Adjacent);
     }
 
+    let mut textures = view.shared.textures.borrow_mut();
     for page in &layout.pages {
         if page.width <= 0.0 || page.height <= 0.0 {
             continue;
         }
-        cr.set_source_rgba(0.0, 0.0, 0.0, 0.18);
-        cr.rectangle(page.x + 3.0, page.y + 4.0, page.width, page.height);
-        let _ = cr.fill();
-        cr.set_source_rgb(1.0, 1.0, 1.0);
-        cr.rectangle(page.x, page.y, page.width, page.height);
-        let _ = cr.fill();
+        snapshot.append_color(
+            &gdk::RGBA::new(0.0, 0.0, 0.0, 0.18),
+            &gtk::graphene::Rect::new(
+                (page.x + 3.0) as f32,
+                (page.y + 4.0) as f32,
+                page.width as f32,
+                page.height as f32,
+            ),
+        );
+        snapshot.append_color(
+            &gdk::RGBA::new(1.0, 1.0, 1.0, 1.0),
+            &gtk::graphene::Rect::new(
+                page.x as f32,
+                page.y as f32,
+                page.width as f32,
+                page.height as f32,
+            ),
+        );
 
         for key in keys.iter().filter(|k| k.page == page.page) {
             let tile_x = page.x + f64::from(key.tx * key.tile_size);
             let tile_y = page.y + f64::from(key.ty * key.tile_size);
             if let Some(bmp) = view.shared.doc.paint_tile(key) {
-                // Tile is in cache, so the worker already finished. Pin
-                // `ui_first_tile_rendered_ms` first (no-op if poll() won)
-                // so `ui_first_tile_ms` cannot land earlier.
                 crate::measure::mark_first_tile_rendered();
-                paint_rgba(cr, tile_x, tile_y, bmp.width, bmp.height, bmp.rgba(), true);
+                if let Some(tex) = tile_texture(&mut textures, key, &bmp) {
+                    paint::append_texture(
+                        snapshot,
+                        &tex,
+                        tile_x as f32,
+                        tile_y as f32,
+                        bmp.width as f32,
+                        bmp.height as f32,
+                    );
+                    mark_tile_painted(true);
+                }
             } else if let Some(low) = view.shared.doc.paint_tile(&key.preview()) {
                 if low.width == 0 || low.height == 0 {
                     continue;
                 }
-                let _ = cr.save();
-                let _ = cr.translate(tile_x, tile_y);
-                let sx = f64::from(key.tile_size) / f64::from(low.width.max(1));
-                let sy = f64::from(key.tile_size) / f64::from(low.height.max(1));
-                cr.scale(sx.min(4.0), sy.min(4.0));
-                paint_rgba(cr, 0.0, 0.0, low.width, low.height, low.rgba(), false);
-                let _ = cr.restore();
+                if let Some(tex) = tile_texture(&mut textures, &key.preview(), &low) {
+                    paint::append_scaled_texture(
+                        snapshot,
+                        &tex,
+                        tile_x as f32,
+                        tile_y as f32,
+                        key.tile_size as f32,
+                        key.tile_size as f32,
+                    );
+                }
             }
         }
     }
     maybe_mark_startup(view);
 }
 
-fn paint_thumbs(cr: &cairo::Context, view: &DocumentView) {
+fn snapshot_thumbs(snapshot: &gtk::Snapshot, view: &DocumentView) {
     let layout = view.shared.thumb_layout.borrow();
     let current = view.shared.current_page.get();
-    cr.set_source_rgb(0.94, 0.93, 0.91);
-    let _ = cr.paint();
+    let cw = view.thumbs_area.width().max(1) as f32;
+    let ch = view.thumbs_area.height().max(1) as f32;
+    snapshot.append_color(
+        &gdk::RGBA::new(0.94, 0.93, 0.91, 1.0),
+        &gtk::graphene::Rect::new(0.0, 0.0, cw, ch),
+    );
 
     let keys = thumb_tile_keys(view);
     view.shared.doc.request_tiles(&keys, Priority::Thumbnail);
 
+    let mut textures = view.shared.textures.borrow_mut();
     for page in &layout.pages {
         if page.page == current {
-            cr.set_source_rgb(0.055, 0.486, 0.400);
-            cr.rectangle(
-                page.x - 3.0,
-                page.y - 3.0,
-                page.width + 6.0,
-                page.height + 6.0,
+            snapshot.append_color(
+                &gdk::RGBA::new(0.055, 0.486, 0.400, 1.0),
+                &gtk::graphene::Rect::new(
+                    (page.x - 3.0) as f32,
+                    (page.y - 3.0) as f32,
+                    (page.width + 6.0) as f32,
+                    (page.height + 6.0) as f32,
+                ),
             );
-            let _ = cr.fill();
         }
-        cr.set_source_rgb(1.0, 1.0, 1.0);
-        cr.rectangle(page.x, page.y, page.width, page.height);
-        let _ = cr.fill();
+        snapshot.append_color(
+            &gdk::RGBA::new(1.0, 1.0, 1.0, 1.0),
+            &gtk::graphene::Rect::new(
+                page.x as f32,
+                page.y as f32,
+                page.width as f32,
+                page.height as f32,
+            ),
+        );
         for key in keys.iter().filter(|k| k.page == page.page) {
             let tile_x = page.x + f64::from(key.tx * key.tile_size);
             let tile_y = page.y + f64::from(key.ty * key.tile_size);
             if let Some(bmp) = view.shared.doc.paint_tile(key) {
-                paint_rgba(cr, tile_x, tile_y, bmp.width, bmp.height, bmp.rgba(), false);
+                if let Some(tex) = tile_texture(&mut textures, key, &bmp) {
+                    paint::append_texture(
+                        snapshot,
+                        &tex,
+                        tile_x as f32,
+                        tile_y as f32,
+                        bmp.width as f32,
+                        bmp.height as f32,
+                    );
+                }
             }
         }
-        cr.set_source_rgb(0.25, 0.25, 0.26);
-        cr.select_font_face("Sans", cairo::FontSlant::Normal, cairo::FontWeight::Normal);
-        cr.set_font_size(11.0);
         let label = format!("{}", page.page + 1);
-        if let Ok(ext) = cr.text_extents(&label) {
-            let _ = cr.move_to(
-                page.x + (page.width - ext.width()) / 2.0,
-                page.y + page.height + 12.0,
-            );
-            let _ = cr.show_text(&label);
+        if let Some(cr) = paint::append_cairo(
+            snapshot,
+            page.x as f32,
+            (page.y + page.height) as f32,
+            page.width.max(8.0) as f32,
+            16.0,
+        ) {
+            cr.set_source_rgb(0.25, 0.25, 0.26);
+            cr.select_font_face("Sans", cairo::FontSlant::Normal, cairo::FontWeight::Normal);
+            cr.set_font_size(11.0);
+            if let Ok(ext) = cr.text_extents(&label) {
+                let _ = cr.move_to((page.width - ext.width()) / 2.0, 12.0);
+                let _ = cr.show_text(&label);
+            }
         }
     }
     maybe_mark_startup(view);
+}
+
+fn tile_texture(
+    cache: &mut paint::TextureCache,
+    key: &TileKey,
+    tile: &PaintTile,
+) -> Option<gdk::Texture> {
+    if let Some(hit) = cache.get(key) {
+        return Some(hit);
+    }
+    let tex = paint::memory_texture_from_owned(tile.width, tile.height, tile.pixel_owner())?;
+    let tex: gdk::Texture = tex.upcast();
+    cache.insert(*key, tex.clone());
+    Some(tex)
 }
 
 /// `TileReady::is_complete` gates `startup_ms` only, and only from the draw
@@ -917,10 +988,12 @@ pub(crate) fn paint_rgba(
     if !paint::paint_rgba_on(cr, x, y, width, height, rgba) {
         return;
     }
+    mark_tile_painted(real_page_tile);
+}
+
+fn mark_tile_painted(real_page_tile: bool) {
     crate::measure::mark_first_surface_ready();
     if real_page_tile {
-        // Set-once, process-start Instant, only after a real page tile
-        // surface is painted in the DrawingArea draw func.
         crate::measure::mark_first_tile_rendered();
         crate::measure::mark_first_tile_painted();
     }

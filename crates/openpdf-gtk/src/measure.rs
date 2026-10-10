@@ -632,10 +632,11 @@ fn read_proc(path: &str) -> String {
 
 /// Snapshot `/proc/self/smaps_rollup` + top 15 mappings (merged by path).
 pub fn format_rss_breakdown() -> String {
-    format_rss_breakdown_from_parts(
+    format_rss_breakdown_from_parts_full(
         &read_proc("/proc/self/smaps_rollup"),
         &read_proc("/proc/self/smaps"),
         openpdf_core::Engine::tile_cache_bytes_used(),
+        crate::paint::texture_cache_bytes(),
     )
 }
 
@@ -644,6 +645,15 @@ pub fn format_rss_breakdown_from(rollup: &str, smaps: &str) -> String {
 }
 
 pub fn format_rss_breakdown_from_parts(rollup: &str, smaps: &str, tiles_bytes: usize) -> String {
+    format_rss_breakdown_from_parts_full(rollup, smaps, tiles_bytes, 0)
+}
+
+pub fn format_rss_breakdown_from_parts_full(
+    rollup: &str,
+    smaps: &str,
+    tiles_bytes: usize,
+    texture_bytes: usize,
+) -> String {
     let mut out = String::from("rss_breakdown=1\n");
     for (key, kb) in parse_smaps_rollup(rollup) {
         let slug = key
@@ -663,7 +673,9 @@ pub fn format_rss_breakdown_from_parts(rollup: &str, smaps: &str, tiles_bytes: u
         out.push_str(&format!("rss_class_{}_kb={kb}\n", class.as_str()));
     }
     let tiles_kb = (tiles_bytes / 1024) as u64;
+    let textures_kb = (texture_bytes / 1024) as u64;
     out.push_str(&format!("rss_class_tiles_kb={tiles_kb}\n"));
+    out.push_str(&format!("rss_class_textures_kb={textures_kb}\n"));
     for (i, m) in top_smaps_mappings(&maps, 15).into_iter().enumerate() {
         let path = if m.pathname.is_empty() {
             "[anon]".to_string()
@@ -1445,8 +1457,12 @@ Pss:                  32 kB
         assert!(text.contains("rss_class_icon_kb=256"));
         assert!(text.contains("rss_class_gtk_kb=128"));
         assert!(text.contains("rss_class_tiles_kb=0"));
+        assert!(text.contains("rss_class_textures_kb=0"));
         let with_tiles = format_rss_breakdown_from_parts(rollup, smaps, 66_355_200);
         assert!(with_tiles.contains("rss_class_tiles_kb=64800"));
+        assert!(with_tiles.contains("rss_class_textures_kb=0"));
+        let with_tex = format_rss_breakdown_from_parts_full(rollup, smaps, 0, 4096);
+        assert!(with_tex.contains("rss_class_textures_kb=4"));
         assert!(text.contains("rss_map_1=libpdfium 2048 /usr/local/lib/libpdfium.so"));
         assert!(text.contains("rss_map_2=heap 512 [heap]"));
         let top = top_smaps_mappings(&maps, 15);

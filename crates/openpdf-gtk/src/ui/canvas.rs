@@ -18,6 +18,7 @@ use std::rc::Rc;
 
 use gtk::cairo;
 use gtk::glib;
+use gtk::graphene;
 use gtk::prelude::*;
 use gtk::subclass::prelude::*;
 use gtk4 as gtk;
@@ -25,6 +26,7 @@ use gtk4 as gtk;
 use crate::paint;
 
 type DrawFn = Rc<dyn Fn(&cairo::Context, i32, i32)>;
+type SnapshotFn = Rc<dyn Fn(&gtk::Snapshot, i32, i32)>;
 
 mod imp {
     use super::*;
@@ -32,6 +34,7 @@ mod imp {
     #[derive(Default)]
     pub struct Canvas {
         pub draw: RefCell<Option<DrawFn>>,
+        pub snapshot: RefCell<Option<SnapshotFn>>,
     }
 
     #[glib::object_subclass]
@@ -48,21 +51,22 @@ mod imp {
             let Some((x, y, w, h)) = visible_paint_rect(obj.upcast_ref()) else {
                 return;
             };
-            let Some(cr) = paint::append_cairo(snapshot, x as f32, y as f32, w as f32, h as f32)
-            else {
-                return;
-            };
-            if !paint::context_ok(&cr) {
-                return;
+            snapshot.save();
+            snapshot.push_clip(&graphene::Rect::new(x as f32, y as f32, w as f32, h as f32));
+            if let Some(paint_snap) = self.snapshot.borrow().clone() {
+                paint_snap(snapshot, obj.width(), obj.height());
+            } else if let Some(draw) = self.draw.borrow().clone() {
+                if let Some(cr) =
+                    paint::append_cairo(snapshot, x as f32, y as f32, w as f32, h as f32)
+                {
+                    if paint::context_ok(&cr) {
+                        cr.translate(-x, -y);
+                        draw(&cr, obj.width(), obj.height());
+                    }
+                }
             }
-            cr.translate(-x, -y);
-            if let Some(draw) = self.draw.borrow().as_ref() {
-                draw(&cr, obj.width(), obj.height());
-            }
-            // Never finish() — GSK owns this context for the cairo node.
-            if !paint::context_ok(&cr) {
-                return;
-            }
+            snapshot.pop();
+            snapshot.restore();
         }
     }
     impl DrawingAreaImpl for Canvas {}
@@ -84,6 +88,13 @@ impl Canvas {
         F: Fn(&cairo::Context, i32, i32) + 'static,
     {
         *self.imp().draw.borrow_mut() = Some(Rc::new(f));
+    }
+
+    pub fn set_snapshot<F>(&self, f: F)
+    where
+        F: Fn(&gtk::Snapshot, i32, i32) + 'static,
+    {
+        *self.imp().snapshot.borrow_mut() = Some(Rc::new(f));
     }
 }
 
