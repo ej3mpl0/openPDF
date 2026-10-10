@@ -40,6 +40,7 @@ static ALL_VISIBLE: OnceLock<u128> = OnceLock::new();
 static PDFIUM_LOADED: OnceLock<u128> = OnceLock::new();
 static PANGO_INIT: OnceLock<u128> = OnceLock::new();
 static GTK_STARTUP: OnceLock<u128> = OnceLock::new();
+static ENGINE_CREATED: OnceLock<u128> = OnceLock::new();
 
 pub fn mark_doc_load_start() {
     let _ = DOC_LOAD_START.get_or_init(process_elapsed_ms);
@@ -67,6 +68,9 @@ pub fn mark_pango_init() {
 }
 pub fn mark_gtk_startup() {
     let _ = GTK_STARTUP.get_or_init(process_elapsed_ms);
+}
+pub fn mark_engine_created() {
+    let _ = ENGINE_CREATED.get_or_init(process_elapsed_ms);
 }
 pub fn mark_thumbs_done() {
     let _ = THUMBS_DONE.get_or_init(process_elapsed_ms);
@@ -101,6 +105,9 @@ pub fn ui_pango_init_ms() -> u128 {
 }
 pub fn ui_gtk_startup_ms() -> u128 {
     GTK_STARTUP.get().copied().unwrap_or(0)
+}
+pub fn ui_engine_created_ms() -> u128 {
+    ENGINE_CREATED.get().copied().unwrap_or(0)
 }
 
 /// `ui_first_tile_ms` must be a real draw-path paint, not before the worker mark.
@@ -190,6 +197,8 @@ pub struct BudgetReport {
     pub ui_first_tile_ms: u128,
     /// `Engine::new` / `bind_pdfium` finished, from process start.
     pub pdfium_load_ms: u128,
+    /// `Engine::new` returned in `main`, from process start (font warmup continues).
+    pub ui_engine_created_ms: u128,
     /// Fontconfig + Pango fontmap warmup, from process start (before `adw::init`).
     pub ui_pango_init_ms: u128,
     /// `connect_startup` entered (process + GTK .so load, before Pango warmup).
@@ -246,6 +255,7 @@ impl Display for BudgetReport {
         writeln!(f, "ui_gtk_startup_ms={}", self.ui_gtk_startup_ms)?;
         writeln!(f, "ui_pango_init_ms={}", self.ui_pango_init_ms)?;
         writeln!(f, "pdfium_load_ms={}", self.pdfium_load_ms)?;
+        writeln!(f, "ui_engine_created_ms={}", self.ui_engine_created_ms)?;
         writeln!(f, "pdfium_sha256={}", self.pdfium_sha256)?;
         writeln!(f, "ui_adw_init_ms={}", self.ui_adw_init_ms)?;
         writeln!(f, "ui_css_ms={}", self.ui_css_ms)?;

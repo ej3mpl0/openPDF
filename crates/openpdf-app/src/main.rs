@@ -126,20 +126,31 @@ All --measure marks are milliseconds from one process-start Instant \
   ui_doc_load_start_ms            document open begins
   ui_doc_loaded_ms                Engine::open / Session::open returned
   pdfium_load_ms                  Engine::new / bind_pdfium finished
+  ui_engine_created_ms            Engine::new returned in main (font warmup continues)
   pdfium_sha256                   SHA-256 of the bound libpdfium.so
 The first-tile → startup gap is remaining visible tiles plus thumbs.";
+
+fn create_engine() -> Option<openpdf_core::Engine> {
+    let engine = openpdf_core::Engine::new().ok();
+    measure::mark_engine_created();
+    measure::mark_pdfium_loaded();
+    engine
+}
 
 fn main() {
     measure::mark_process_start();
     let mut args = std::env::args().skip(1);
     match args.next().as_deref() {
         Some("--measure") => {
+            // Engine::new is ~4 ms (bind + spawn). Font warmup continues on the
+            // render thread and overlaps GTK activate. Do not wait for it here.
+            let engine = create_engine();
             // Skip bindtextdomain / catalog I/O; measure always uses English msgids.
             let pages = args
                 .next()
                 .and_then(|s| s.parse().ok())
                 .unwrap_or(DEFAULT_MEASURE_PAGES);
-            std::process::exit(openpdf_gtk::run_measure(pages));
+            std::process::exit(openpdf_gtk::run_measure(pages, engine));
         }
         Some("-h") | Some("--help") => {
             init_i18n();
@@ -151,19 +162,23 @@ fn main() {
             );
         }
         Some(path) => {
+            let engine = create_engine();
             init_i18n();
             openpdf_gtk::run(
                 Some(path.into()),
                 Box::new(LazyPkcs11::new(try_load_signer)),
                 Box::new(PdfVerifier),
+                engine,
             );
         }
         None => {
+            let engine = create_engine();
             init_i18n();
             openpdf_gtk::run(
                 None,
                 Box::new(LazyPkcs11::new(try_load_signer)),
                 Box::new(PdfVerifier),
+                engine,
             );
         }
     }

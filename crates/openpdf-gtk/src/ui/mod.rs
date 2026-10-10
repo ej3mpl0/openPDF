@@ -23,9 +23,14 @@ use gtk::glib;
 use gtk::prelude::*;
 use gtk4 as gtk;
 use libadwaita as adw;
-use openpdf_core::{Signer, Verifier};
+use openpdf_core::{Engine, Signer, Verifier};
 
-pub fn run(initial: Option<PathBuf>, signer: Box<dyn Signer>, verifier: Box<dyn Verifier>) {
+pub fn run(
+    initial: Option<PathBuf>,
+    signer: Box<dyn Signer>,
+    verifier: Box<dyn Verifier>,
+    engine: Option<Engine>,
+) {
     let signer = Arc::<dyn Signer>::from(signer);
     let verifier = Arc::<dyn Verifier>::from(verifier);
     let app = adw::Application::builder()
@@ -45,6 +50,7 @@ pub fn run(initial: Option<PathBuf>, signer: Box<dyn Signer>, verifier: Box<dyn 
     app.connect_activate({
         let signer = signer.clone();
         let verifier = verifier.clone();
+        let engine = engine.clone();
         let win_slot = win_slot.clone();
         let cli_path = cli_path.clone();
         move |app| {
@@ -56,8 +62,13 @@ pub fn run(initial: Option<PathBuf>, signer: Box<dyn Signer>, verifier: Box<dyn 
                 settings.apply_locale();
                 apply_theme(settings.theme);
                 install_accels(app);
-                let win =
-                    window::OpenPdfWindow::new(app, settings, signer.clone(), verifier.clone());
+                let win = window::OpenPdfWindow::new(
+                    app,
+                    settings,
+                    signer.clone(),
+                    verifier.clone(),
+                    engine.clone(),
+                );
                 win.present();
                 *win_slot.borrow_mut() = Some(win);
                 if let Some(win) = win_slot.borrow().as_ref() {
@@ -105,7 +116,7 @@ pub fn run(initial: Option<PathBuf>, signer: Box<dyn Signer>, verifier: Box<dyn 
 /// visible thumbnail has been painted. `ui_first_tile_ms` is the first painted
 /// page tile; `ui_thumbs_done_ms` is when the thumbnail strip meets the gate.
 /// Other `ui_*` marks are also milliseconds from process start.
-pub fn run_measure(pages: usize) -> i32 {
+pub fn run_measure(pages: usize, engine: Option<Engine>) -> i32 {
     measure::mark_process_start();
     if !measure::has_display() {
         eprintln!("measure: {}", measure::display_hint());
@@ -165,6 +176,7 @@ pub fn run_measure(pages: usize) -> i32 {
             settings,
             Arc::new(UnavailableSigner),
             Arc::new(NoopVerifier),
+            engine.clone(),
         );
         let ui_window_build_ms = measure::process_elapsed_ms();
         win.present();
@@ -296,6 +308,7 @@ fn watch_measure(
                         ui_first_frame_ms: marks.first_frame.get(),
                         ui_first_tile_ms: measure::ui_first_tile_painted_ms(),
                         pdfium_load_ms: measure::ui_pdfium_load_ms(),
+                        ui_engine_created_ms: measure::ui_engine_created_ms(),
                         ui_pango_init_ms: measure::ui_pango_init_ms(),
                         ui_gtk_startup_ms: measure::ui_gtk_startup_ms(),
                         pdfium_sha256: measure::pdfium_library_sha256(),
