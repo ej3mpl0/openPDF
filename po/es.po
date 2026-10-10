@@ -766,3 +766,6 @@ msgstr "OCR necesita Tesseract. Instale tesseract-ocr (y los datos de idioma) o 
 
 msgid "OCR language {language} is not installed. Installed: {installed}. {hint}"
 msgstr "el idioma de OCR {language} no está instalado. Instalados: {installed}. {hint}"
+
+msgid "Saved signed PDF to {path}"
+msgstr "PDF firmado guardado en {path}"

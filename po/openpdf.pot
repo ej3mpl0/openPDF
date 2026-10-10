@@ -760,3 +760,6 @@ msgstr ""
 
 msgid "OCR language {language} is not installed. Installed: {installed}. {hint}"
 msgstr ""
+
+msgid "Saved signed PDF to {path}"
+msgstr ""
