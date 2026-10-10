@@ -1,46 +1,780 @@
 name: CI
-on: [push, pull_request]
+
+# Linux runs on every push and PR. Windows and macOS (2x / 10x billed minutes
+# on private repos) run only on push to main, or on a non-draft PR labelled
+# `ci:full`.
+on:
+  push:
+  pull_request:
+    types: [opened, synchronize, reopened, ready_for_review, labeled]
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
 jobs:
   build:
+    name: ${{ matrix.os }}
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        # Core/CLI startup budget per OS; GUI limits are set on the Measure GUI step.
+        # Override a single OS here without changing the script.
+        include: ${{ fromJSON(
+          ((github.event_name == 'push' && github.ref == 'refs/heads/main') ||
+           (github.event_name == 'pull_request' && !github.event.pull_request.draft &&
+            contains(github.event.pull_request.labels.*.name, 'ci:full')))
+          && '[{"os":"ubuntu-latest","measure_startup_core_ms":300},{"os":"windows-latest","measure_startup_core_ms":300},{"os":"macos-latest","measure_startup_core_ms":300}]'
+          || '[{"os":"ubuntu-latest","measure_startup_core_ms":300}]') }}
+    defaults:
+      run:
+        shell: bash
+    env:
+      CARGO_TERM_COLOR: always
+      OPENPDF_MEASURE_RAM_MIB: "250"
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+        with:
+          persist-credentials: false
+
+      - name: Install Rust from rust-toolchain.toml
+        shell: bash
+        run: |
+          rustup toolchain install
+          rustup show active-toolchain
+
+      - name: cargo fmt
+        if: runner.os == 'Linux'
+        run: cargo fmt --all --check
+
+      - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
+        with:
+          prefix-key: ci-${{ matrix.os }}
+
+      - name: Start timer
+        run: echo "JOB_START=$(date +%s)" >> "$GITHUB_ENV"
+
+      - name: Install PDFium
+        run: .github/scripts/install-pdfium.sh
+
+      - name: Install SoftHSM2 and qpdf
+        if: runner.os == 'Linux'
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends softhsm2 qpdf
+
+      - name: Install GTK4 and libadwaita
+        if: runner.os == 'Linux'
+        run: |
+          sudo apt-get install -y --no-install-recommends \
+            libgtk-4-dev libadwaita-1-dev pkg-config
+
+      - name: Build core, CLI, and sign
+        if: runner.os != 'Linux'
+        run: cargo build --release --locked -p openpdf-core -p openpdf-cli -p openpdf-sign
+
+      # Whole workspace on Linux so target/release/openpdf-gtk exists no
+      # matter which crate provides the binary (openpdf-app since #16).
+      - name: Build workspace
+        if: runner.os == 'Linux'
+        run: cargo build --release --workspace --locked
+
+      - name: Test core and CLI
+        run: cargo test --release -p openpdf-core -p openpdf-cli
+
+      - name: Test sign
+        run: cargo test --release -p openpdf-sign -- --test-threads=1
+
+      - name: Test GTK
+        if: runner.os == 'Linux'
+        run: cargo test --release -p openpdf-gtk
+
+      # Release-mode core tests (e.g. Bind-without-register Err path). Kept
+      # before Measure GUI so that step's known red cannot hide a failure.
+      - name: Test core (release, locked)
+        run: cargo test --release --locked -p openpdf-core
+
+      - name: Measure core / CLI
+        run: python3 .github/scripts/run-measure.py --kind core
+        env:
+          OPENPDF_MEASURE_STARTUP_MS: ${{ matrix.measure_startup_core_ms }}
+
+      # The GUI measure runs with the SVG pixbuf loader ON, as the AppImage
+      # ships it (symbolic Adwaita icons go through librsvg, ~+8-14 MiB peak).
+      # Installed explicitly so the number does not depend on the runner image;
+      # run-measure.py fails if the loaders.cache in use lacks svg.
+      - name: Install SVG pixbuf loader and Adwaita icons (GUI measure)
+        if: runner.os == 'Linux'
+        run: |
+          sudo apt-get install -y --no-install-recommends \
+            librsvg2-common adwaita-icon-theme
+
+      - name: Measure GUI
+        if: runner.os == 'Linux'
+        run: python3 .github/scripts/run-measure.py --kind gui --runs 5
+        env:
+          # Pinned so numbers are comparable; GL under Xvfb is software and
+          # adds ~45 MiB / ~70 ms.
+          GDK_BACKEND: x11
+          GSK_RENDERER: cairo
+          OPENPDF_MEASURE_LABEL: "GUI measure (gated, cairo)"
+          OPENPDF_MEASURE_STARTUP_MS: "300"
+          OPENPDF_MEASURE_RAM_MIB: "160"
+
+      # Informational only: default GSK renderer (GL in software under Xvfb).
+      # Never gates; the cairo step above is the gate.
+      - name: Measure GUI (informational, default renderer)
+        if: runner.os == 'Linux'
+        continue-on-error: true
+        env:
+          GDK_BACKEND: x11
+          OPENPDF_MEASURE_STARTUP_MS: "1000000"
+          OPENPDF_MEASURE_RAM_MIB: "100000"
+          OPENPDF_MEASURE_LABEL: "GUI measure, default renderer (informational, software rendering under xvfb)"
+        run: |
+          env -u GSK_RENDERER python3 .github/scripts/run-measure.py --kind gui --runs 5 || true
+
+      - name: Record CI time
+        if: always()
+        run: |
+          set -euo pipefail
+          end=$(date +%s)
+          start="${JOB_START:-$end}"
+          dur=$((end - start))
+          mkdir -p ci-times
+          printf 'os=%s\nduration_s=%s\n' "${{ matrix.os }}" "$dur" > "ci-times/${{ matrix.os }}.txt"
+          {
+            echo "## ${{ matrix.os }}"
+            echo
+            echo "CI time: **${dur}s**"
+          } >> "$GITHUB_STEP_SUMMARY"
+
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        if: always()
+        with:
+          name: ci-time-${{ matrix.os }}
+          path: ci-times/${{ matrix.os }}.txt
+          if-no-files-found: error
+
+  licenses:
+    name: Licenses (cargo-deny)
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
-      - uses: dtolnay/rust-toolchain@stable
-      - name: Install GTK4, libadwaita, and Xvfb
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+        with:
+          persist-credentials: false
+
+      - name: Install Rust from rust-toolchain.toml
+        run: |
+          rustup toolchain install
+          rustup show active-toolchain
+
+      - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
+        with:
+          prefix-key: deny
+
+      - name: Install cargo-deny (pinned)
+        run: .github/scripts/install-cargo-tool.sh cargo-deny
+
+      - name: cargo deny check (licenses, advisories, bans, sources)
+        run: cargo deny --locked check
+
+  # MSRV = Rust shipped in org.freedesktop.Sdk.Extension.rust-stable//26.08,
+  # which the GNOME 51 Flatpak builds with. Keep in sync with Cargo.toml
+  # [workspace.package] rust-version.
+  msrv:
+    name: MSRV (Flatpak SDK Rust)
+    runs-on: ubuntu-latest
+    env:
+      CARGO_TERM_COLOR: always
+      MSRV: "1.98.0"
+      RUSTUP_TOOLCHAIN: "1.98.0"
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+        with:
+          persist-credentials: false
+
+      - name: Check MSRV matches Cargo.toml
+        run: grep -qx "rust-version = \"$MSRV\"" Cargo.toml
+
+      - name: Install Rust ${{ env.MSRV }}
+        run: rustup toolchain install "$MSRV" --profile minimal
+
+      - name: Every workspace member inherits rust-version and license
+        run: |
+          set -o pipefail
+          cargo metadata --no-deps --format-version 1 --locked \
+            | python3 .github/scripts/check-rust-version.py
+
+      - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
+        with:
+          prefix-key: msrv
+
+      - name: Install GTK4 and libadwaita
         run: |
           sudo apt-get update
           sudo apt-get install -y --no-install-recommends \
-            libgtk-4-dev libadwaita-1-dev pkg-config \
-            xvfb dbus-x11 fonts-dejavu-core libgl1-mesa-dri adwaita-icon-theme \
-            qpdf
-      - name: Install PDFium
+            libgtk-4-dev libadwaita-1-dev pkg-config
+
+      - name: cargo check (full workspace incl. openpdf-gtk)
         run: |
-          set -euo pipefail
-          curl -fsSL -o /tmp/pdfium.tgz \
-            "https://github.com/bblanchon/pdfium-binaries/releases/download/chromium%2F8035/pdfium-linux-x64.tgz"
-          mkdir -p "$HOME/pdfium"
-          tar -xzf /tmp/pdfium.tgz -C "$HOME/pdfium"
-          sudo cp "$HOME/pdfium/lib/libpdfium.so" /usr/local/lib/
-          sudo ldconfig
-      - name: Install SoftHSM2
+          rustc --version
+          cargo check --workspace --locked --all-targets
+
+  # Informational cold start: each runner is a fresh VM, so the first GUI
+  # launch below (no warm-up, page cache dropped) is a true cold start.
+  # Never gates. Skips cleanly while openpdf-gtk is a placeholder (until #1).
+  cold-start:
+    name: Cold start (${{ matrix.variant }}, shard ${{ matrix.shard }})
+    runs-on: ubuntu-latest
+    continue-on-error: true
+    strategy:
+      fail-fast: false
+      matrix:
+        variant: [plain, nodbuswait, minimal, fcwarm, nogl, default, default-nodri3, default-wayland, vulkan-wayland]
+        shard: [1, 2, 3]
+    defaults:
+      run:
+        shell: bash
+    env:
+      CARGO_TERM_COLOR: always
+      TAG: ${{ matrix.variant }}-${{ matrix.shard }}
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+        with:
+          persist-credentials: false
+
+      - name: Detect real GUI binary
+        id: gui
+        run: |
+          if [ -d crates/openpdf-app ]; then
+            echo "skip=false" >> "$GITHUB_OUTPUT"
+          else
+            echo "skip=true" >> "$GITHUB_OUTPUT"
+            msg="cold-start skipped: openpdf-gtk is still a placeholder on this branch (no crates/openpdf-app; lands with #1)."
+            echo "::notice::$msg"
+            mkdir -p cold
+            echo "skipped=1" > "cold/$TAG.txt"
+            echo "$msg" >> "$GITHUB_STEP_SUMMARY"
+          fi
+
+      # Normal-launch baseline: the runner env before any variant/measure var is set.
+      - name: Record baseline launch env
+        if: steps.gui.outputs.skip == 'false'
+        run: |
+          mkdir -p envs
+          OPENPDF_ENV_DUMP="$PWD/envs/baseline.txt" .github/scripts/env-dump.sh true
+          echo "envs/baseline.txt: $(wc -l < envs/baseline.txt) vars"
+
+      # Per-variant env + the exceptions the parity check accepts (printed in the log).
+      - name: Variant environment
+        if: steps.gui.outputs.skip == 'false'
+        run: |
+          allow="GDK_BACKEND=x11 GSK_RENDERER=cairo"
+          case "${{ matrix.variant }}" in
+            plain|fcwarm) ;;
+            # nogl: diagnostic only. GDK_DISABLE needs GTK >= 4.16; GDK_DEBUG covers older.
+            nogl)
+              echo "GDK_DISABLE=gl" >> "$GITHUB_ENV"
+              echo "GDK_DEBUG=gl-disable" >> "$GITHUB_ENV"
+              allow="$allow GDK_DISABLE=gl GDK_DEBUG=gl-disable" ;;
+            # default: GTK picks its renderer (GSK_RENDERER unset). Informational, never a limit.
+            default)
+              echo "OPENPDF_NO_GSK_CAIRO=1" >> "$GITHUB_ENV"
+              allow="GDK_BACKEND=x11" ;;
+            # default-nodri3: default under Xvfb with Mesa's DRI3 path off (Xvfb lacks DRI3).
+            default-nodri3)
+              echo "OPENPDF_NO_GSK_CAIRO=1" >> "$GITHUB_ENV"
+              echo "LIBGL_DRI3_DISABLE=1" >> "$GITHUB_ENV"
+              allow="GDK_BACKEND=x11 LIBGL_DRI3_DISABLE=1" ;;
+            # default-wayland: GTK-chosen renderer on weston headless (GL via llvmpipe). Crash GATE.
+            # WAYLAND_DISPLAY/GDK_BACKEND are set only inside the measure steps; DISPLAY is unset there.
+            default-wayland)
+              echo "OPENPDF_NO_GSK_CAIRO=1" >> "$GITHUB_ENV"
+              echo "OPENPDF_WAYLAND=1" >> "$GITHUB_ENV"
+              echo "OPENPDF_MEASURE_RSS_BREAKDOWN=1" >> "$GITHUB_ENV"
+              allow="GDK_BACKEND=wayland WAYLAND_DISPLAY=wayland-ci OPENPDF_MEASURE_RSS_BREAKDOWN=1" ;;
+            # vulkan-wayland: same weston headless, but GSK_RENDERER=vulkan on Mesa lavapipe. Crash GATE.
+            # VK_DRIVER_FILES/VK_ICD_FILENAMES (lvp_icd) are exported after mesa-vulkan-drivers is installed.
+            vulkan-wayland)
+              echo "OPENPDF_NO_GSK_CAIRO=1" >> "$GITHUB_ENV"
+              echo "OPENPDF_WAYLAND=1" >> "$GITHUB_ENV"
+              echo "OPENPDF_GSK=vulkan" >> "$GITHUB_ENV"
+              echo "OPENPDF_MEASURE_RSS_BREAKDOWN=1" >> "$GITHUB_ENV"
+              allow="GDK_BACKEND=wayland WAYLAND_DISPLAY=wayland-ci GSK_RENDERER=vulkan OPENPDF_MEASURE_RSS_BREAKDOWN=1" ;;  # VK_DRIVER_FILES/VK_ICD_FILENAMES: not watched by env-parity (logged in the lavapipe step)
+            nodbuswait)
+              echo "OPENPDF_MEASURE_WRAP=dbus-run-session --" >> "$GITHUB_ENV"
+              echo "GTK_A11Y=none" >> "$GITHUB_ENV"
+              echo "GSETTINGS_BACKEND=memory" >> "$GITHUB_ENV"
+              allow="$allow GTK_A11Y=none" ;;
+            minimal)
+              echo "OPENPDF_MEASURE_WRAP=dbus-run-session --" >> "$GITHUB_ENV"
+              echo "GTK_A11Y=none" >> "$GITHUB_ENV"
+              echo "GSETTINGS_BACKEND=memory" >> "$GITHUB_ENV"
+              echo "GIO_USE_VFS=local" >> "$GITHUB_ENV"
+              echo "GTK_IM_MODULE=gtk-im-context-simple" >> "$GITHUB_ENV"
+              allow="$allow GTK_A11Y=none GTK_IM_MODULE=gtk-im-context-simple" ;;
+          esac
+          echo "PARITY_ALLOW=$allow" >> "$GITHUB_ENV"
+          echo "declared env-parity exceptions for ${{ matrix.variant }}: $allow"
+          echo "$allow" > envs/allow.txt
+
+      - name: Install Rust from rust-toolchain.toml
+        if: steps.gui.outputs.skip == 'false'
+        run: |
+          rustup toolchain install
+          rustup show active-toolchain
+
+      - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
+        if: steps.gui.outputs.skip == 'false'
+        with:
+          prefix-key: cold-start
+
+      - name: Install PDFium
+        if: steps.gui.outputs.skip == 'false'
+        run: .github/scripts/install-pdfium.sh
+
+      - name: Install GTK4, libadwaita, SVG pixbuf loader, xvfb, dbus, strace
+        if: steps.gui.outputs.skip == 'false'
         run: |
           sudo apt-get update
-          sudo apt-get install -y softhsm2
-      - name: Check po catalogs
+          sudo apt-get install -y --no-install-recommends \
+            libgtk-4-dev libadwaita-1-dev pkg-config librsvg2-common adwaita-icon-theme \
+            xvfb xauth dbus dbus-daemon strace fontconfig mesa-utils mesa-utils-bin gdb weston
+          command -v eglinfo >/dev/null || { echo "::error::eglinfo not installed"; exit 1; }
+          echo "GTK version: $(pkg-config --modversion gtk4)" | tee -a "$GITHUB_STEP_SUMMARY"
+
+      - name: Install Mesa lavapipe + vulkan-tools (vulkan-wayland only)
+        if: steps.gui.outputs.skip == 'false' && matrix.variant == 'vulkan-wayland'
         run: |
-          python3 scripts/test_check_po.py
-          python3 scripts/check_po.py
-      - run: cargo build --workspace --release
-        env:
-          OPENPDF_PDFIUM: /usr/local/lib/libpdfium.so
-      - run: cargo test --workspace
-        env:
-          CI: "true"
-          OPENPDF_PDFIUM: /usr/local/lib/libpdfium.so
-      - name: Measure RAM and startup
+          sudo apt-get install -y --no-install-recommends mesa-vulkan-drivers vulkan-tools
+          icd=$(ls /usr/share/vulkan/icd.d/lvp_icd*.json 2>/dev/null | head -1)
+          [ -n "$icd" ] || { echo "::error::lavapipe ICD (lvp_icd*.json) not found"; ls -l /usr/share/vulkan/icd.d || true; exit 1; }
+          echo "lavapipe ICD: $icd"
+          echo "VK_DRIVER_FILES=$icd" >> "$GITHUB_ENV"
+          echo "VK_ICD_FILENAMES=$icd" >> "$GITHUB_ENV"
+
+      - name: GL renderer (glxinfo -B under the same xvfb)
+        if: steps.gui.outputs.skip == 'false'
         run: |
-          xvfb-run -a --server-args="-screen 0 1280x800x24" \
-            env GDK_BACKEND=x11 GSK_RENDERER=cairo \
-            ./target/release/openpdf-gtk --measure 32
+          mkdir -p cold
+          MESA_SHADER_CACHE_DISABLE=true xvfb-run -a --server-args="-screen 0 1280x800x24" glxinfo -B | tee glxinfo.txt || true
+          gl=$(sed -n 's/^ *OpenGL renderer string: *//p' glxinfo.txt | head -1)
+          echo "GL_RENDERER=${gl:-unknown}"
+          echo "gl_renderer=$(echo "${gl:-unknown}" | tr ' ' '_')" > cold/$TAG.gl
+
+      # default-wayland: weston headless with the GL renderer, so clients get EGL (llvmpipe).
+      - name: Start weston headless (default-wayland, vulkan-wayland)
+        if: steps.gui.outputs.skip == 'false' && (matrix.variant == 'default-wayland' || matrix.variant == 'vulkan-wayland')
+        run: |
+          weston --version | tee -a "$GITHUB_STEP_SUMMARY"
+          if [ -z "${XDG_RUNTIME_DIR:-}" ]; then echo "::error::XDG_RUNTIME_DIR unset on runner"; exit 1; fi
+          maj=$(weston --version | grep -oE '[0-9]+' | head -1)
+          if [ "${maj:-0}" -ge 13 ]; then gl="--renderer=gl"; else gl="--use-gl"; fi
+          echo "weston major=$maj gl flag=$gl"
+          nohup weston --backend=headless $gl --width=1280 --height=800 --socket=wayland-ci \
+            --idle-time=0 > weston.log 2>&1 &
+          for i in $(seq 50); do [ -S "$XDG_RUNTIME_DIR/wayland-ci" ] && break; sleep 0.2; done
+          cat weston.log
+          [ -S "$XDG_RUNTIME_DIR/wayland-ci" ] || { echo "::error::weston did not start"; exit 1; }
+          grep -iE 'renderer|EGL|GL_RENDERER|llvmpipe' weston.log | tee weston-gl.txt || true
+          gl=$(grep -oiE 'GL renderer: *.*' weston.log | head -1 | sed 's/^[^:]*: *//')
+          echo "GL_RENDERER(weston)=${gl:-unknown}"
+          echo "gl_renderer=$(echo "${gl:-unknown}" | tr ' ' '_')" > cold/$TAG.gl
+
+      # fcwarm: build the user fontconfig cache up front, as on a real desktop.
+      - name: Warm fontconfig cache (fcwarm only)
+        if: steps.gui.outputs.skip == 'false' && matrix.variant == 'fcwarm'
+        run: |
+          start=$(date +%s%N)
+          fc-cache -f
+          echo "fc-cache -f: $(( ($(date +%s%N) - start) / 1000000 )) ms"
+
+      # Build only; nothing launches the GUI before the measurement.
+      # line-tables-only: symbolized gdb backtraces for the crash gate (cold-start only, not release packaging).
+      - name: Build workspace (release)
+        if: steps.gui.outputs.skip == 'false'
         env:
-          OPENPDF_PDFIUM: /usr/local/lib/libpdfium.so
+          CARGO_PROFILE_RELEASE_DEBUG: line-tables-only
+        run: cargo build --release --workspace --locked
+
+      # default-wayland: GPU as a client of the same weston sees it, right before the first launch
+      # (before drop_caches so the launch stays cold). The app itself makes no GL calls.
+      - name: GL renderer (eglinfo -B under the same weston, default-wayland only)
+        if: steps.gui.outputs.skip == 'false' && matrix.variant == 'default-wayland'
+        run: |
+          [ -S "$XDG_RUNTIME_DIR/wayland-ci" ] || { echo "::error::weston socket gone"; exit 1; }
+          env -u DISPLAY WAYLAND_DISPLAY=wayland-ci MESA_SHADER_CACHE_DISABLE=true eglinfo -B -p wayland 2>&1 | tee eglinfo.txt || true
+          gl=$(sed -n 's/^ *OpenGL\( core profile\)\? renderer: *//p' eglinfo.txt | head -1)
+          echo "GL_RENDERER(eglinfo)=${gl:-unknown}"
+          [ -n "$gl" ] && echo "gl_renderer=$(echo "$gl" | tr ' ' '_')" > cold/$TAG.gl || true
+
+      # vulkan-wayland: Vulkan device as a client of the same weston sees it, before drop_caches.
+      - name: Vulkan device (vulkaninfo --summary under the same weston, vulkan-wayland only)
+        if: steps.gui.outputs.skip == 'false' && matrix.variant == 'vulkan-wayland'
+        run: |
+          [ -S "$XDG_RUNTIME_DIR/wayland-ci" ] || { echo "::error::weston socket gone"; exit 1; }
+          env -u DISPLAY WAYLAND_DISPLAY=wayland-ci MESA_SHADER_CACHE_DISABLE=true vulkaninfo --summary 2>&1 | tee vulkaninfo.txt || true
+          dev=$(sed -n 's/^ *deviceName *= *//p' vulkaninfo.txt | head -1)
+          drv=$(sed -n 's/^ *driverInfo *= *//p' vulkaninfo.txt | head -1)
+          echo "VK device=${dev:-unknown} driverInfo=${drv:-unknown}"
+          echo "gl_renderer=vk:$(echo "${dev:-unknown}" | tr ' ' '_')" > cold/$TAG.gl
+
+      - name: "~/.cache snapshot (before first launch)"
+        if: steps.gui.outputs.skip == 'false'
+        run: |
+          mkdir -p cache
+          .github/scripts/cache-snapshot.sh cache/0-before.txt
+
+      - name: Drop page cache
+        if: steps.gui.outputs.skip == 'false'
+        run: |
+          sync
+          echo 3 | sudo tee /proc/sys/vm/drop_caches
+          echo "drop_caches: ran (sync; echo 3 > /proc/sys/vm/drop_caches) at $(date -u +%FT%TZ)"
+
+      # Shard 1: the FIRST launch runs under strace (its number is tagged straced=1).
+      - name: Cold GUI measure (first launch)
+        if: steps.gui.outputs.skip == 'false'
+        env:
+          GDK_BACKEND: x11
+          GSK_RENDERER: cairo
+          OPENPDF_ENV_DUMP: ${{ github.workspace }}/envs/measure-1.txt
+        run: |
+          mkdir -p cold strace
+          wrap="${OPENPDF_MEASURE_WRAP:-}"
+          straced=0
+          if [ "${{ matrix.shard }}" = 1 ]; then
+            wrap="$wrap strace -f -tt -e trace=openat,connect -o $PWD/strace/trace-first.txt"
+            straced=1
+          fi
+          [ -n "${OPENPDF_NO_GSK_CAIRO:-}" ] && unset GSK_RENDERER
+          [ -n "${OPENPDF_GSK:-}" ] && export GSK_RENDERER="$OPENPDF_GSK"
+          if [ -n "${OPENPDF_WAYLAND:-}" ]; then export GDK_BACKEND=wayland WAYLAND_DISPLAY=wayland-ci; unset DISPLAY; fi
+          export GDB_BASE_WRAP="${OPENPDF_MEASURE_WRAP:-}"
+          export OPENPDF_MEASURE_WRAP="$wrap $PWD/.github/scripts/env-dump.sh"
+          echo "variant=${{ matrix.variant }} wrap='$OPENPDF_MEASURE_WRAP'"
+          set +e
+          python3 .github/scripts/run-measure.py --kind gui --single-cold --frames 32 \
+            --out "cold/$TAG.txt" 2>&1 | tee measure-1.log; rc=${PIPESTATUS[0]}
+          set -e
+          mkdir -p crash; cp measure-1.log crash/; echo "$rc" > crash/first.rc
+          # run-measure exits 1 on failure; the app's own status is in "single-cold: exit N" (-N = signal N).
+          crc=$(grep -oE 'single-cold: exit -?[0-9]+' measure-1.log | grep -oE -- '-?[0-9]+$' | tail -1)
+          echo "${crc:-$rc}" > crash/first.child_rc
+          echo "exit_code=$rc child_exit=${crc:-$rc}" >> "cold/$TAG.txt"
+          .github/scripts/gdb-on-signal.sh "${crc:-$rc}" first
+          g=$(grep -o 'gsk_renderer=[^ ]*' measure-1.log | tail -1 || true); echo "${g:-gsk_renderer=not_printed}" | tee -a "cold/$TAG.txt"
+          .github/scripts/rss-classes.sh measure-1.log | tee -a "cold/$TAG.txt"
+          [ "$rc" = 0 ] || exit "$rc"
+          printf 'variant=%s\nstraced=%s\n' "${{ matrix.variant }}" "$straced" >> "cold/$TAG.txt"
+          if [ "$straced" = 1 ]; then
+            python3 .github/scripts/strace-summary.py strace/trace-first.txt | tee strace/summary-first.md
+            { echo "### ${{ matrix.variant }}: first launch (strace)"; cat strace/summary-first.md; } >> "$GITHUB_STEP_SUMMARY"
+          fi
+
+      - name: "~/.cache snapshot (after first launch)"
+        if: always() && steps.gui.outputs.skip == 'false'
+        run: |
+          .github/scripts/cache-snapshot.sh cache/1-after-first.txt
+          if [ -e "$HOME/.cache/mesa_shader_cache" ]; then m=1; else m=0; fi
+          echo "mesa_shader_cache=$m" | tee -a "cold/$TAG.gl"
+          if [ "${{ matrix.variant }}" = nogl ] && [ "$m" = 1 ]; then
+            echo "::error::nogl: ~/.cache/mesa_shader_cache was created; GL was not disabled"; exit 1
+          fi
+
+      - name: Drop page cache (second launch)
+        if: always() && steps.gui.outputs.skip == 'false'
+        run: |
+          sync
+          echo 3 | sudo tee /proc/sys/vm/drop_caches
+          echo "drop_caches: ran at $(date -u +%FT%TZ)"
+
+      # Second launch on the same VM, page cache dropped again (for comparison).
+      - name: Cold GUI measure (second launch)
+        if: always() && steps.gui.outputs.skip == 'false'
+        env:
+          GDK_BACKEND: x11
+          GSK_RENDERER: cairo
+          OPENPDF_ENV_DUMP: ${{ github.workspace }}/envs/measure-2.txt
+        run: |
+          wrap="${OPENPDF_MEASURE_WRAP:-}"
+          straced=0
+          if [ "${{ matrix.shard }}" = 1 ]; then
+            wrap="$wrap strace -f -tt -e trace=openat,connect -o $PWD/strace/trace-second.txt"
+            straced=1
+          fi
+          [ -n "${OPENPDF_NO_GSK_CAIRO:-}" ] && unset GSK_RENDERER
+          [ -n "${OPENPDF_GSK:-}" ] && export GSK_RENDERER="$OPENPDF_GSK"
+          if [ -n "${OPENPDF_WAYLAND:-}" ]; then export GDK_BACKEND=wayland WAYLAND_DISPLAY=wayland-ci; unset DISPLAY; fi
+          export GDB_BASE_WRAP="${OPENPDF_MEASURE_WRAP:-}"
+          export OPENPDF_MEASURE_WRAP="$wrap $PWD/.github/scripts/env-dump.sh"
+          echo "wrap='$OPENPDF_MEASURE_WRAP'"
+          set +e
+          python3 .github/scripts/run-measure.py --kind gui --single-cold --frames 32 \
+            --out "cold/$TAG.second" 2>&1 | tee measure-2.log; rc=${PIPESTATUS[0]}
+          set -e
+          mkdir -p crash; cp measure-2.log crash/; echo "$rc" > crash/second.rc
+          # run-measure exits 1 on failure; the app's own status is in "single-cold: exit N" (-N = signal N).
+          crc=$(grep -oE 'single-cold: exit -?[0-9]+' measure-2.log | grep -oE -- '-?[0-9]+$' | tail -1)
+          echo "${crc:-$rc}" > crash/second.child_rc
+          echo "exit_code=$rc child_exit=${crc:-$rc}" >> "cold/$TAG.second"
+          .github/scripts/gdb-on-signal.sh "${crc:-$rc}" second
+          g=$(grep -o 'gsk_renderer=[^ ]*' measure-2.log | tail -1 || true); echo "${g:-gsk_renderer=not_printed}" | tee -a "cold/$TAG.second"
+          .github/scripts/rss-classes.sh measure-2.log | tee -a "cold/$TAG.second"
+          printf 'straced=%s\n' "$straced" >> "cold/$TAG.second"
+          if [ "$straced" = 1 ]; then
+            python3 .github/scripts/strace-summary.py strace/trace-second.txt | tee strace/summary-second.md
+            { echo "### ${{ matrix.variant }}: second launch (strace)"; cat strace/summary-second.md; } >> "$GITHUB_STEP_SUMMARY"
+          fi
+
+      - name: "~/.cache snapshot (after second launch) + diff"
+        if: always() && steps.gui.outputs.skip == 'false'
+        run: |
+          .github/scripts/cache-snapshot.sh cache/2-after-second.txt
+          python3 .github/scripts/cache-diff.py cache/0-before.txt cache/1-after-first.txt cache/2-after-second.txt | tee cache/diff.md
+          { echo "### ~/.cache diff: $TAG"; cat cache/diff.md; } >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Env parity (in-job view; the gating check is cold-start-env-parity)
+        if: always() && steps.gui.outputs.skip == 'false'
+        run: |
+          args=()
+          for a in $PARITY_ALLOW; do args+=(--allow "$a"); done
+          files=(envs/baseline.txt)
+          for f in envs/measure-1.txt envs/measure-2.txt; do [ -f "$f" ] && files+=("$f"); done
+          python3 .github/scripts/env-parity.py "${files[@]}" "${args[@]}"
+
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        if: always() && matrix.shard == 1 && steps.gui.outputs.skip == 'false'
+        with:
+          name: strace-${{ matrix.variant }}
+          path: strace/
+          if-no-files-found: warn
+
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        if: always() && steps.gui.outputs.skip == 'false'
+        with:
+          name: cache-${{ env.TAG }}
+          path: cache/
+          if-no-files-found: warn
+
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        if: always() && steps.gui.outputs.skip == 'false'
+        with:
+          name: envs-${{ env.TAG }}
+          path: envs/
+          if-no-files-found: warn
+
+      # Launch logs, exit codes, gdb backtraces for the crash gate (cold-start-default-crash).
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        if: always() && (startsWith(matrix.variant, 'default') || matrix.variant == 'vulkan-wayland') && steps.gui.outputs.skip == 'false'
+        with:
+          name: crash-${{ env.TAG }}
+          path: crash/
+          if-no-files-found: warn
+
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        if: always()
+        with:
+          name: cold-start-${{ env.TAG }}
+          path: cold/
+          if-no-files-found: warn
+
+  # Real gate (no continue-on-error): --measure must run with the app's normal env
+  # except the per-variant exceptions declared in the cold-start job.
+  cold-start-env-parity:
+    name: Cold start env parity
+    needs: cold-start
+    if: always()
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+        with:
+          persist-credentials: false
+          sparse-checkout: .github/scripts
+
+      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
+        with:
+          pattern: envs-*
+          path: envs
+
+      - name: Compare launch env vs --measure env
+        run: |
+          shopt -s nullglob
+          dirs=(envs/envs-*)
+          if [ ${#dirs[@]} -eq 0 ]; then
+            echo "::notice::no env dumps (cold-start skipped on this branch)"; exit 0
+          fi
+          rc=0
+          for d in "${dirs[@]}"; do
+            echo "== ${d#envs/envs-}"
+            if [ ! -f "$d/measure-1.txt" ]; then
+              echo "::error::${d}: no measure-1.txt (first --measure launch did not reach the app)"; rc=1; continue
+            fi
+            args=()
+            for a in $(cat "$d/allow.txt"); do args+=(--allow "$a"); done
+            files=("$d/baseline.txt" "$d/measure-1.txt")
+            [ -f "$d/measure-2.txt" ] && files+=("$d/measure-2.txt")
+            python3 .github/scripts/env-parity.py "${files[@]}" "${args[@]}" || rc=1
+          done
+          exit $rc
+
+  # Real gate (no continue-on-error): with the GTK-chosen renderer (what users run),
+  # the app must not crash. Timings stay informational; a crash is a blocker.
+  cold-start-default-crash:
+    name: Cold start default renderer must not crash
+    needs: cold-start
+    if: always()
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
+        with:
+          pattern: crash-*
+          path: crash
+
+      # Gate: default-wayland (and default-nodri3) must exit 0, log no Gsk:ERROR/CRITICAL,
+      # and must print a non-cairo gsk_renderer (else it did not exercise GL).
+      # Plain Xvfb `default` is informational only: Xvfb lacks DRI3.
+      - name: default-wayland / default-nodri3 (GL) + vulkan-wayland (Vulkan) exit 0, no CRITICAL; default informational
+        run: |
+          shopt -s nullglob
+          dirs=(crash/crash-*)
+          if [ ${#dirs[@]} -eq 0 ]; then
+            if [ "${{ needs.cold-start.result }}" = skipped ]; then echo "::notice::cold-start skipped"; exit 0; fi
+            echo "::warning::no crash-* artifacts (GUI not built on this branch?)"; exit 0
+          fi
+          rc=0; seen_wl=0; seen_vk=0
+          for d in "${dirs[@]}"; do
+            t=${d#crash/crash-}; v=${t%-*}
+            case "$v" in default-wayland|default-nodri3|vulkan-wayland) gate=1; [ "$v" = default-wayland ] && seen_wl=1; [ "$v" = vulkan-wayland ] && seen_vk=1 ;; *) gate=0 ;; esac
+            for l in first second; do
+              n=1; [ "$l" = second ] && n=2
+              log="$d/measure-$n.log"; code=$(cat "$d/$l.rc" 2>/dev/null || echo missing)
+              why=""
+              [ "$code" = 0 ] || why="exit code $code"
+              if [ -f "$log" ] && grep -qE 'Gsk:ERROR|Gsk-CRITICAL|Gdk-CRITICAL' "$log"; then
+                why="$why; $(grep -m1 -oE '(Gsk:ERROR|Gsk-CRITICAL|Gdk-CRITICAL).*' "$log" | cut -c1-200)"
+              fi
+              g=$(grep -o 'gsk_renderer=[^ ]*' "$log" 2>/dev/null | tail -1)
+              if [ "$v" = vulkan-wayland ]; then
+                if [ "$code" = 0 ] && ! echo "$g" | grep -qi vulkan; then
+                  why="$why; did not exercise Vulkan (${g:-gsk_renderer not printed})"
+                fi
+              elif [ "$code" = 0 ] && { [ -z "$g" ] || echo "$g" | grep -qi cairo; }; then
+                why="$why; did not exercise GL (${g:-gsk_renderer not printed})"
+              fi
+              if [ -z "$why" ]; then echo "$t $l launch: ok ($g)"
+              elif [ $gate = 1 ]; then echo "::error::$t $l launch: ${why#; }"; rc=1
+              else echo "::notice::$t $l launch (informational, Xvfb lacks DRI3): ${why#; }"; fi
+              [ -f "$d/gdb-$l.txt" ] && echo "  gdb backtrace: artifact crash-$t/gdb-$l.txt"
+            done
+          done
+          [ $seen_wl = 1 ] || { echo "::error::no default-wayland artifacts"; rc=1; }
+          [ $seen_vk = 1 ] || { echo "::error::no vulkan-wayland artifacts"; rc=1; }
+          exit $rc
+
+  cold-start-summary:
+    name: Cold start summary
+    needs: cold-start
+    if: always()
+    runs-on: ubuntu-latest
+    continue-on-error: true
+    steps:
+      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
+        with:
+          pattern: cold-start-*
+          path: cold
+          merge-multiple: true
+
+      - name: Per variant (all values; shard 1 first launch is under strace)
+        run: |
+          python3 - <<'PY2'
+          import glob, os, statistics
+          variants = ["plain", "nodbuswait", "minimal", "fcwarm", "nogl", "default", "default-nodri3", "default-wayland", "vulkan-wayland"]
+          import re
+          def mine(v, ext):
+              return [f for f in sorted(glob.glob(f"cold/{v}-*{ext}")) if re.fullmatch(re.escape(v) + r"-\d+" + re.escape(ext), os.path.basename(f))]
+          def kv(f):
+              return dict(l.split("=", 1) for l in open(f).read().split() if "=" in l)
+          out = ["## Cold start per variant (informational, fresh VM per job)", "",
+                 "| variant | first launch cold_startup_ms (all shards) | median w/o strace | second launch (same VM) | GL / GSK / mesa_shader_cache |",
+                 "|---|---|---:|---|---|"]
+          skipped = 0
+          for v in variants:
+              first, clean, second = [], [], []
+              for f in mine(v, ".txt"):
+                  d = kv(f)
+                  if d.get("skipped"):
+                      skipped += 1; continue
+                  sh = os.path.basename(f)[len(v) + 1:-4]
+                  if "cold_startup_ms" in d:
+                      s = d.get("straced") == "1"
+                      first.append(f"s{sh}={d['cold_startup_ms']}{'*' if s else ''}")
+                      if not s: clean.append(float(d["cold_startup_ms"]))
+                  sf = f[:-4] + ".second"
+                  if os.path.exists(sf):
+                      d2 = kv(sf)
+                      second.append(f"s{sh}={d2.get('cold_startup_ms', 'fail')}{'*' if d2.get('straced') == '1' else ''}")
+              med = f"{statistics.median(clean):g}" if clean else "-"
+              extra = []
+              for f in mine(v, ".txt"):
+                  sh = os.path.basename(f)[len(v) + 1:-4]
+                  d = kv(f); g = f[:-4] + ".gl"
+                  dg = kv(g) if os.path.exists(g) else {}
+                  d2 = kv(f[:-4] + ".second") if os.path.exists(f[:-4] + ".second") else {}
+                  extra.append(f"s{sh}:gl={dg.get('gl_renderer','?')},gsk={d.get('gsk_renderer','?')},mesa={dg.get('mesa_shader_cache','?')},rss={d.get('peak_rss_mb','?')},exit={d.get('exit_code','?')}/{d2.get('exit_code','?')}")
+              out.append(f"| {v} | {' '.join(first) or '-'} | {med} | {' '.join(second) or '-'} | {' '.join(extra)} |")
+          out += ["", "`*` = under strace (slower; not in the median). `default` = GTK-chosen renderer, informational only; the limit stays on cairo. `nogl` is diagnostic only.",
+                  "Crash gate: `default-wayland` (weston headless, GL) and `default-nodri3` gate (must use a GL GSK renderer); `vulkan-wayland` (weston headless, lavapipe) gates and must use a Vulkan GSK renderer; a crash in Xvfb `default` is informational (reason: Xvfb lacks DRI3)."]
+          out += ["", "### Peak RSS (MiB) per launch, informational (no limit on GL/Vulkan; cairo keeps its own limit)", "",
+                  "| variant | shard | first | second | smaps classes, first launch (KiB; mesa = top-15 mappings matching mesa/gallium/llvm/lvp) |", "|---|---|---:|---:|---|"]
+          def mib(d):
+              if "peak_rss_mb" in d: return d["peak_rss_mb"]
+              if "peak_rss_bytes" in d: return f"{float(d['peak_rss_bytes'])/1048576:.1f}"
+              return "-"
+          for v in ["plain", "default-wayland", "vulkan-wayland"]:
+              for f in mine(v, ".txt"):
+                  d = kv(f)
+                  if d.get("skipped"): continue
+                  sh = os.path.basename(f)[len(v) + 1:-4]
+                  d2 = kv(f[:-4] + ".second") if os.path.exists(f[:-4] + ".second") else {}
+                  cls = " ".join(f"{k[4:]}={d[k]}" for k in ("rss_heap_kb", "rss_tiles_kb", "rss_pdfium_kb", "rss_mesa_kb", "rss_other_kb") if k in d) or "-"
+                  out.append(f"| {v}{' (cairo)' if v == 'plain' else ''} | {sh} | {mib(d)} | {mib(d2)} | {cls} |")
+          if skipped: out.append(f"{skipped} job(s) skipped (GUI placeholder).")
+          text = "\n".join(out) + "\n"
+          print(text)
+          with open(os.environ["GITHUB_STEP_SUMMARY"], "a") as fh:
+              fh.write(text)
+          PY2
+
+  times:
+    name: CI times
+    needs: build
+    if: always()
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
+        with:
+          pattern: ci-time-*
+          path: ci-times
+          merge-multiple: true
+
+      - name: Summarize CI times per OS
+        run: |
+          set -euo pipefail
+          {
+            echo "## CI times per OS"
+            echo
+            echo "| OS | Seconds |"
+            echo "| --- | ---: |"
+            for f in ci-times/*.txt; do
+              [ -f "$f" ] || continue
+              os=$(sed -n 's/^os=//p' "$f")
+              dur=$(sed -n 's/^duration_s=//p' "$f")
+              echo "| \`$os\` | ${dur} |"
+            done
+          } >> "$GITHUB_STEP_SUMMARY"
