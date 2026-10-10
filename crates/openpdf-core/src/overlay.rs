@@ -57,10 +57,7 @@ pub fn apply_overlay(doc: &Document, overlay: &Overlay) -> Result<Document> {
         let page_id = page_map
             .get(&(i + 1))
             .copied()
-            .ok_or(Error::PageOutOfRange {
-                page: i,
-                count: total,
-            })?;
+            .ok_or(Error::PageOutOfRange { page: i, count: total })?;
         ensure_font(&mut inner, page_id, font_id)?;
         let (w, h) = page_size(&inner, page_id).unwrap_or((612.0, 792.0));
         let text = overlay
