@@ -746,3 +746,9 @@ msgstr "idénticos"
 
 msgid "differ"
 msgstr "diferentes"
+
+msgid "Redaction is permanent. Selected content is removed and cannot be recovered."
+msgstr "La redacción es permanente. El contenido seleccionado se elimina y no se puede recuperar."
+
+msgid "Drag on the page to select a redaction area."
+msgstr "Arrastra sobre la página para seleccionar el área a redactar."

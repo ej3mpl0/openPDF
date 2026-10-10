@@ -146,6 +146,23 @@ fn format_invalid_kind(kind: &InvalidKind) -> String {
         InvalidKind::UnknownPermission { value } => {
             tr_args("unknown permission: {value}", &[("value", value)])
         }
+        InvalidKind::OcrUnavailable => tr(
+            "OCR needs Tesseract. Install tesseract-ocr (and language data) or set OPENPDF_TESSERACT.",
+        ),
+        InvalidKind::OcrLanguageMissing {
+            language,
+            installed,
+            hint,
+        } => tr_args(
+            "OCR language {language} is not installed. Installed: {installed}. {hint}",
+            &[
+                ("language", language),
+                ("installed", installed),
+                ("hint", hint),
+            ],
+        ),
+        InvalidKind::NoRedactionBoxes => tr("no redaction boxes"),
+        InvalidKind::RedactionInverted => tr("redaction box is inverted"),
     }
 }
 

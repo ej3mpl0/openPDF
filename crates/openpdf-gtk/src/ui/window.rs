@@ -241,7 +241,9 @@ fn app_menu(lang: crate::Lang) -> gio::Menu {
     menu.append(Some(t(lang, "Sign with certificate…")), Some("app.sign"));
     let tools = gio::Menu::new();
     for (tool, target) in tool_menu_items() {
-        tools.append(Some(tool.title(lang)), Some(target));
+        if tool.is_offered() {
+            tools.append(Some(tool.title(lang)), Some(target));
+        }
     }
     menu.append_submenu(Some(t(lang, "Tools")), &tools);
     menu.append(Some(t(lang, "Preferences")), Some("app.preferences"));
@@ -263,6 +265,9 @@ fn tool_menu_items() -> &'static [(Tool, &'static str)] {
         (Tool::PageNumbers, "app.tool::number"),
         (Tool::FromImages, "app.tool::from-images"),
         (Tool::ToImages, "app.tool::to-images"),
+        (Tool::Ocr, "app.tool::ocr"),
+        (Tool::Redact, "app.tool::redact"),
+        (Tool::Compare, "app.tool::compare"),
     ]
 }
 
@@ -279,6 +284,9 @@ fn tool_from_id(id: &str) -> Option<Tool> {
         "number" => Tool::PageNumbers,
         "from-images" => Tool::FromImages,
         "to-images" => Tool::ToImages,
+        "ocr" => Tool::Ocr,
+        "redact" => Tool::Redact,
+        "compare" => Tool::Compare,
         _ => return None,
     })
 }

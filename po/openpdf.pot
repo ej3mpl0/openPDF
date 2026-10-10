@@ -736,3 +736,9 @@ msgstr ""
 
 msgid "differ"
 msgstr ""
+
+msgid "Redaction is permanent. Selected content is removed and cannot be recovered."
+msgstr ""
+
+msgid "Drag on the page to select a redaction area."
+msgstr ""
