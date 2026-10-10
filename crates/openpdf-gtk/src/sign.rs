@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: MPL-2.0
 //! Signing UI helpers. GTK never depends on `openpdf-sign`.
 //!
 //! Certificates come from [`Signer::list_certificates`]. The picker only

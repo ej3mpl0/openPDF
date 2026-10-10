@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: MPL-2.0
 //! GTK PIN dialog. Implements [`openpdf_core::PinProvider`] and returns
 //! [`SecretPin`]. Prompt text comes from [`openpdf_core::pin_prompt_text`].
 //! This crate never imports `openpdf-sign`.
