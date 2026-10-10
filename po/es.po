@@ -264,6 +264,9 @@ msgstr "validez desconocida"
 msgid "{subject} — {usage} — {validity}"
 msgstr "Certificado {subject} — {usage} — {validity}"
 
+msgid "{usage} — {validity}"
+msgstr "{usage} — {validity}"
+
 msgid "Enter PIN for token \"{token}\""
 msgstr "Introduzca el PIN del token \"{token}\""
 
