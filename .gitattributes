@@ -1,0 +1,2 @@
+# PDF xref offsets break if Git rewrites LF as CRLF on Windows.
+*.pdf binary

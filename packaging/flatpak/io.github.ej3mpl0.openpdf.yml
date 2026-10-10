@@ -1,0 +1,191 @@
+# Flatpak manifest for openPDF.
+# App id matches data/io.github.ej3mpl0.openpdf.{desktop,metainfo.xml} from PR #1.
+# GUI binary is APP_BIN in packaging/config.sh (openpdf-gtk; .desktop Exec).
+# CLI binary is CLI_BIN (openpdf from crate openpdf-cli) and must not load GTK.
+#
+# Desktop files are not duplicated here; they are installed from data/.
+# Files open through the XDG document portal (no --filesystem=home).
+# OpenSC is bundled so DNIe/FNMT PKCS#11 works with host pcscd (--socket=pcsc).
+# p11-kit server is not needed: the app loads the bundled OpenSC module.
+
+app-id: io.github.ej3mpl0.openpdf
+runtime: org.gnome.Platform
+runtime-version: "51"
+sdk: org.gnome.Sdk
+sdk-extensions:
+  - org.freedesktop.Sdk.Extension.rust-stable
+command: openpdf-gtk
+
+build-options:
+  strip: true
+  no-debuginfo: true
+
+finish-args:
+  - --share=ipc
+  # Network is used only for the RFC 3161 timestamp request when the user picks
+  # PAdES B-T (only the SHA-256 hash of the signature is sent, to the TSA the user
+  # configured; there is no default). PAdES B-B makes no network connection.
+  - --share=network
+  - --socket=wayland
+  - --socket=fallback-x11
+  - --device=dri
+  - --socket=pcsc
+  - --env=OPENPDF_PDFIUM=/app/lib/libpdfium.so
+  # Arch-independent path (OpenSC --libdir=/app/lib). Avoids x86_64-only defaults in openpdf-sign.
+  - --env=OPENPDF_PKCS11_MODULE=/app/lib/opensc-pkcs11.so
+
+cleanup:
+  - /include
+  - /lib/pkgconfig
+  - /lib/debug
+  - /share/man
+  - /share/doc
+  - /share/gtk-doc
+  - "*.la"
+  - "*.a"
+
+modules:
+  # Client library only. Host pcscd is reached via --socket=pcsc.
+  - name: pcsc-lite
+    buildsystem: meson
+    config-opts:
+      - -Dlibsystemd=false
+      - -Dlibudev=false
+      - -Dlibusb=false
+      - -Dpolkit=false
+      - -Dusb=false
+      - -Dserial=false
+    cleanup:
+      - /bin
+      - /sbin
+      - /libexec
+      - /etc
+      - /lib/systemd
+      - /share/polkit-1
+    sources:
+      - type: archive
+        url: https://pcsclite.apdu.fr/files/pcsc-lite-2.5.1.tar.xz
+        sha256: bfcfe38a20afc49849c6bf55325e38f449fc4b26d3923fdc32b969ae41a8741b
+
+  - name: opensc
+    buildsystem: autotools
+    config-opts:
+      - --disable-static
+      - --disable-doc
+      - --disable-man
+      - --disable-tests
+      - --disable-notify
+      - --disable-strict
+      - --prefix=/app
+      - --libdir=/app/lib
+      - --sysconfdir=/app/etc
+      - --with-completiondir=/app/share/bash-completion/completions
+      - --enable-p11_system_config_modules=/app/share/p11-kit/modules
+    post-install:
+      - |
+        set -euo pipefail
+        so="${FLATPAK_DEST}/lib/opensc-pkcs11.so"
+        if [ ! -f "$so" ]; then
+          so="$(find "${FLATPAK_DEST}" -name opensc-pkcs11.so -type f | head -n1 || true)"
+        fi
+        if [ -z "$so" ] || [ ! -f "$so" ]; then
+          echo "opensc-pkcs11.so missing after OpenSC install:" >&2
+          find "${FLATPAK_DEST}" \( -name '*opensc*' -o -name '*pkcs11*' \) -print >&2
+          exit 1
+        fi
+        mkdir -p "${FLATPAK_DEST}/lib/pkcs11"
+        ln -sfn ../opensc-pkcs11.so "${FLATPAK_DEST}/lib/pkcs11/opensc-pkcs11.so"
+        mkdir -p "${FLATPAK_DEST}/share/p11-kit/modules"
+        printf 'module: /app/lib/opensc-pkcs11.so\n' > "${FLATPAK_DEST}/share/p11-kit/modules/opensc.module"
+    cleanup:
+      - /bin
+      - /sbin
+      - /share/applications
+      - /share/opensc
+    sources:
+      - type: archive
+        url: https://github.com/OpenSC/OpenSC/releases/download/0.27.1/opensc-0.27.1.tar.gz
+        sha256: 976f4a23eaf3397a1a2c3a7aac80bf971a8c3d829c9a79f06145bfaeeae5eca7
+
+  - name: pdfium
+    buildsystem: simple
+    build-commands:
+      - |
+        set -euo pipefail
+        so="$(find . -name libpdfium.so \( -type f -o -type l \) | head -n1)"
+        if [ -z "$so" ]; then
+          echo "libpdfium.so missing after extract:" >&2
+          find . -maxdepth 3 -print >&2
+          exit 1
+        fi
+        install -Dm755 "$so" "${FLATPAK_DEST}/lib/libpdfium.so"
+    sources:
+      - type: archive
+        url: https://github.com/bblanchon/pdfium-binaries/releases/download/chromium%2F8035/pdfium-linux-x64.tgz
+        sha256: 2e6db042dd2cff2d5247023dbec6c7ebb800042ce83c835d6468d45229669bd4
+        archive-type: tar-gzip
+        strip-components: 0
+        only-arches:
+          - x86_64
+      - type: archive
+        url: https://github.com/bblanchon/pdfium-binaries/releases/download/chromium%2F8035/pdfium-linux-arm64.tgz
+        sha256: 10bb7728a5268593a31c2024e0e57ea26b73b7a54195054f43d2ad0869d55a48
+        archive-type: tar-gzip
+        strip-components: 0
+        only-arches:
+          - aarch64
+
+  - name: openpdf
+    buildsystem: simple
+    build-options:
+      append-path: /usr/lib/sdk/rust-stable/bin
+      env:
+        CARGO_HOME: /run/build/openpdf/cargo
+        CARGO_NET_OFFLINE: "true"
+        RUSTUP_TOOLCHAIN: stable
+    build-commands:
+      - cargo --offline fetch --locked --manifest-path Cargo.toml --verbose
+      - |
+        set -euo pipefail
+        # shellcheck source=../config.sh
+        . packaging/config.sh
+        cargo --offline build --locked --release -p "$APP_BIN" -p "$CLI_CRATE"
+        install -Dm0755 "target/release/${APP_BIN}" "${FLATPAK_DEST}/bin/${APP_BIN}"
+        install -Dm0755 "target/release/${CLI_BIN}" "${FLATPAK_DEST}/bin/${CLI_BIN}"
+        if command -v ldd >/dev/null; then
+          if ldd "${FLATPAK_DEST}/bin/${CLI_BIN}" | grep -E 'libgtk|libadwaita'; then
+            echo "${CLI_BIN} must not link GTK/libadwaita" >&2
+            exit 1
+          fi
+        fi
+        # Generated outside the sandbox (packaging/gen-notices.sh, pinned cargo-about).
+        if [ ! -s "$NOTICES_FILE" ]; then
+          echo "$NOTICES_FILE missing: run packaging/gen-notices.sh before flatpak-builder" >&2
+          exit 1
+        fi
+        install -Dm0644 "$NOTICES_FILE" "${FLATPAK_DEST}/${NOTICES_REL}"
+        install -Dm0644 "$DESKTOP_FILE" "${FLATPAK_DEST}/share/applications/${APP_ID}.desktop"
+        install -Dm0644 "$METAINFO_FILE" "${FLATPAK_DEST}/share/metainfo/${APP_ID}.metainfo.xml"
+        icon_src=""
+        for candidate in \
+          "data/icons/hicolor/scalable/apps/${ICON_NAME}.svg" \
+          "data/icons/hicolor/scalable/apps/${APP_ID}.svg" \
+          "data/${ICON_NAME}.svg" \
+          "packaging/icons/${ICON_NAME}.svg"
+        do
+          if [ -f "$candidate" ]; then
+            icon_src="$candidate"
+            break
+          fi
+        done
+        if [ -z "$icon_src" ]; then
+          echo "no scalable SVG icon found under data/ or packaging/icons/" >&2
+          exit 1
+        fi
+        install -Dm0644 "$icon_src" "${FLATPAK_DEST}/share/icons/hicolor/scalable/apps/${ICON_NAME}.svg"
+        install -Dm0644 "$icon_src" "${FLATPAK_DEST}/share/icons/hicolor/scalable/apps/${APP_ID}.svg"
+        rm -rf target cargo
+    sources:
+      - type: dir
+        path: ../..
+      - cargo-sources.json

@@ -1,41 +1,74 @@
 //! SoftHSM2 integration plus PIN / verify unit tests.
+//!
+//! SoftHSM integration is Linux-only so `CI=true` still means "fail if a
+//! required dep is missing" on every OS. Windows/macOS signer coverage lands
+//! on `sign-native`.
 
 use std::fs;
 use std::path::{Path, PathBuf};
+
+use openpdf_core::test_support::with_locale;
+use openpdf_core::{format_verify_results, tr, SecretPin};
+
+use crate::verify_pdf;
+
+#[cfg(target_os = "linux")]
 use std::sync::{Mutex, OnceLock};
+#[cfg(target_os = "linux")]
 use std::time::Duration;
 
+#[cfg(target_os = "linux")]
 use cryptoki::context::{CInitializeArgs, CInitializeFlags, Pkcs11};
+#[cfg(target_os = "linux")]
 use cryptoki::error::{Error as CkError, RvError};
+#[cfg(target_os = "linux")]
 use cryptoki::mechanism::Mechanism;
+#[cfg(target_os = "linux")]
 use cryptoki::object::{Attribute, AttributeType, CertificateType, ObjectClass};
+#[cfg(target_os = "linux")]
 use cryptoki::session::UserType;
+#[cfg(target_os = "linux")]
 use cryptoki::types::AuthPin;
+#[cfg(target_os = "linux")]
 use der::asn1::{BitString, UintRef};
+#[cfg(target_os = "linux")]
 use der::{Encode, Sequence};
-use openpdf_core::test_support::with_locale;
+#[cfg(target_os = "linux")]
 use openpdf_core::{
-    describe_certificate, format_verify_result, format_verify_results, pin_prompt_text, tr,
-    Document, Error, PinProvider, SecretPin, SignRequest, Signer, VisibleAppearance,
+    describe_certificate, format_verify_result, pin_prompt_text, Document, Error, PinProvider,
+    SignRequest, Signer, VisibleAppearance,
 };
+#[cfg(target_os = "linux")]
 use x509_cert::name::Name;
+#[cfg(target_os = "linux")]
 use x509_cert::serial_number::SerialNumber;
+#[cfg(target_os = "linux")]
 use x509_cert::spki::{AlgorithmIdentifierOwned, SubjectPublicKeyInfoOwned};
+#[cfg(target_os = "linux")]
 use x509_cert::time::Validity;
+#[cfg(target_os = "linux")]
 use x509_cert::{Certificate, TbsCertificate, Version};
 
+#[cfg(target_os = "linux")]
 use crate::pin::StaticPinProvider;
+#[cfg(target_os = "linux")]
 use crate::token::{Pkcs11Config, Pkcs11Signer};
-use crate::{verify_pdf, CertificateUsage};
+#[cfg(target_os = "linux")]
+use crate::CertificateUsage;
 
+#[cfg(target_os = "linux")]
 const USER_PIN: &str = "1234";
+#[cfg(target_os = "linux")]
 const SO_PIN: &str = "12345678";
+#[cfg(target_os = "linux")]
 const KEY_ID: &[u8] = &[0x01];
 
+#[cfg(target_os = "linux")]
 struct TestEnv {
     module: PathBuf,
 }
 
+#[cfg(target_os = "linux")]
 fn softhsm_module() -> Option<PathBuf> {
     [
         "/usr/lib/softhsm/libsofthsm2.so",
@@ -48,6 +81,7 @@ fn softhsm_module() -> Option<PathBuf> {
     .find(|p| p.exists())
 }
 
+#[cfg(target_os = "linux")]
 fn require_softhsm() -> PathBuf {
     match softhsm_module() {
         Some(p) => p,
@@ -58,6 +92,7 @@ fn require_softhsm() -> PathBuf {
     }
 }
 
+#[cfg(target_os = "linux")]
 fn test_env() -> &'static TestEnv {
     static ENV: OnceLock<TestEnv> = OnceLock::new();
     static LOCK: Mutex<()> = Mutex::new(());
@@ -90,12 +125,14 @@ fn test_env() -> &'static TestEnv {
     })
 }
 
+#[cfg(target_os = "linux")]
 #[derive(Sequence)]
 struct RsaPub<'a> {
     n: UintRef<'a>,
     e: UintRef<'a>,
 }
 
+#[cfg(target_os = "linux")]
 fn provision_token(module: &Path) {
     let pkcs11 = Pkcs11::new(module).expect("load softhsm");
     match pkcs11.initialize(CInitializeArgs::new(CInitializeFlags::OS_LOCKING_OK)) {
@@ -221,6 +258,7 @@ fn provision_token(module: &Path) {
         .expect("store cert");
 }
 
+#[cfg(target_os = "linux")]
 fn signer() -> Pkcs11Signer {
     let env = test_env();
     Pkcs11Signer::new(
@@ -236,6 +274,7 @@ fn corpus(name: &str) -> PathBuf {
         .join(name)
 }
 
+#[cfg(target_os = "linux")]
 fn catch_skip<T>(f: impl FnOnce() -> T + std::panic::UnwindSafe) -> Option<T> {
     match std::panic::catch_unwind(f) {
         Ok(v) => Some(v),
@@ -255,6 +294,7 @@ fn catch_skip<T>(f: impl FnOnce() -> T + std::panic::UnwindSafe) -> Option<T> {
 }
 
 /// SoftHSM / PKCS#11 is process-global and not safe to drive from several tests at once.
+#[cfg(target_os = "linux")]
 fn with_softhsm<T>(f: impl FnOnce() -> T + std::panic::UnwindSafe) -> Option<T> {
     static PKCS11: Mutex<()> = Mutex::new(());
     catch_skip(|| {
@@ -263,8 +303,10 @@ fn with_softhsm<T>(f: impl FnOnce() -> T + std::panic::UnwindSafe) -> Option<T> 
     })
 }
 
+#[cfg(target_os = "linux")]
 struct PanicPin;
 
+#[cfg(target_os = "linux")]
 impl PinProvider for PanicPin {
     fn request_pin(&self, _token_label: &str) -> openpdf_core::Result<SecretPin> {
         panic!("PIN must not be requested when listing certificates");
@@ -287,6 +329,7 @@ fn verify_unsigned_corpus() {
     });
 }
 
+#[cfg(target_os = "linux")]
 #[test]
 fn list_certificates_does_not_ask_for_pin() {
     let Some(()) = with_softhsm(|| {
@@ -310,6 +353,7 @@ fn list_certificates_does_not_ask_for_pin() {
     };
 }
 
+#[cfg(target_os = "linux")]
 #[test]
 fn sign_and_verify_corpus_keeps_prefix() {
     let Some(()) = with_softhsm(|| {
@@ -368,6 +412,7 @@ fn sign_and_verify_corpus_keeps_prefix() {
     };
 }
 
+#[cfg(target_os = "linux")]
 #[test]
 fn sign_visible_appearance() {
     let Some(()) = with_softhsm(|| {
@@ -393,6 +438,7 @@ fn sign_visible_appearance() {
     };
 }
 
+#[cfg(target_os = "linux")]
 #[test]
 fn unknown_cert_id_fails() {
     let Some(()) = with_softhsm(|| {
@@ -413,6 +459,7 @@ fn unknown_cert_id_fails() {
     };
 }
 
+#[cfg(target_os = "linux")]
 fn can_use(c: &openpdf_core::CertificateInfo) -> bool {
     c.usage.is_empty() || c.usage.contains(&CertificateUsage::Signing)
 }

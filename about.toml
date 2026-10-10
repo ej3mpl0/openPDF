@@ -1,0 +1,20 @@
+# cargo-about 0.9.2 (pinned in CI). Same allow-list as deny.toml.
+accepted = [
+  "MIT",
+  "Apache-2.0",
+  "BSD-2-Clause",
+  "BSD-3-Clause",
+  "MPL-2.0",
+  "ISC",
+  "Unicode-3.0",
+  "Unicode-DFS-2016",
+  "Zlib",
+]
+# Our own crates are listed in the header, not as third parties.
+ignore-build-dependencies = false
+ignore-dev-dependencies = true
+private = { ignore = true }
+workarounds = ["ring", "rustls"]
+
+[target-lexicon]
+accepted = ["Apache-2.0 WITH LLVM-exception"]
