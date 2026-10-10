@@ -678,8 +678,13 @@ fn schedule_tile_pump(view: Rc<DocumentView>) {
             clone!(@strong view => move || {
                 let first_painted = crate::measure::ui_first_tile_painted_ms() > 0;
                 let first_rendered = crate::measure::ui_first_tile_rendered_ms() > 0;
-                // Hold the rest of the queue until the first tile is painted.
+                // Hold the rest of the *event* queue until the first tile is
+                // painted, but still create textures for visible keys already
+                // in the pixel cache. Otherwise a pre-layout / wrong-zoom
+                // arrival sets first_rendered and snapshot never peeks a
+                // texture (measure timeout at 16/16, first_tile=0).
                 if !first_painted && first_rendered {
+                    ingest_cached_keys(&view);
                     view.pages_area.queue_draw();
                     let again = view.clone();
                     glib::timeout_add_local_once(
