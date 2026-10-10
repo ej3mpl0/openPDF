@@ -10,7 +10,7 @@
 use std::cell::Cell;
 use std::rc::Rc;
 use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::mpsc::{self, Sender};
+use std::sync::mpsc::{self, SyncSender};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
@@ -43,7 +43,9 @@ fn request_pin_blocking(prompt: &str) -> Result<Zeroizing<String>> {
             "PIN must be requested off the GTK thread".into(),
         ));
     }
-    let (tx, rx) = mpsc::channel();
+    // Oneshot: the GTK thread sends exactly one Zeroizing<String> (or
+    // PinCancelled). The worker blocks on recv; the GTK thread does not.
+    let (tx, rx) = mpsc::sync_channel(1);
     let shown = Arc::new(AtomicBool::new(false));
     let flag = shown.clone();
     let prompt = prompt.to_string();
@@ -84,7 +86,7 @@ fn submit_pin(send: &Rc<impl Fn(Result<Zeroizing<String>>)>, entry: &gtk::Passwo
     }
 }
 
-fn present_pin_dialog(prompt: &str, tx: Sender<Result<Zeroizing<String>>>) {
+fn present_pin_dialog(prompt: &str, tx: SyncSender<Result<Zeroizing<String>>>) {
     let sent = Rc::new(Cell::new(false));
     let send = Rc::new(move |value: Result<Zeroizing<String>>| {
         if !sent.replace(true) {
