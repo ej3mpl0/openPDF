@@ -27,6 +27,10 @@ unsafe impl GlobalAlloc for Counting {
 #[global_allocator]
 static A: Counting = Counting;
 
+/// Bytes `memory_usage()` allocates for its walk stack on the test doc.
+#[cfg(target_pointer_width = "64")]
+const EXPECTED_STACK_BYTES: usize = 3304;
+
 #[test]
 fn memory_usage_does_not_allocate_and_scales_with_streams() {
     // ~4 MiB of stream content over 400 pages.
@@ -47,13 +51,18 @@ fn memory_usage_does_not_allocate_and_scales_with_streams() {
     eprintln!("large: file={len} {m:?} allocated_during_call={allocated}");
 
     assert_eq!(m.file_bytes, len);
+    let rebuilt =
+        openpdf_core::DocMemory::new(m.file_bytes, m.object_tree_estimate, m.object_count);
+    assert_eq!(rebuilt, m);
+    assert_eq!(rebuilt.total(), len + m.object_tree_estimate);
     assert!(m.object_tree_estimate >= 4_000_000, "{m:?}");
     assert!(m.object_tree_estimate <= len * 3, "{m:?}");
-    // The only allocation is the walk stack Vec (pointers to pending
-    // objects; grows with the widest dict/array, doubling). 64 KiB is far
-    // above what this document needs and far below its size.
-    assert!(
-        allocated < 64 * 1024,
-        "memory_usage allocated {allocated} bytes"
+    // The only allocation is the walk stack Vec. Its growth is deterministic
+    // for this document (same objects, same push order, Vec doubling), so
+    // the exact byte count is asserted (64-bit layout).
+    #[cfg(target_pointer_width = "64")]
+    assert_eq!(
+        allocated, EXPECTED_STACK_BYTES,
+        "memory_usage allocations changed"
     );
 }

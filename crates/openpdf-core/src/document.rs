@@ -334,7 +334,7 @@ impl Document {
     /// clone or decode, no heap allocation. See [`DocMemory`].
     pub fn memory_usage(&self) -> DocMemory {
         let objects = &self.inner.objects;
-        let est = objects.len() * (MAP_ENTRY_OVERHEAD + std::mem::size_of::<ObjectId>())
+        let est = objects.len() * (BTREE_ENTRY_OVERHEAD + std::mem::size_of::<ObjectId>())
             + objects_heap(objects.values());
         DocMemory {
             file_bytes: self.original.len() as u64,
@@ -537,26 +537,50 @@ pub struct DocMemory {
     /// these bytes, so while bound the process holds them twice; that copy is
     /// PDFium's and is not included.
     pub file_bytes: u64,
-    /// **Estimate** of the lopdf object tree's heap: each object's inline size,
-    /// a fixed per-entry overhead for the object map and for dictionary entries,
-    /// name/string lengths, and the (still encoded) stream content length.
-    /// Allocator slack and BTreeMap node layout are approximated, not measured.
+    /// **Lower bound** on the lopdf object tree's heap. Counts, using `len()`
+    /// only (never `capacity()`): each object's inline size, name/string and
+    /// (still encoded) stream content lengths, a minimal per-entry cost for the
+    /// top-level `BTreeMap` and for each `Dictionary` (an `IndexMap`), and the
+    /// inline key `Vec`. Spare capacity, allocator headers/slack, B-tree node
+    /// padding and hash-table load-factor slack are not counted, so the real
+    /// heap is at least this, usually more.
     pub object_tree_estimate: u64,
     /// Number of indirect objects in the tree.
     pub object_count: u64,
 }
 
 impl DocMemory {
+    /// Builds a value (e.g. for a UI or tests); fields stay public to read.
+    pub fn new(file_bytes: u64, object_tree_estimate: u64, object_count: u64) -> Self {
+        Self {
+            file_bytes,
+            object_tree_estimate,
+            object_count,
+        }
+    }
+
     /// `file_bytes + object_tree_estimate`.
     pub fn total(&self) -> u64 {
         self.file_bytes + self.object_tree_estimate
     }
 }
 
-/// Approximate per-entry cost of a `BTreeMap` (node share + padding).
-const MAP_ENTRY_OVERHEAD: usize = 16;
+/// Minimal per-entry cost in `Document::objects` (`BTreeMap<ObjectId, Object>`)
+/// beyond key and value: an amortised share of node bookkeeping (parent
+/// pointer, lengths, child edges). Assumption, not measured; kept low.
+const BTREE_ENTRY_OVERHEAD: usize = 16;
 
-/// Estimated heap of a set of top-level objects, walked iteratively with an
+/// Minimal per-entry cost of a lopdf `Dictionary` (`IndexMap<Vec<u8>, Object>`)
+/// beyond the key bytes and the `Object`: the entries `Vec` stores a cached
+/// hash (`usize`) and the key `Vec` header next to the value, and the hash
+/// index stores one `usize` slot plus one control byte. Load-factor slack in
+/// the index and spare `Vec` capacity are not counted (lower bound).
+const INDEXMAP_ENTRY_OVERHEAD: usize = std::mem::size_of::<usize>()
+    + std::mem::size_of::<Vec<u8>>()
+    + std::mem::size_of::<usize>()
+    + 1;
+
+/// Lower-bound heap of a set of top-level objects, walked iteratively with an
 /// explicit stack (no recursion, so arbitrarily deep nesting cannot overflow
 /// the thread stack). `Object::Reference`s are counted as leaves and never
 /// followed, so cycles through indirect objects are impossible. The only
@@ -590,7 +614,7 @@ fn objects_heap<'a>(roots: impl Iterator<Item = &'a Object>) -> usize {
             };
             if let Some(d) = dict {
                 for (k, v) in d.iter() {
-                    total += MAP_ENTRY_OVERHEAD + k.len() + std::mem::size_of::<Vec<u8>>();
+                    total += INDEXMAP_ENTRY_OVERHEAD + k.len();
                     stack.push(v);
                 }
             }
