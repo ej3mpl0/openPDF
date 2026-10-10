@@ -330,7 +330,11 @@ impl Document {
         }
     }
 
-    pub(crate) fn original_bytes(&self) -> &[u8] {
+    /// The bytes this document was loaded from (or last saved to), unmodified.
+    ///
+    /// Unlike [`Document::to_bytes`], this never rewrites the file, so it is
+    /// allowed on signed documents and is what signature verification needs.
+    pub fn original_bytes(&self) -> &[u8] {
         &self.original
     }
 
@@ -511,5 +515,24 @@ mod tests {
         assert_eq!(doc.page_count(), 2);
         doc.move_page(0, 2).unwrap();
         assert_eq!(doc.page_count(), 2);
+    }
+
+    #[test]
+    fn original_bytes_of_signed_document_are_untouched() {
+        let plain = std::fs::read(
+            std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../corpus/hello.pdf"),
+        )
+        .unwrap();
+        let signed = crate::signer::append_stub_signature(&plain).unwrap();
+        let path = std::env::temp_dir().join(format!(
+            "openpdf-original-bytes-{}.pdf",
+            std::process::id()
+        ));
+        std::fs::write(&path, &signed).unwrap();
+        let doc = Document::open(&path).unwrap();
+        std::fs::remove_file(&path).ok();
+        assert!(doc.is_signed());
+        assert!(doc.to_bytes().is_err());
+        assert_eq!(doc.original_bytes(), signed.as_slice());
     }
 }
