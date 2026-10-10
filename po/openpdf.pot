@@ -674,3 +674,15 @@ msgstr ""
 
 msgid "Choose a source PDF."
 msgstr ""
+
+msgid "Signing…"
+msgstr ""
+
+msgid "Signing failed"
+msgstr ""
+
+msgid "Verification failed"
+msgstr ""
+
+msgid "PIN must be requested off the GTK thread"
+msgstr ""

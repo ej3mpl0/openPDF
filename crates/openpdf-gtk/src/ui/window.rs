@@ -1,7 +1,9 @@
 // SPDX-License-Identifier: MPL-2.0
 use std::cell::{Cell, RefCell};
+use std::panic::{catch_unwind, AssertUnwindSafe};
 use std::path::Path;
 use std::rc::Rc;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 
 use crate::backend::MockDocument;
@@ -456,7 +458,7 @@ fn add_opened(ctx: &Ctx, opened: Opened) {
                 "Signed document — read-only. Rotate, delete and reorder are disabled.",
             ),
         );
-        maybe_show_verify(&ctx.toast, ctx.verifier.clone(), view.opened());
+        maybe_show_verify(&ctx.toast, ctx.verifier.clone(), view.opened(), lang);
     } else if placeholder {
         show_toast(
             &ctx.toast,
@@ -468,7 +470,12 @@ fn add_opened(ctx: &Ctx, opened: Opened) {
     }
 }
 
-fn maybe_show_verify(overlay: &adw::ToastOverlay, verifier: Arc<dyn Verifier>, opened: &Opened) {
+fn maybe_show_verify(
+    overlay: &adw::ToastOverlay,
+    verifier: Arc<dyn Verifier>,
+    opened: &Opened,
+    lang: crate::Lang,
+) {
     let bytes = match opened.to_bytes() {
         Ok(bytes) => bytes,
         Err(e) => {
@@ -493,7 +500,10 @@ fn maybe_show_verify(overlay: &adw::ToastOverlay, verifier: Arc<dyn Verifier>, o
                 glib::ControlFlow::Break
             }
             Err(std::sync::mpsc::TryRecvError::Empty) => glib::ControlFlow::Continue,
-            Err(std::sync::mpsc::TryRecvError::Disconnected) => glib::ControlFlow::Break,
+            Err(std::sync::mpsc::TryRecvError::Disconnected) => {
+                show_toast(&overlay, t(lang, "Verification failed"));
+                glib::ControlFlow::Break
+            }
         }
     });
 }
@@ -519,20 +529,147 @@ fn start_sign(ctx: &Ctx) {
     let signer = ctx.signer.clone();
     let verifier = ctx.verifier.clone();
     let overlay = ctx.toast.clone();
+    let window = ctx.window.clone();
     sign_ui::present_picker(&ctx.window, &ctx.toast, lang, signer.clone(), move |req| {
-        match sign_ui::try_sign(view.opened(), &req, signer.as_ref()) {
-            Ok(()) => {
-                view.refresh_lock_chrome();
-                show_toast(
-                    &overlay,
-                    t(
-                        lang,
-                        "Signed document — read-only. Rotate, delete and reorder are disabled.",
-                    ),
-                );
-                maybe_show_verify(&overlay, verifier.clone(), view.opened());
+        sign_on_worker(
+            &window,
+            &overlay,
+            lang,
+            view.clone(),
+            signer.clone(),
+            verifier.clone(),
+            req,
+        );
+    });
+}
+
+/// `C_Sign` / `Signer::sign` (and the PIN dialog it may invoke) stay off the
+/// GTK thread. The UI shows a spinner with Cancel and applies the signed
+/// bytes only after the worker returns.
+fn sign_on_worker(
+    parent: &adw::ApplicationWindow,
+    overlay: &adw::ToastOverlay,
+    lang: crate::Lang,
+    view: Rc<DocumentView>,
+    signer: Arc<dyn Signer>,
+    verifier: Arc<dyn Verifier>,
+    req: openpdf_core::SignRequest,
+) {
+    if view.opened().is_placeholder() {
+        view.opened().lock_after_sign();
+        view.refresh_lock_chrome();
+        show_toast(
+            overlay,
+            t(
+                lang,
+                "Signed document — read-only. Rotate, delete and reorder are disabled.",
+            ),
+        );
+        return;
+    }
+    let bytes = match view.opened().bytes_for_sign() {
+        Ok(bytes) => bytes,
+        Err(e) => {
+            show_toast(overlay, &e.to_string());
+            return;
+        }
+    };
+
+    let win = adw::Window::new();
+    win.set_transient_for(Some(parent));
+    win.set_modal(true);
+    win.set_default_size(360, 200);
+    win.set_title(Some(t(lang, "Signing…")));
+
+    let header = adw::HeaderBar::new();
+    let toolbar = adw::ToolbarView::new();
+    toolbar.add_top_bar(&header);
+    let spinner = gtk::Spinner::new();
+    spinner.start();
+    let status = adw::StatusPage::new();
+    status.set_icon_name(Some("dialog-password-symbolic"));
+    status.set_title(t(lang, "Signing…"));
+    status.set_description(Some(t(
+        lang,
+        "Choose a signing certificate. The token will ask for the PIN if needed.",
+    )));
+    status.set_child(Some(&spinner));
+    toolbar.set_content(Some(&status));
+    win.set_content(Some(&toolbar));
+
+    let cancelled = Arc::new(AtomicBool::new(false));
+    let cancel = gtk::Button::with_label(t(lang, "Cancel"));
+    cancel.add_css_class("flat");
+    header.pack_start(&cancel);
+    cancel.connect_clicked({
+        let win = win.clone();
+        let cancelled = cancelled.clone();
+        move |_| {
+            cancelled.store(true, Ordering::SeqCst);
+            win.close();
+        }
+    });
+    win.connect_close_request({
+        let cancelled = cancelled.clone();
+        move |_| {
+            cancelled.store(true, Ordering::SeqCst);
+            gtk::glib::Propagation::Proceed
+        }
+    });
+    win.present();
+
+    let (tx, rx) = std::sync::mpsc::channel();
+    std::thread::spawn(move || {
+        let result = catch_unwind(AssertUnwindSafe(|| signer.sign(&bytes, &req)));
+        let _ = tx.send(result);
+    });
+
+    let overlay = overlay.clone();
+    glib::timeout_add_local(std::time::Duration::from_millis(16), move || {
+        match rx.try_recv() {
+            Ok(Ok(Ok(signed))) => {
+                win.close();
+                if cancelled.load(Ordering::SeqCst) {
+                    return glib::ControlFlow::Break;
+                }
+                match view.opened().apply_signed_bytes(signed) {
+                    Ok(()) => {
+                        view.refresh_lock_chrome();
+                        show_toast(
+                            &overlay,
+                            t(
+                                lang,
+                                "Signed document — read-only. Rotate, delete and reorder are disabled.",
+                            ),
+                        );
+                        maybe_show_verify(&overlay, verifier.clone(), view.opened(), lang);
+                    }
+                    Err(e) => show_toast(&overlay, &e.to_string()),
+                }
+                glib::ControlFlow::Break
             }
-            Err(e) => show_toast(&overlay, &e),
+            Ok(Ok(Err(e))) => {
+                win.close();
+                if !cancelled.load(Ordering::SeqCst) {
+                    show_toast(&overlay, &format_core_error(&e));
+                }
+                glib::ControlFlow::Break
+            }
+            Ok(Err(_)) => {
+                win.close();
+                if !cancelled.load(Ordering::SeqCst) {
+                    show_toast(&overlay, t(lang, "Signing failed"));
+                }
+                glib::ControlFlow::Break
+            }
+            Err(std::sync::mpsc::TryRecvError::Empty) => glib::ControlFlow::Continue,
+            Err(std::sync::mpsc::TryRecvError::Disconnected) => {
+                win.close();
+                if !cancelled.load(Ordering::SeqCst) {
+                    show_toast(&overlay, t(lang, "Signing failed"));
+                }
+                glib::ControlFlow::Break
+            }
         }
     });
 }

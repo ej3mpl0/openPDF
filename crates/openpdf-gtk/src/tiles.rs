@@ -254,6 +254,69 @@ impl TileCache {
     }
 }
 
+/// Place a tile onto a page-sized RGBA buffer at the same origin the GTK
+/// draw func uses: `tx * tile_size`, `ty * tile_size`.
+pub fn place_tile_rgba(
+    dest: &mut [u8],
+    dest_w: u32,
+    dest_h: u32,
+    src: &[u8],
+    src_w: u32,
+    src_h: u32,
+    tx: u32,
+    ty: u32,
+    tile_size: u32,
+) {
+    let x0 = (tx.saturating_mul(tile_size)) as usize;
+    let y0 = (ty.saturating_mul(tile_size)) as usize;
+    let dw = dest_w as usize;
+    let dh = dest_h as usize;
+    let sw = src_w as usize;
+    let sh = src_h as usize;
+    if dw == 0 || dest.len() < dw * dh * 4 || src.len() < sw * sh * 4 {
+        return;
+    }
+    for row in 0..sh {
+        let dy = y0 + row;
+        if dy >= dh {
+            break;
+        }
+        let dest_off = (dy * dw + x0) * 4;
+        let src_off = row * sw * 4;
+        let cols = sw.min(dw.saturating_sub(x0));
+        dest[dest_off..dest_off + cols * 4].copy_from_slice(&src[src_off..src_off + cols * 4]);
+    }
+}
+
+/// Largest per-channel absolute difference. Used by the tiles-vs-full test.
+pub fn max_channel_delta(a: &[u8], b: &[u8]) -> u8 {
+    a.iter()
+        .zip(b)
+        .map(|(x, y)| x.abs_diff(*y))
+        .max()
+        .unwrap_or(0)
+}
+
+/// Fraction of pixels (RGBA tuples) whose any-channel delta exceeds `tol`.
+pub fn pixel_mismatch_ratio(a: &[u8], b: &[u8], tol: u8) -> f64 {
+    let n = a.len().min(b.len()) / 4;
+    if n == 0 {
+        return 1.0;
+    }
+    let mut bad = 0usize;
+    for i in 0..n {
+        let o = i * 4;
+        if a[o].abs_diff(b[o]) > tol
+            || a[o + 1].abs_diff(b[o + 1]) > tol
+            || a[o + 2].abs_diff(b[o + 2]) > tol
+            || a[o + 3].abs_diff(b[o + 3]) > tol
+        {
+            bad += 1;
+        }
+    }
+    bad as f64 / n as f64
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -311,5 +374,92 @@ mod tests {
         let p = k.preview();
         assert!(p.zoom_milli < k.zoom_milli);
         assert_eq!(p.tx, 1);
+    }
+
+    #[test]
+    fn place_tile_rgba_uses_tx_ty_offset() {
+        let mut dest = vec![0u8; 8 * 4 * 4];
+        let tile = vec![
+            255u8, 0, 0, 255, 0, 255, 0, 255, 0, 0, 255, 255, 255, 255, 0, 255,
+        ];
+        place_tile_rgba(&mut dest, 8, 4, &tile, 2, 2, 1, 1, 2);
+        // Tile (1,1) at tile_size 2 starts at (2, 2).
+        let i = (2 * 8 + 2) * 4;
+        assert_eq!(&dest[i..i + 4], &[255, 0, 0, 255]);
+        assert_eq!(&dest[0..4], &[0, 0, 0, 0]);
+    }
+
+    #[test]
+    fn tiny_thumb_viewport_misses_later_pages() {
+        let sizes = vec![a4(); 8];
+        let zoom = 132.0 / 595.0;
+        let layout = layout_continuous(&sizes, zoom, 156.0, 10.0, 10.0);
+        assert_eq!(layout.pages.len(), 8);
+        let tiny = visible_tiles(&layout, 0.0, 0.0, 156.0, 1.0, zoom, 256, 0);
+        let all = visible_tiles(
+            &layout,
+            0.0,
+            0.0,
+            156.0,
+            layout.content_height,
+            zoom,
+            256,
+            0,
+        );
+        assert!(
+            tiny.iter().map(|k| k.page).max().unwrap_or(0) < 7,
+            "a 1 px viewport must not be used for thumbs or only page 1 appears"
+        );
+        assert_eq!(all.iter().map(|k| k.page).max(), Some(7));
+        assert_eq!(all.len(), 8);
+    }
+
+    #[test]
+    fn mock_tiles_at_147_percent_are_distinct_and_offset() {
+        use crate::backend::{DocumentBackend, MockDocument, TileRequest};
+        let zoom = 1.47;
+        let tile = 256u32;
+        let doc = MockDocument::sample(1);
+        let size = doc.page_size(0).unwrap();
+        let (pw, ph) = page_pixel_size(size, zoom);
+        let (cols, rows) = tile_grid(pw, ph, tile);
+        assert!(cols >= 2 && rows >= 2, "147% page must need several tiles");
+        let origin = doc
+            .render_tile(TileRequest {
+                page: 0,
+                zoom,
+                tx: 0,
+                ty: 0,
+                tile_size: tile,
+            })
+            .unwrap();
+        let right = doc
+            .render_tile(TileRequest {
+                page: 0,
+                zoom,
+                tx: 1,
+                ty: 0,
+                tile_size: tile,
+            })
+            .unwrap();
+        assert_ne!(
+            origin.pixels, right.pixels,
+            "column 1 must not reprint the page origin (tile x offset applied)"
+        );
+        let mut dest = vec![0u8; pw as usize * ph as usize * 4];
+        place_tile_rgba(
+            &mut dest,
+            pw,
+            ph,
+            &right.pixels,
+            right.width,
+            right.height,
+            1,
+            0,
+            tile,
+        );
+        let i = tile as usize * 4;
+        assert_eq!(&dest[i..i + 4], &right.pixels[..4]);
+        assert_eq!(&dest[0..4], &[0, 0, 0, 0]);
     }
 }

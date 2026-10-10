@@ -174,12 +174,19 @@ impl DocumentView {
         let area = self.pages_area.clone();
         let spins = Rc::new(Cell::new(0u32));
         glib::idle_add_local_full(glib::Priority::HIGH, move || {
-            if doc.poll_one() {
+            // Ingest at most the first tile, then wait for it to paint.
+            // Polling the rest here would coalesce queue_draw with later tiles.
+            if crate::measure::ui_first_tile_painted_ms() > 0 {
+                return glib::ControlFlow::Break;
+            }
+            if crate::measure::ui_first_tile_rendered_ms() == 0 && doc.poll_one() {
+                area.queue_draw();
+            } else if crate::measure::ui_first_tile_rendered_ms() > 0 {
                 area.queue_draw();
             }
             let n = spins.get() + 1;
             spins.set(n);
-            if crate::measure::ui_first_tile_rendered_ms() > 0 || n > 120 {
+            if crate::measure::ui_first_tile_painted_ms() > 0 || n > 120 {
                 glib::ControlFlow::Break
             } else {
                 glib::ControlFlow::Continue
@@ -293,8 +300,12 @@ impl DocumentView {
         *self.shared.layout.borrow_mut() = layout;
 
         let thumb_zoom = THUMB_WIDTH / sizes[0].width;
-        *self.shared.thumb_layout.borrow_mut() =
-            layout_continuous(&sizes, thumb_zoom, THUMB_WIDTH + 24.0, 10.0, 10.0);
+        let thumbs = layout_continuous(&sizes, thumb_zoom, THUMB_WIDTH + 24.0, 10.0, 10.0);
+        self.thumbs_area
+            .set_content_width(thumbs.content_width.ceil() as i32);
+        self.thumbs_area
+            .set_content_height(thumbs.content_height.ceil() as i32);
+        *self.shared.thumb_layout.borrow_mut() = thumbs;
         self.pages_area.queue_draw();
         self.thumbs_area.queue_draw();
         self.update_chrome();
@@ -378,6 +389,8 @@ pub fn build(doc: Rc<Opened>, settings: &Settings, lang: Lang) -> Rc<DocumentVie
     let thumbs_scroll = gtk::ScrolledWindow::new();
     thumbs_scroll.set_policy(gtk::PolicyType::Never, gtk::PolicyType::Automatic);
     thumbs_scroll.set_min_content_width((THUMB_WIDTH + 28.0) as i32);
+    thumbs_scroll.set_min_content_height(240);
+    thumbs_scroll.set_vexpand(true);
     thumbs_scroll.set_child(Some(&thumbs_area));
 
     let sidebar = gtk::Box::new(gtk::Orientation::Vertical, 0);
@@ -564,13 +577,21 @@ fn schedule_tile_pump(view: Rc<DocumentView>) {
             glib::Priority::HIGH,
             clone!(@strong view => move || {
                 let first_painted = crate::measure::ui_first_tile_painted_ms() > 0;
+                let first_rendered = crate::measure::ui_first_tile_rendered_ms() > 0;
+                // Hold the rest of the queue until the first tile is painted.
+                if !first_painted && first_rendered {
+                    view.pages_area.queue_draw();
+                    let again = view.clone();
+                    glib::timeout_add_local_once(
+                        std::time::Duration::from_millis(1),
+                        move || tick(again),
+                    );
+                    return glib::ControlFlow::Break;
+                }
                 if view.shared.doc.poll_one() {
                     view.pages_area.queue_draw();
                     view.thumbs_area.queue_draw();
                     let again = view.clone();
-                    // After the first tile, yield so GTK can paint it before
-                    // the rest of the queue is ingested. That keeps
-                    // ui_first_tile clearly below ui_all_visible.
                     let wait = if first_painted {
                         std::time::Duration::ZERO
                     } else {
@@ -675,20 +696,29 @@ fn page_tile_keys(view: &DocumentView) -> Vec<TileKey> {
 }
 
 fn thumb_tile_keys(view: &DocumentView) -> Vec<TileKey> {
+    let layout = view.shared.thumb_layout.borrow();
     let vadj = view.thumbs_scroll.vadjustment();
-    let view_y = vadj.value();
-    let view_h = vadj.page_size().max(1.0);
+    let allocated = vadj.page_size().max(view.thumbs_scroll.height() as f64);
+    // Before the strip is allocated (first frames / Xvfb) `page_size` is 0, so
+    // a 1 px viewport would request only page 1 and the rest never appear.
+    let cover_all = layout.pages.len() <= 32 || allocated < 32.0;
+    let view_y = if cover_all { 0.0 } else { vadj.value() };
+    let view_h = if cover_all {
+        layout.content_height.max(1.0)
+    } else {
+        allocated.max(1.0)
+    };
     let sizes = view.shared.doc.pages();
     let zoom = sizes.first().map(|s| THUMB_WIDTH / s.width).unwrap_or(0.2);
     visible_tiles(
-        &view.shared.thumb_layout.borrow(),
+        &layout,
         0.0,
         view_y,
         THUMB_WIDTH + 24.0,
         view_h,
         zoom,
         view.shared.tile_size.get(),
-        0,
+        1,
     )
 }
 
@@ -791,6 +821,37 @@ fn maybe_mark_startup(view: &DocumentView) {
     }
 }
 
+/// Convert unpremultiplied RGBA8 to cairo ARgb32 (BGRA on little-endian).
+///
+/// Do not cache this by the source pointer: the tile cache recycles `Vec`
+/// allocations, so a later tile can reuse the first tile's address and every
+/// column would stamp the same pixels (`openPDF sample - paF sample - pa`).
+fn rgba_to_cairo_argb(rgba: &[u8], width: u32, height: u32) -> Option<(Vec<u8>, i32)> {
+    let w = width as i32;
+    let h = height as i32;
+    if w <= 0 || h <= 0 {
+        return None;
+    }
+    let stride = cairo::Format::ARgb32.stride_for_width(width).ok()?;
+    let mut data = vec![0u8; stride as usize * h as usize];
+    let src_stride = width as usize * 4;
+    for (dest_row, src_row) in data
+        .chunks_mut(stride as usize)
+        .zip(rgba.chunks_exact(src_stride))
+        .take(height as usize)
+    {
+        let (dest_px, _) = dest_row.as_chunks_mut::<4>();
+        let (src_px, _) = src_row.as_chunks::<4>();
+        for (dest, src) in dest_px.iter_mut().zip(src_px) {
+            dest[0] = src[2];
+            dest[1] = src[1];
+            dest[2] = src[0];
+            dest[3] = src[3];
+        }
+    }
+    Some((data, stride))
+}
+
 fn paint_rgba(
     cr: &cairo::Context,
     x: f64,
@@ -800,51 +861,16 @@ fn paint_rgba(
     rgba: &[u8],
     real_page_tile: bool,
 ) {
-    let w = width as i32;
-    let h = height as i32;
-    if w <= 0 || h <= 0 {
-        return;
-    }
-    let Ok(stride) = cairo::Format::ARgb32.stride_for_width(width) else {
+    let Some((data, stride)) = rgba_to_cairo_argb(rgba, width, height) else {
         return;
     };
-    // Last-tile BGRA cache: cairo wants ARgb32 (BGRA on LE). Convert once per
-    // unique buffer instead of on every expose. DrawingArea has no MemoryTexture
-    // snapshot path; this is the cheap equivalent of uploading once.
-    thread_local! {
-        static LAST: std::cell::RefCell<Option<(usize, usize, Vec<u8>)>> =
-            std::cell::RefCell::new(None);
-    }
-    let key = (rgba.as_ptr() as usize, rgba.len());
-    let data = LAST.with(|slot| {
-        let mut slot = slot.borrow_mut();
-        if let Some((k, len, cached)) = slot.as_ref() {
-            if *k == key.0 && *len == key.1 {
-                return cached.clone();
-            }
-        }
-        let mut data = vec![0u8; stride as usize * h as usize];
-        let src_stride = width as usize * 4;
-        for (dest_row, src_row) in data
-            .chunks_mut(stride as usize)
-            .zip(rgba.chunks_exact(src_stride))
-            .take(height as usize)
-        {
-            let (dest_px, _) = dest_row.as_chunks_mut::<4>();
-            let (src_px, _) = src_row.as_chunks::<4>();
-            for (dest, src) in dest_px.iter_mut().zip(src_px) {
-                dest[0] = src[2];
-                dest[1] = src[1];
-                dest[2] = src[0];
-                dest[3] = src[3];
-            }
-        }
-        *slot = Some((key.0, key.1, data.clone()));
-        data
-    });
-    if let Ok(surface) =
-        cairo::ImageSurface::create_for_data(data, cairo::Format::ARgb32, w, h, stride)
-    {
+    if let Ok(surface) = cairo::ImageSurface::create_for_data(
+        data,
+        cairo::Format::ARgb32,
+        width as i32,
+        height as i32,
+        stride,
+    ) {
         crate::measure::mark_first_surface_ready();
         let _ = cr.set_source_surface(&surface, x, y);
         let _ = cr.paint();
