@@ -716,3 +716,27 @@ msgstr "Se guarda una copia firmada. El original no se modifica."
 
 msgid "Certificates stay on this computer. openPDF does not send them anywhere."
 msgstr "Los certificados se quedan en este equipo. openPDF no los envía a ninguna parte."
+
+msgid "{level} signatures are not supported yet"
+msgstr "las firmas {level} todavía no están soportadas"
+
+msgid "Signing was cancelled"
+msgstr "Se canceló la firma"
+
+msgid "Reason"
+msgstr "Motivo"
+
+msgid "Location"
+msgstr "Lugar"
+
+msgid "Signature level"
+msgstr "Nivel de firma"
+
+msgid "Basic signature without a timestamp."
+msgstr "Firma básica sin sello de tiempo."
+
+msgid "Signature timestamp from a TSA."
+msgstr "Sello de tiempo de un TSA."
+
+msgid "PAdES-B-T needs a timestamp server (TSA). Not available yet."
+msgstr "PAdES-B-T necesita un servidor de sello de tiempo (TSA). Aún no está disponible."

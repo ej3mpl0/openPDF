@@ -710,3 +710,27 @@ msgstr ""
 
 msgid "Certificates stay on this computer. openPDF does not send them anywhere."
 msgstr ""
+
+msgid "{level} signatures are not supported yet"
+msgstr ""
+
+msgid "Signing was cancelled"
+msgstr ""
+
+msgid "Reason"
+msgstr ""
+
+msgid "Location"
+msgstr ""
+
+msgid "Signature level"
+msgstr ""
+
+msgid "Basic signature without a timestamp."
+msgstr ""
+
+msgid "Signature timestamp from a TSA."
+msgstr ""
+
+msgid "PAdES-B-T needs a timestamp server (TSA). Not available yet."
+msgstr ""

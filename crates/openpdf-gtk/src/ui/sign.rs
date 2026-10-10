@@ -5,14 +5,16 @@ use std::sync::Arc;
 
 use crate::i18n::{format_core_error, t};
 use crate::sign::{
-    certificate_can_sign, certificate_common_name, describe_certificate_detail, sign_request_for,
+    build_sign_request, certificate_can_sign, certificate_common_name, describe_certificate_detail,
 };
 use crate::Lang;
 use adw::prelude::*;
 use gtk::glib;
 use gtk4 as gtk;
 use libadwaita as adw;
-use openpdf_core::{CertificateInfo, Error, SignRequest, Signer, SignerUnavailableReason};
+use openpdf_core::{
+    CancelToken, CertificateInfo, Error, PadesLevel, SignRequest, Signer, SignerUnavailableReason,
+};
 
 use super::show_toast;
 
@@ -174,6 +176,46 @@ fn show_certificate_list(
         list.append(&row);
     }
 
+    let fields = adw::PreferencesGroup::new();
+    fields.set_margin_start(8);
+    fields.set_margin_end(8);
+    let reason = adw::EntryRow::new();
+    reason.set_title(t(lang, "Reason"));
+    let location = adw::EntryRow::new();
+    location.set_title(t(lang, "Location"));
+    fields.add(&reason);
+    fields.add(&location);
+
+    let levels = adw::PreferencesGroup::new();
+    levels.set_title(t(lang, "Signature level"));
+    levels.set_margin_start(8);
+    levels.set_margin_end(8);
+    let bb = adw::ActionRow::new();
+    bb.set_title(PadesLevel::BB.label());
+    bb.set_subtitle(t(lang, "Basic signature without a timestamp."));
+    let bb_radio = gtk::CheckButton::new();
+    bb_radio.set_active(true);
+    bb.add_prefix(&bb_radio);
+    bb.set_activatable(true);
+    let bb_for_row = bb_radio.clone();
+    bb.connect_activated(move |_| {
+        bb_for_row.set_active(true);
+    });
+    let bt = adw::ActionRow::new();
+    bt.set_title(PadesLevel::BT.label());
+    bt.set_subtitle(t(lang, "Signature timestamp from a TSA."));
+    bt.set_sensitive(false);
+    bt.set_tooltip_text(Some(t(
+        lang,
+        "PAdES-B-T needs a timestamp server (TSA). Not available yet.",
+    )));
+    let bt_radio = gtk::CheckButton::new();
+    bt_radio.set_group(Some(&bb_radio));
+    bt_radio.set_sensitive(false);
+    bt.add_prefix(&bt_radio);
+    levels.add(&bb);
+    levels.add(&bt);
+
     let copy_note = gtk::Label::new(Some(t(
         lang,
         "A signed copy is saved. The original is not modified.",
@@ -199,9 +241,25 @@ fn show_certificate_list(
     sign_btn.add_css_class("pill");
     let win_sign = win.clone();
     let selected_sign = selected.clone();
+    let reason_sign = reason.clone();
+    let location_sign = location.clone();
     sign_btn.connect_clicked(move |_| {
         if let Some(id) = selected_sign.borrow().clone() {
-            on_pick(sign_request_for(id));
+            let token = CancelToken::new();
+            // B-T stays insensitive until a TSA exists. Never rewrite a chosen
+            // level to B-B — if it were selected, the signer would refuse it.
+            let level = if bt_radio.is_active() {
+                PadesLevel::BT
+            } else {
+                PadesLevel::BB
+            };
+            on_pick(build_sign_request(
+                id,
+                &reason_sign.text(),
+                &location_sign.text(),
+                level,
+                token,
+            ));
             win_sign.close();
         }
     });
@@ -213,6 +271,8 @@ fn show_certificate_list(
     col.append(&note);
     col.append(&pin_note);
     col.append(&list);
+    col.append(&fields);
+    col.append(&levels);
     col.append(&copy_note);
     col.append(&footer);
     let scroll = gtk::ScrolledWindow::new();

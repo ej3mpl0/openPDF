@@ -51,7 +51,7 @@ pub use render::{
 };
 pub use signer::{
     certificate_common_name, describe_certificate, describe_certificate_detail,
-    format_verify_result, format_verify_results, pin_prompt_text, usage_label, CertificateInfo,
-    CertificateUsage, CertificateValidity, SignRequest, SignatureInfo, Signer, Verifier,
-    VisibleAppearance,
+    format_verify_result, format_verify_results, pin_prompt_text, usage_label, CancelToken,
+    CertificateInfo, CertificateUsage, CertificateValidity, PadesLevel, SignRequest, SignatureInfo,
+    Signer, Verifier, VisibleAppearance, CANCEL_NOTICE,
 };
