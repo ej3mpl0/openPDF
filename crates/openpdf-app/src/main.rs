@@ -25,6 +25,10 @@ impl Verifier for PdfVerifier {
 /// is the only place that links both. If no PKCS#11 module is installed,
 /// signing is unavailable and the reader still starts. The UI verifies
 /// through [`PdfVerifier`], not through this signer.
+fn pkcs11_module_hint() -> String {
+    std::env::var("OPENPDF_PKCS11_MODULE").unwrap_or_default()
+}
+
 fn try_load_signer() -> Result<Arc<dyn Signer>> {
     match Pkcs11Signer::new(Pkcs11Config::default(), GtkPinProvider) {
         Ok(signer) => Ok(Arc::new(signer)),
@@ -32,8 +36,11 @@ fn try_load_signer() -> Result<Arc<dyn Signer>> {
             eprintln!("openpdf-gtk: {err}");
             match err {
                 Error::SignerUnavailable { .. } => Err(err),
-                _ => Err(Error::signer_unavailable(
-                    SignerUnavailableReason::LoadFailed,
+                Error::Sign(detail) => Err(Error::signer_unavailable(
+                    SignerUnavailableReason::load_failed(pkcs11_module_hint(), detail),
+                )),
+                other => Err(Error::signer_unavailable(
+                    SignerUnavailableReason::load_failed(pkcs11_module_hint(), other.to_string()),
                 )),
             }
         }

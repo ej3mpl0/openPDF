@@ -66,7 +66,7 @@ pub fn present_picker(
                     &overlay,
                     lang,
                     &format_core_error(&Error::signer_unavailable(
-                        SignerUnavailableReason::LoadFailed,
+                        SignerUnavailableReason::load_failed("", "certificate list channel closed"),
                     )),
                 );
                 glib::ControlFlow::Break

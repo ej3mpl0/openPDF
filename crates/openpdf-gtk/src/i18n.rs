@@ -236,6 +236,14 @@ mod tests {
         );
         assert_ne!(format_core_error(&err), "PKCS#11 module not available");
         set_locale("en");
+        let load = Error::signer_unavailable(openpdf_core::SignerUnavailableReason::load_failed(
+            "/usr/lib/softhsm/libsofthsm2.so",
+            "libfoo.so: cannot open shared object file",
+        ));
+        assert_eq!(
+            format_core_error(&load),
+            "Could not load the PKCS#11 module /usr/lib/softhsm/libsofthsm2.so: libfoo.so: cannot open shared object file"
+        );
         assert_eq!(
             format_core_error(&Error::PinCancelled),
             "PIN entry was cancelled"
