@@ -1,5 +1,6 @@
 use std::collections::HashMap;
 use std::path::Path;
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::mpsc::{self, Receiver, RecvTimeoutError, Sender};
 use std::sync::{Arc, Mutex, OnceLock};
 use std::thread;
@@ -15,6 +16,17 @@ use super::pdfium::{self as pdfium_bind};
 use super::queue::RenderQueue;
 use super::{Raster, SearchHit, Tile, TileEvent, TileKey, TileRequest, DEFAULT_CACHE_BYTES};
 
+type EngineId = u64;
+
+static NEXT_ENGINE_ID: AtomicU64 = AtomicU64::new(1);
+
+/// Per-engine queue and event channel on the shared render thread, so
+/// engines never see or cancel each other's tiles.
+struct EngineSlot {
+    queue: RenderQueue,
+    events: Sender<TileEvent>,
+}
+
 enum WorkerCmd {
     Bind {
         id: DocumentId,
@@ -24,17 +36,29 @@ enum WorkerCmd {
     Unbind {
         id: DocumentId,
     },
+    Register {
+        engine: EngineId,
+        events: Sender<TileEvent>,
+    },
+    Unregister {
+        engine: EngineId,
+    },
     Request {
+        engine: EngineId,
         reqs: Vec<TileRequest>,
     },
     Cancel {
+        engine: EngineId,
         keys: Vec<TileKey>,
     },
     CancelExcept {
+        engine: EngineId,
         doc: DocumentId,
         keep: Vec<TileKey>,
     },
-    Bump,
+    Bump {
+        engine: EngineId,
+    },
     Text {
         id: DocumentId,
         page: u32,
@@ -59,8 +83,6 @@ enum WorkerCmd {
 
 struct WorkerHandle {
     cmd: Sender<WorkerCmd>,
-    events: Mutex<Receiver<TileEvent>>,
-    event_tx: Sender<TileEvent>,
     cache: Arc<Mutex<TileCache>>,
 }
 
@@ -76,22 +98,15 @@ fn worker() -> Result<&'static WorkerHandle> {
 fn start_worker(bundled: Option<&Path>) -> Result<WorkerHandle> {
     let pdfium = pdfium_bind::bind_pdfium(bundled)?;
     let (cmd_tx, cmd_rx) = mpsc::channel();
-    let (event_tx, event_rx) = mpsc::channel();
     let cache = Arc::new(Mutex::new(TileCache::new(DEFAULT_CACHE_BYTES)));
     let cache_thread = Arc::clone(&cache);
-    let event_tx_thread = event_tx.clone();
 
     thread::Builder::new()
         .name("openpdf-render".into())
-        .spawn(move || worker_loop(pdfium, cmd_rx, event_tx_thread, cache_thread))
+        .spawn(move || worker_loop(pdfium, cmd_rx, cache_thread))
         .map_err(|e| Error::pdfium(e.to_string()))?;
 
-    Ok(WorkerHandle {
-        cmd: cmd_tx,
-        events: Mutex::new(event_rx),
-        event_tx,
-        cache,
-    })
+    Ok(WorkerHandle { cmd: cmd_tx, cache })
 }
 
 struct BoundDoc {
@@ -108,29 +123,51 @@ fn load_bound(pdfium: &Pdfium, bytes: Vec<u8>) -> Result<BoundDoc> {
     Ok(BoundDoc { doc })
 }
 
-fn worker_loop(
-    pdfium: Pdfium,
-    cmd_rx: Receiver<WorkerCmd>,
-    event_tx: Sender<TileEvent>,
-    cache: Arc<Mutex<TileCache>>,
-) {
+fn worker_loop(pdfium: Pdfium, cmd_rx: Receiver<WorkerCmd>, cache: Arc<Mutex<TileCache>>) {
     let mut docs: HashMap<DocumentId, BoundDoc> = HashMap::new();
-    let mut queue = RenderQueue::new();
+    let mut engines: HashMap<EngineId, EngineSlot> = HashMap::new();
+    let mut order: Vec<EngineId> = Vec::new();
+    let mut next = 0usize;
 
     loop {
         while let Ok(cmd) = cmd_rx.try_recv() {
-            if !handle_cmd(&pdfium, cmd, &mut docs, &mut queue, &event_tx, &cache) {
+            if !handle_cmd(&pdfium, cmd, &mut docs, &mut engines, &cache) {
                 return;
             }
         }
 
-        if let Some((key, _pri, gen)) = queue.pop() {
-            if queue.is_cancelled(&key, gen) {
-                let _ = event_tx.send(TileEvent::Cancelled(key));
+        order.clear();
+        order.extend(engines.keys().copied());
+        order.sort_unstable();
+        let mut job = None;
+        for i in 0..order.len() {
+            let id = order[(next + i) % order.len()];
+            if let Some(slot) = engines.get_mut(&id) {
+                if let Some(popped) = slot.queue.pop() {
+                    next = (next + i + 1) % order.len();
+                    job = Some((id, popped));
+                    break;
+                }
+            }
+        }
+
+        if let Some((engine, (key, _pri, gen))) = job {
+            let cancelled = |engines: &HashMap<EngineId, EngineSlot>| {
+                engines
+                    .get(&engine)
+                    .is_none_or(|slot| slot.queue.is_cancelled(&key, gen))
+            };
+            let send = |engines: &HashMap<EngineId, EngineSlot>, ev: TileEvent| {
+                if let Some(slot) = engines.get(&engine) {
+                    let _ = slot.events.send(ev);
+                }
+            };
+            if cancelled(&engines) {
+                send(&engines, TileEvent::Cancelled(key));
                 continue;
             }
             if let Some(hit) = cache.lock().ok().and_then(|mut c| c.get(&key)) {
-                let _ = event_tx.send(TileEvent::Ready(hit));
+                send(&engines, TileEvent::Ready(hit));
                 continue;
             }
             let result = match docs.get(&key.doc) {
@@ -150,8 +187,14 @@ fn worker_loop(
                 }),
                 None => Err(Error::invalid(InvalidKind::DocumentNotBound)),
             };
-            if queue.is_cancelled(&key, gen) {
-                let _ = event_tx.send(TileEvent::Cancelled(key));
+            // Commands that arrived while rendering (cancel, new frame) apply first.
+            while let Ok(cmd) = cmd_rx.try_recv() {
+                if !handle_cmd(&pdfium, cmd, &mut docs, &mut engines, &cache) {
+                    return;
+                }
+            }
+            if cancelled(&engines) {
+                send(&engines, TileEvent::Cancelled(key));
                 continue;
             }
             match result {
@@ -160,21 +203,22 @@ fn worker_loop(
                     if let Ok(mut c) = cache.lock() {
                         c.insert(Arc::clone(&tile));
                     }
-                    let _ = event_tx.send(TileEvent::Ready(tile));
+                    send(&engines, TileEvent::Ready(tile));
                 }
-                Err(e) => {
-                    let _ = event_tx.send(TileEvent::Failed {
+                Err(e) => send(
+                    &engines,
+                    TileEvent::Failed {
                         key,
                         message: e.to_string(),
-                    });
-                }
+                    },
+                ),
             }
             continue;
         }
 
         match cmd_rx.recv_timeout(Duration::from_millis(50)) {
             Ok(cmd) => {
-                if !handle_cmd(&pdfium, cmd, &mut docs, &mut queue, &event_tx, &cache) {
+                if !handle_cmd(&pdfium, cmd, &mut docs, &mut engines, &cache) {
                     return;
                 }
             }
@@ -188,8 +232,7 @@ fn handle_cmd(
     pdfium: &Pdfium,
     cmd: WorkerCmd,
     docs: &mut HashMap<DocumentId, BoundDoc>,
-    queue: &mut RenderQueue,
-    event_tx: &Sender<TileEvent>,
+    engines: &mut HashMap<EngineId, EngineSlot>,
     cache: &Arc<Mutex<TileCache>>,
 ) -> bool {
     match cmd {
@@ -208,26 +251,46 @@ fn handle_cmd(
                 c.invalidate_doc(id);
             }
         }
-        WorkerCmd::Request { reqs } => {
-            for req in reqs {
-                if let Some(hit) = cache.lock().ok().and_then(|mut c| c.get(&req.key)) {
-                    let _ = event_tx.send(TileEvent::Ready(hit));
-                    continue;
+        WorkerCmd::Register { engine, events } => {
+            engines.insert(
+                engine,
+                EngineSlot {
+                    queue: RenderQueue::new(),
+                    events,
+                },
+            );
+        }
+        WorkerCmd::Unregister { engine } => {
+            engines.remove(&engine);
+        }
+        WorkerCmd::Request { engine, reqs } => {
+            if let Some(slot) = engines.get_mut(&engine) {
+                for req in reqs {
+                    if let Some(hit) = cache.lock().ok().and_then(|mut c| c.get(&req.key)) {
+                        let _ = slot.events.send(TileEvent::Ready(hit));
+                        continue;
+                    }
+                    slot.queue.push(req.key, req.priority);
                 }
-                queue.push(req.key, req.priority);
             }
         }
-        WorkerCmd::Cancel { keys } => {
-            for key in keys {
-                queue.cancel(key);
+        WorkerCmd::Cancel { engine, keys } => {
+            if let Some(slot) = engines.get_mut(&engine) {
+                for key in keys {
+                    slot.queue.cancel(key);
+                }
             }
         }
-        WorkerCmd::CancelExcept { doc, keep } => {
-            let keep: Vec<TileKey> = keep.into_iter().filter(|k| k.doc == doc).collect();
-            queue.cancel_except(&keep);
+        WorkerCmd::CancelExcept { engine, doc, keep } => {
+            if let Some(slot) = engines.get_mut(&engine) {
+                let keep: Vec<TileKey> = keep.into_iter().filter(|k| k.doc == doc).collect();
+                slot.queue.cancel_except(&keep);
+            }
         }
-        WorkerCmd::Bump => {
-            queue.bump_generation();
+        WorkerCmd::Bump { engine } => {
+            if let Some(slot) = engines.get_mut(&engine) {
+                slot.queue.bump_generation();
+            }
         }
         WorkerCmd::Text { id, page, reply } => {
             let result = match docs.get(&id) {
@@ -326,23 +389,27 @@ fn search_doc(doc: &PdfDocument<'_>, query: &str) -> Result<Vec<SearchHit>> {
 }
 
 /// Process-wide PDFium handle plus the single render thread.
+///
+/// Each engine (and its clones) has its own tile queue and event channel on
+/// the shared render thread.
 #[derive(Clone, Debug)]
 pub struct Engine {
-    _private: (),
+    id: EngineId,
+    events: Arc<Mutex<Receiver<TileEvent>>>,
 }
 
 impl Engine {
     /// Bind PDFium from `OPENPDF_PDFIUM`, a bundled path, or the system library.
     pub fn new() -> Result<Self> {
         worker()?;
-        Ok(Self { _private: () })
+        Self::register()
     }
 
     /// First successful call wins; later engines share the same worker.
     pub fn with_bundled_library(path: impl AsRef<Path>) -> Result<Self> {
         let path = path.as_ref().to_path_buf();
         match WORKER.get_or_init(|| start_worker(Some(&path)).map_err(|e| e.to_string())) {
-            Ok(_) => Ok(Self { _private: () }),
+            Ok(_) => Self::register(),
             Err(e) => Err(Error::pdfium(e.clone())),
         }
     }
@@ -389,18 +456,20 @@ impl Engine {
 
     /// Begin a new viewport frame: stale queued tiles are dropped.
     pub fn begin_frame(&self) -> Result<u64> {
-        self.send(WorkerCmd::Bump)?;
+        self.send(WorkerCmd::Bump { engine: self.id })?;
         Ok(1)
     }
 
     pub fn request_tiles(&self, reqs: impl IntoIterator<Item = TileRequest>) -> Result<()> {
         self.send(WorkerCmd::Request {
+            engine: self.id,
             reqs: reqs.into_iter().collect(),
         })
     }
 
     pub fn cancel(&self, keys: impl IntoIterator<Item = TileKey>) -> Result<()> {
         self.send(WorkerCmd::Cancel {
+            engine: self.id,
             keys: keys.into_iter().collect(),
         })
     }
@@ -411,6 +480,7 @@ impl Engine {
         keep: impl IntoIterator<Item = TileKey>,
     ) -> Result<()> {
         self.send(WorkerCmd::CancelExcept {
+            engine: self.id,
             doc,
             keep: keep.into_iter().collect(),
         })
@@ -421,14 +491,12 @@ impl Engine {
     }
 
     pub fn try_recv(&self) -> Option<TileEvent> {
-        let h = worker().ok()?;
-        let rx = h.events.lock().ok()?;
+        let rx = self.events.lock().ok()?;
         rx.try_recv().ok()
     }
 
     pub fn recv_timeout(&self, timeout: Duration) -> Option<TileEvent> {
-        let h = worker().ok()?;
-        let rx = h.events.lock().ok()?;
+        let rx = self.events.lock().ok()?;
         rx.recv_timeout(timeout).ok()
     }
 
@@ -482,8 +550,27 @@ impl Engine {
 }
 
 impl Engine {
-    #[allow(dead_code)]
-    fn event_sender(&self) -> Result<Sender<TileEvent>> {
-        Ok(worker()?.event_tx.clone())
+    fn register() -> Result<Self> {
+        let id = NEXT_ENGINE_ID.fetch_add(1, Ordering::Relaxed);
+        let (tx, rx) = mpsc::channel();
+        worker()?
+            .cmd
+            .send(WorkerCmd::Register {
+                engine: id,
+                events: tx,
+            })
+            .map_err(|_| Error::pdfium("render thread closed"))?;
+        Ok(Self {
+            id,
+            events: Arc::new(Mutex::new(rx)),
+        })
+    }
+}
+
+impl Drop for Engine {
+    fn drop(&mut self) {
+        if Arc::strong_count(&self.events) == 1 {
+            let _ = self.send(WorkerCmd::Unregister { engine: self.id });
+        }
     }
 }
