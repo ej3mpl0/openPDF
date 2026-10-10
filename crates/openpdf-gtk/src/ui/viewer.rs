@@ -239,6 +239,21 @@ impl DocumentView {
         self.update_chrome();
     }
 
+    /// Apply on-disk zoom after `hydrate_settings`. CLI `HANDLES_OPEN` used to
+    /// build the viewer with `Settings::default()` (Fit Width) before the
+    /// file was read, so 147% never reached the canvas.
+    pub fn apply_zoom_settings(&self, settings: &Settings) {
+        match settings.zoom_mode {
+            ZoomMode::Percent => self.set_percent_zoom(settings.zoom_factor()),
+            mode => {
+                self.shared.zoom_mode.set(mode);
+                self.relayout();
+                self.update_chrome();
+            }
+        }
+        self.set_sidebar(settings.show_thumbnails);
+    }
+
     fn go_to_page(&self, page: u32) {
         let n = self.shared.doc.page_count() as u32;
         if n == 0 {

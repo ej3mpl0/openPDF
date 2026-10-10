@@ -173,6 +173,9 @@ impl OpenPdfWindow {
         let restore = loaded.restore_last;
         let last = loaded.recent.first().cloned();
         *self.ctx.settings.borrow_mut() = loaded;
+        if let Some(view) = self.current_view() {
+            view.apply_zoom_settings(&self.ctx.settings.borrow());
+        }
         if restore {
             if let Some(last) = last {
                 let ctx = self.ctx.clone();

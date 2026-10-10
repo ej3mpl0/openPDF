@@ -70,6 +70,7 @@ pub fn run(initial: Option<PathBuf>, signer: Box<dyn Signer>, verifier: Box<dyn 
                 if let Some(win) = win_slot.borrow().as_ref() {
                     let win = win.clone();
                     glib::idle_add_local_full(glib::Priority::HIGH, move || {
+                        win.hydrate_settings();
                         win.open_path(&path);
                         glib::ControlFlow::Break
                     });
@@ -83,6 +84,7 @@ pub fn run(initial: Option<PathBuf>, signer: Box<dyn Signer>, verifier: Box<dyn 
         // exits with "This application can not open files".
         app.activate();
         if let Some(win) = win_slot.borrow().as_ref() {
+            win.hydrate_settings();
             for file in files {
                 if let Some(path) = file.path() {
                     win.open_path(&path);
