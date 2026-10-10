@@ -229,18 +229,20 @@ jobs:
   # launch below (no warm-up, page cache dropped) is a true cold start.
   # Never gates. Skips cleanly while openpdf-gtk is a placeholder (until #1).
   cold-start:
-    name: Cold start (shard ${{ matrix.shard }})
+    name: Cold start (${{ matrix.variant }}, shard ${{ matrix.shard }})
     runs-on: ubuntu-latest
     continue-on-error: true
     strategy:
       fail-fast: false
       matrix:
+        variant: [plain, nodbuswait, minimal]
         shard: [1, 2, 3]
     defaults:
       run:
         shell: bash
     env:
       CARGO_TERM_COLOR: always
+      TAG: ${{ matrix.variant }}-${{ matrix.shard }}
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
         with:
@@ -256,9 +258,26 @@ jobs:
             msg="cold-start skipped: openpdf-gtk is still a placeholder on this branch (no crates/openpdf-app; lands with #1)."
             echo "::notice::$msg"
             mkdir -p cold
-            echo "skipped=1" > "cold/shard-${{ matrix.shard }}.txt"
+            echo "skipped=1" > "cold/$TAG.txt"
             echo "$msg" >> "$GITHUB_STEP_SUMMARY"
           fi
+
+      - name: Variant environment
+        if: steps.gui.outputs.skip == 'false'
+        run: |
+          case "${{ matrix.variant }}" in
+            plain) ;;
+            nodbuswait)
+              echo "OPENPDF_MEASURE_WRAP=dbus-run-session --" >> "$GITHUB_ENV"
+              echo "GTK_A11Y=none" >> "$GITHUB_ENV"
+              echo "GSETTINGS_BACKEND=memory" >> "$GITHUB_ENV" ;;
+            minimal)
+              echo "OPENPDF_MEASURE_WRAP=dbus-run-session --" >> "$GITHUB_ENV"
+              echo "GTK_A11Y=none" >> "$GITHUB_ENV"
+              echo "GSETTINGS_BACKEND=memory" >> "$GITHUB_ENV"
+              echo "GIO_USE_VFS=local" >> "$GITHUB_ENV"
+              echo "GTK_IM_MODULE=gtk-im-context-simple" >> "$GITHUB_ENV" ;;
+          esac
 
       - name: Install Rust from rust-toolchain.toml
         if: steps.gui.outputs.skip == 'false'
@@ -275,12 +294,13 @@ jobs:
         if: steps.gui.outputs.skip == 'false'
         run: .github/scripts/install-pdfium.sh
 
-      - name: Install GTK4, libadwaita, SVG pixbuf loader
+      - name: Install GTK4, libadwaita, SVG pixbuf loader, xvfb, dbus, strace
         if: steps.gui.outputs.skip == 'false'
         run: |
           sudo apt-get update
           sudo apt-get install -y --no-install-recommends \
-            libgtk-4-dev libadwaita-1-dev pkg-config librsvg2-common adwaita-icon-theme
+            libgtk-4-dev libadwaita-1-dev pkg-config librsvg2-common adwaita-icon-theme \
+            xvfb xauth dbus dbus-daemon strace
 
       # Build only; nothing launches the GUI before the measurement.
       - name: Build workspace (release)
@@ -301,13 +321,44 @@ jobs:
           GSK_RENDERER: cairo
         run: |
           mkdir -p cold
+          echo "variant=${{ matrix.variant }} wrap='${OPENPDF_MEASURE_WRAP:-}' GTK_A11Y=${GTK_A11Y:-} GSETTINGS_BACKEND=${GSETTINGS_BACKEND:-} GIO_USE_VFS=${GIO_USE_VFS:-} GTK_IM_MODULE=${GTK_IM_MODULE:-}"
           python3 .github/scripts/run-measure.py --kind gui --single-cold --frames 32 \
-            --out "cold/shard-${{ matrix.shard }}.txt"
+            --out "cold/$TAG.txt"
+          echo "variant=${{ matrix.variant }}" >> "cold/$TAG.txt"
+
+      # Shard 1 only: a second cold launch under strace (not used for the numbers).
+      - name: Drop page cache (strace run)
+        if: steps.gui.outputs.skip == 'false' && matrix.shard == 1
+        run: |
+          sync
+          echo 3 | sudo tee /proc/sys/vm/drop_caches
+          echo "drop_caches: ran at $(date -u +%FT%TZ)"
+
+      - name: Cold GUI launch under strace
+        if: steps.gui.outputs.skip == 'false' && matrix.shard == 1
+        env:
+          GDK_BACKEND: x11
+          GSK_RENDERER: cairo
+        run: |
+          mkdir -p strace
+          export OPENPDF_MEASURE_WRAP="${OPENPDF_MEASURE_WRAP:-} strace -f -tt -e trace=openat,connect -o $PWD/strace/trace.txt"
+          echo "wrap='$OPENPDF_MEASURE_WRAP'"
+          python3 .github/scripts/run-measure.py --kind gui --single-cold --frames 32 \
+            --out "strace/measure-under-strace.txt" || true
+          python3 .github/scripts/strace-summary.py strace/trace.txt | tee strace/summary.md
+          { echo "### ${{ matrix.variant }}"; cat strace/summary.md; } >> "$GITHUB_STEP_SUMMARY"
+
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        if: always() && matrix.shard == 1 && steps.gui.outputs.skip == 'false'
+        with:
+          name: strace-${{ matrix.variant }}
+          path: strace/
+          if-no-files-found: warn
 
       - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
         if: always()
         with:
-          name: cold-start-${{ matrix.shard }}
+          name: cold-start-${{ env.TAG }}
           path: cold/
           if-no-files-found: warn
 
@@ -324,31 +375,38 @@ jobs:
           path: cold
           merge-multiple: true
 
-      - name: Median of cold_startup_ms
+      - name: Median per variant
         run: |
-          python3 - <<'PY'
+          python3 - <<'PY2'
           import glob, os, statistics
-          rows, vals, skipped = [], [], 0
-          for f in sorted(glob.glob("cold/shard-*.txt")):
+          variants = ["plain", "nodbuswait", "minimal"]
+          keys = ["cold_startup_ms", "ui_gtk_startup_ms", "ui_activate_ms"]
+          data, skipped, rows = {v: [] for v in variants}, 0, []
+          for f in sorted(glob.glob("cold/*.txt")):
               kv = dict(l.split("=", 1) for l in open(f).read().split() if "=" in l)
               if kv.get("skipped"):
                   skipped += 1; continue
-              if "cold_startup_ms" in kv:
-                  vals.append(float(kv["cold_startup_ms"]))
-                  rows.append((os.path.basename(f), kv))
-          out = ["## Cold start (informational, single first launch per fresh VM)", ""]
-          if not vals:
-              out.append(f"No cold values ({skipped} shard(s) skipped: GUI placeholder until #1).")
+              v = kv.get("variant") or os.path.basename(f).rsplit("-", 1)[0]
+              if "cold_startup_ms" in kv and v in data:
+                  data[v].append(kv)
+                  marks = " ".join(f"{k}={x}" for k, x in kv.items() if k.startswith("ui_"))
+                  rows.append(f"- `{os.path.basename(f)}`: cold_startup_ms={kv['cold_startup_ms']} {marks}")
+          out = ["## Cold start per variant (informational, single first launch per fresh VM)", ""]
+          if not any(data.values()):
+              out.append(f"No cold values ({skipped} job(s) skipped: GUI placeholder until #1).")
           else:
-              for name, kv in rows:
-                  marks = " ".join(f"{k}={v}" for k, v in kv.items() if k.startswith("ui_"))
-                  out.append(f"- `{name}`: cold_startup_ms={kv['cold_startup_ms']} {marks} libpdfium sha256 `{kv.get('libpdfium_sha256','?')}`")
-              out += ["", f"**Median cold_startup_ms: {statistics.median(vals):g}** over {len(vals)} shard(s)"]
+              def med(lst, k):
+                  xs = [float(d[k]) for d in lst if k in d]
+                  return f"{statistics.median(xs):g} (n={len(xs)})" if xs else "-"
+              out += ["| variant | " + " | ".join(keys) + " |", "|---|" + "---:|" * len(keys)]
+              for v in variants:
+                  out.append(f"| {v} | " + " | ".join(med(data[v], k) for k in keys) + " |")
+              out += ["", "Per job:"] + rows
           text = "\n".join(out) + "\n"
           print(text)
           with open(os.environ["GITHUB_STEP_SUMMARY"], "a") as fh:
               fh.write(text)
-          PY
+          PY2
 
   times:
     name: CI times

@@ -215,7 +215,11 @@ def check_svg_loader() -> str | None:
 
 
 def run_gui(binary: Path, frames: str) -> tuple[int, str]:
-    cmd = PIN + [str(binary), "--measure", frames]
+    # OPENPDF_MEASURE_WRAP: optional prefix (e.g. "dbus-run-session -- strace ...")
+    # placed right before the binary, i.e. inside xvfb-run, so only the app is wrapped.
+    import shlex
+    wrap = shlex.split(os.environ.get("OPENPDF_MEASURE_WRAP", ""))
+    cmd = PIN + wrap + [str(binary), "--measure", frames]
     env = os.environ.copy()
     if sys.platform.startswith("linux"):
         env.setdefault("GDK_BACKEND", "x11")
