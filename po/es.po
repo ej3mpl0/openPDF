@@ -664,3 +664,5 @@ msgstr "Entrada de PIN cancelada"
 msgid "PIN dialog needs a display"
 msgstr "El diálogo de PIN necesita una pantalla"
 
+msgid "PIN entry was cancelled"
+msgstr "Se canceló la introducción del PIN"
