@@ -25,7 +25,9 @@ static NEXT_ENGINE_ID: AtomicU64 = AtomicU64::new(1);
 struct EngineSlot {
     queue: RenderQueue,
     events: Sender<TileEvent>,
-    /// Documents this engine bound; released on `Unregister`.
+    /// Documents this engine bound; released on `Unregister` unless another
+    /// live engine also bound them. Every entry in the worker's `docs` map is
+    /// owned by at least one slot (Bind refuses unregistered engines).
     docs: HashSet<DocumentId>,
 }
 
@@ -276,15 +278,25 @@ fn handle_cmd(
             bytes,
             reply,
         } => {
-            let result = load_bound(pdfium, bytes).map(|bound| {
-                docs.insert(id, bound);
-                if let Some(slot) = engines.get_mut(&engine) {
+            // Register is sent before `Engine::register` returns, and
+            // Unregister only after the last clone is dropped, so every Bind
+            // comes from a registered engine (the command channel keeps that
+            // order across threads). A document bound without an owning slot
+            // would never be released on Unregister, so never keep one.
+            debug_assert!(
+                engines.contains_key(&engine),
+                "Bind from unregistered engine {engine}"
+            );
+            let result = match engines.get_mut(&engine) {
+                Some(slot) => load_bound(pdfium, bytes).map(|bound| {
+                    docs.insert(id, bound);
                     slot.docs.insert(id);
-                }
-                if let Ok(mut c) = cache.lock() {
-                    c.invalidate_doc(id);
-                }
-            });
+                    if let Ok(mut c) = cache.lock() {
+                        c.invalidate_doc(id);
+                    }
+                }),
+                None => Err(Error::pdfium("render engine is not registered")),
+            };
             let _ = reply.send(result);
         }
         WorkerCmd::Unbind { engine, id } => {
@@ -681,6 +693,36 @@ mod drop_tests {
                 None
             }
         }
+    }
+
+    /// Release builds have no debug_assert: Bind from an unregistered engine
+    /// must be refused with an error and must not leave an unowned document.
+    #[cfg(not(debug_assertions))]
+    #[test]
+    fn bind_from_unregistered_engine_is_refused_in_release() {
+        let Some(live) = engine_or_skip() else {
+            return;
+        };
+        let ghost: EngineId = NEXT_ENGINE_ID.fetch_add(1, Ordering::Relaxed);
+        let doc = Document::open(crate::test_support::corpus("hello.pdf")).unwrap();
+        let (tx, rx) = mpsc::channel();
+        worker()
+            .unwrap()
+            .cmd
+            .send(WorkerCmd::Bind {
+                engine: ghost,
+                id: doc.id(),
+                bytes: doc.original_bytes().to_vec(),
+                reply: tx,
+            })
+            .unwrap();
+        let err = rx.recv().unwrap().unwrap_err();
+        assert!(
+            matches!(&err, Error::Pdfium(m) if m == "render engine is not registered"),
+            "{err:?}"
+        );
+        assert_eq!(probe(ghost, doc.id()), (false, false));
+        drop(live);
     }
 
     #[test]
