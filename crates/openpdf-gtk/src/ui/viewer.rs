@@ -302,6 +302,9 @@ impl DocumentView {
             ZoomMode::Percent => {}
         }
         self.shared.zoom.set(zoom);
+        self.shared
+            .doc
+            .prefetch_first_tile(zoom, self.shared.tile_size.get());
         let layout = match self.shared.layout_mode.get() {
             PageLayoutMode::Continuous => layout_continuous(&sizes, zoom, alloc_w, PADDING, GAP),
             PageLayoutMode::Single => layout_single(
@@ -388,6 +391,9 @@ pub fn build(doc: Rc<Opened>, settings: &Settings, lang: Lang) -> Rc<DocumentVie
         last_thumbs: RefCell::new(Vec::new()),
         doc,
     });
+    shared
+        .doc
+        .prefetch_first_tile(zoom, tile_size);
 
     let pages_area = gtk::DrawingArea::new();
     pages_area.add_css_class("page-canvas");

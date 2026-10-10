@@ -397,6 +397,10 @@ fn open_path_inner(ctx: &Ctx, path: &Path) {
         }
     };
     crate::measure::mark_doc_loaded();
+    {
+        let settings = ctx.settings.borrow();
+        opened.prefetch_first_tile(settings.zoom_factor(), settings.tile_size);
+    }
     ctx.settings.borrow_mut().push_recent(path);
     let settings = ctx.settings.clone();
     glib::idle_add_local_once(move || {

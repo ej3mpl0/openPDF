@@ -249,6 +249,13 @@ impl Session {
         let _ = self.engine.begin_frame();
     }
 
+    /// Kick the render worker at tile (0, 0) of page 0 so the first frame
+    /// can paint from cache instead of waiting for the draw func.
+    pub fn prefetch_first_tile(&self, zoom: f64, tile_size: u32) {
+        let key = ViewTile::new(0, zoom, 0, 0, tile_size);
+        self.request_view_tiles(&[key], Priority::Visible);
+    }
+
     pub fn request_view_tiles(&self, keys: &[ViewTile], priority: Priority) {
         if keys.is_empty() {
             return;
@@ -467,6 +474,16 @@ impl Opened {
     pub fn begin_frame(&self) {
         if let Self::Core(s) = self {
             s.begin_frame();
+        }
+    }
+
+    pub fn prefetch_first_tile(&self, zoom: f64, tile_size: u32) {
+        match self {
+            Self::Core(s) => s.prefetch_first_tile(zoom, tile_size),
+            Self::Mock(s) => {
+                let key = ViewTile::new(0, zoom, 0, 0, tile_size);
+                s.request_view_tiles(&[key], Priority::Visible);
+            }
         }
     }
 
