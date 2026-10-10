@@ -391,9 +391,7 @@ pub fn build(doc: Rc<Opened>, settings: &Settings, lang: Lang) -> Rc<DocumentVie
         last_thumbs: RefCell::new(Vec::new()),
         doc,
     });
-    shared
-        .doc
-        .prefetch_first_tile(zoom, tile_size);
+    shared.doc.prefetch_first_tile(zoom, tile_size);
 
     let pages_area = gtk::DrawingArea::new();
     pages_area.add_css_class("page-canvas");
@@ -452,7 +450,41 @@ pub fn build(doc: Rc<Opened>, settings: &Settings, lang: Lang) -> Rc<DocumentVie
         content.append(&banner);
     }
 
+    let mode_bar = gtk::Box::new(gtk::Orientation::Horizontal, 6);
+    mode_bar.add_css_class("mode-bar");
+    mode_bar.set_margin_start(8);
+    mode_bar.set_margin_end(8);
+    let view_mode = gtk::ToggleButton::with_label(t(lang, "View"));
+    view_mode.set_active(true);
+    view_mode.add_css_class("mode-btn");
+    view_mode.add_css_class("pill");
+    view_mode.add_css_class("suggested-action");
+    mode_bar.append(&view_mode);
+    for (label, action) in [
+        (t(lang, "Comment"), None),
+        (t(lang, "Fill and sign"), Some("app.sign")),
+        (t(lang, "Organize pages"), None),
+        (t(lang, "Edit"), None),
+        (t(lang, "Protect"), None),
+        (t(lang, "Tools"), None),
+    ] {
+        let btn = gtk::Button::with_label(label);
+        btn.add_css_class("mode-btn");
+        btn.add_css_class("flat");
+        btn.add_css_class("pill");
+        if let Some(name) = action {
+            btn.connect_clicked(move |w| {
+                let _ = w.activate_action(name, None);
+            });
+        } else {
+            btn.set_sensitive(false);
+            btn.set_tooltip_text(Some(t(lang, "Waiting on openpdf-core")));
+        }
+        mode_bar.append(&btn);
+    }
+
     let chrome = gtk::Box::new(gtk::Orientation::Horizontal, 8);
+    chrome.add_css_class("viewer-chrome");
     chrome.set_margin_start(8);
     chrome.set_margin_end(8);
     chrome.set_margin_top(6);
@@ -494,6 +526,7 @@ pub fn build(doc: Rc<Opened>, settings: &Settings, lang: Lang) -> Rc<DocumentVie
     search_bar.set_show_close_button(true);
     search_bar.connect_entry(&search_entry);
 
+    content.append(&mode_bar);
     content.append(&chrome);
     content.append(&search_bar);
     content.append(&pages_scroll);
@@ -768,7 +801,7 @@ fn thumb_tile_keys(view: &DocumentView) -> Vec<TileKey> {
 fn paint_pages(cr: &cairo::Context, view: &DocumentView) {
     let layout = view.shared.layout.borrow();
 
-    cr.set_source_rgb(0.78, 0.77, 0.75);
+    cr.set_source_rgb(0.922, 0.929, 0.941);
     let _ = cr.paint();
 
     let keys = page_tile_keys(view);
@@ -781,8 +814,8 @@ fn paint_pages(cr: &cairo::Context, view: &DocumentView) {
     view.shared.doc.request_tiles(&preview, Priority::Adjacent);
 
     for page in &layout.pages {
-        cr.set_source_rgba(0.0, 0.0, 0.0, 0.18);
-        cr.rectangle(page.x + 3.0, page.y + 4.0, page.width, page.height);
+        cr.set_source_rgba(0.078, 0.094, 0.122, 0.12);
+        cr.rectangle(page.x + 2.0, page.y + 3.0, page.width, page.height);
         let _ = cr.fill();
         cr.set_source_rgb(1.0, 1.0, 1.0);
         cr.rectangle(page.x, page.y, page.width, page.height);
@@ -809,7 +842,7 @@ fn paint_pages(cr: &cairo::Context, view: &DocumentView) {
 fn paint_thumbs(cr: &cairo::Context, view: &DocumentView) {
     let layout = view.shared.thumb_layout.borrow();
     let current = view.shared.current_page.get();
-    cr.set_source_rgb(0.94, 0.93, 0.91);
+    cr.set_source_rgb(0.957, 0.961, 0.969);
     let _ = cr.paint();
 
     let keys = thumb_tile_keys(view);
@@ -837,13 +870,16 @@ fn paint_thumbs(cr: &cairo::Context, view: &DocumentView) {
     for page in &layout.pages {
         if page.page == current {
             cr.set_source_rgb(0.055, 0.486, 0.400);
-            cr.rectangle(
+            cr.set_line_width(2.0);
+            rounded_rect(
+                cr,
                 page.x - 3.0,
                 page.y - 3.0,
                 page.width + 6.0,
                 page.height + 6.0,
+                8.0,
             );
-            let _ = cr.fill();
+            let _ = cr.stroke();
         }
         cr.set_source_rgb(1.0, 1.0, 1.0);
         cr.rectangle(page.x, page.y, page.width, page.height);
@@ -879,6 +915,28 @@ fn maybe_mark_startup(view: &DocumentView) {
     if ready.is_complete() {
         crate::measure::mark_all_visible();
     }
+}
+
+fn rounded_rect(cr: &cairo::Context, x: f64, y: f64, w: f64, h: f64, r: f64) {
+    let r = r.min(w / 2.0).min(h / 2.0).max(0.0);
+    cr.new_sub_path();
+    cr.arc(x + w - r, y + r, r, -std::f64::consts::FRAC_PI_2, 0.0);
+    cr.arc(x + w - r, y + h - r, r, 0.0, std::f64::consts::FRAC_PI_2);
+    cr.arc(
+        x + r,
+        y + h - r,
+        r,
+        std::f64::consts::FRAC_PI_2,
+        std::f64::consts::PI,
+    );
+    cr.arc(
+        x + r,
+        y + r,
+        r,
+        std::f64::consts::PI,
+        std::f64::consts::PI * 1.5,
+    );
+    cr.close_path();
 }
 
 /// Destination of a tile on the page canvas. Same origin as core `tile_rect`

@@ -11,7 +11,10 @@ fn main() {
     compile(
         "data/icons-deferred.gresource.xml",
         "icons-deferred.gresource",
-        &["data/icons/scalable/actions/open-menu-symbolic.svg"],
+        &[
+            "data/icons/scalable/actions/open-menu-symbolic.svg",
+            "data/icons/io.github.ej3mpl0.openpdf.svg",
+        ],
     );
 }
 

@@ -61,7 +61,7 @@ impl OpenPdfWindow {
 
         let window = adw::ApplicationWindow::new(app);
         window.set_title(Some(t(lang, "openPDF")));
-        window.set_default_size(1180, 800);
+        window.set_default_size(1280, 800);
 
         let toast = adw::ToastOverlay::new();
         let tab_view = adw::TabView::new();
@@ -161,11 +161,13 @@ impl OpenPdfWindow {
         });
 
         crate::measure::note_idle_load_pending();
-        window.add_tick_callback(clone!(@strong menu_btn => move |_, _| {
+        window.add_tick_callback(clone!(@strong menu_btn => move |w, _| {
             let menu_btn = menu_btn.clone();
+            let w = w.clone();
             glib::idle_add_local_once(move || {
                 super::register_deferred_icons();
                 menu_btn.set_icon_name("open-menu-symbolic");
+                w.set_icon_name(Some(crate::APP_ID));
                 crate::measure::note_idle_load_finished();
             });
             glib::ControlFlow::Break

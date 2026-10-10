@@ -683,3 +683,18 @@ msgstr "PDF firmado guardado en {path}"
 
 msgid "Cannot verify: original file bytes are unavailable."
 msgstr "No se puede verificar: no hay bytes originales del archivo."
+
+msgid "Drag a PDF here"
+msgstr "Arrastra un PDF aquí"
+
+msgid "or open from your computer"
+msgstr "o ábrelo desde el equipo"
+
+msgid "Sign and save a copy"
+msgstr "Firmar y guardar copia"
+
+msgid "A signed copy is saved. The original is not modified."
+msgstr "Se guarda una copia firmada. El original no se modifica."
+
+msgid "Certificates stay on this computer. openPDF does not send them anywhere."
+msgstr "Los certificados se quedan en este equipo. openPDF no los envía a ninguna parte."
