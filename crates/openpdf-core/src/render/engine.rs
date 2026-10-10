@@ -741,4 +741,80 @@ mod drop_tests {
         drop(b);
         assert_eq!(probe(idb, doc.id()), (false, false));
     }
+
+    /// One page with `segments` stroked lines: slow enough that a tile is
+    /// still rendering when the engine is dropped.
+    fn heavy_pdf(segments: u32) -> Vec<u8> {
+        let mut content = String::from("0.2 w\n");
+        let mut seed: u32 = 1;
+        let mut next = || {
+            seed = seed.wrapping_mul(1_103_515_245).wrapping_add(12_345);
+            (seed >> 8) % 600
+        };
+        for _ in 0..segments {
+            let (x, y, dx, dy) = (next(), next(), next() % 60, next() % 60);
+            content.push_str(&format!("{x} {y} m {} {} l S\n", x + dx, y + dy));
+        }
+        let objs = [
+            "<< /Type /Catalog /Pages 2 0 R >>".to_string(),
+            "<< /Type /Pages /Kids [3 0 R] /Count 1 >>".to_string(),
+            "<< /Type /Page /Parent 2 0 R /MediaBox [0 0 612 792] /Contents 4 0 R >>".to_string(),
+            format!(
+                "<< /Length {} >>\nstream\n{content}\nendstream",
+                content.len()
+            ),
+        ];
+        let mut out = b"%PDF-1.4\n".to_vec();
+        let mut offsets = Vec::new();
+        for (i, o) in objs.iter().enumerate() {
+            offsets.push(out.len());
+            out.extend_from_slice(format!("{} 0 obj\n{o}\nendobj\n", i + 1).as_bytes());
+        }
+        let xref = out.len();
+        out.extend_from_slice(
+            format!("xref\n0 {}\n0000000000 65535 f \n", objs.len() + 1).as_bytes(),
+        );
+        for o in offsets {
+            out.extend_from_slice(format!("{o:010} 00000 n \n").as_bytes());
+        }
+        out.extend_from_slice(
+            format!(
+                "trailer\n<< /Size {} /Root 1 0 R >>\nstartxref\n{xref}\n%%EOF\n",
+                objs.len() + 1
+            )
+            .as_bytes(),
+        );
+        out
+    }
+
+    #[test]
+    fn drop_engine_while_tile_is_rendering() {
+        let Some(witness) = engine_or_skip() else {
+            return;
+        };
+        let bytes = heavy_pdf(40_000);
+        for _ in 0..200 {
+            let engine = Engine::new().unwrap();
+            let doc = engine.open_bytes(bytes.clone(), None).unwrap();
+            let id = engine.inner.id;
+            let reqs: Vec<_> = (0..4)
+                .flat_map(|y| (0..4).map(move |x| (x, y)))
+                .map(|(x, y)| TileRequest::visible(TileKey::new(doc.id(), 0, 1.27, x, y)))
+                .collect();
+            engine.request_tiles(reqs).unwrap();
+            thread::sleep(Duration::from_millis(2));
+            drop(engine);
+            // Probe is queued behind Unregister on the render thread.
+            assert_eq!(probe(id, doc.id()), (false, false));
+            assert!(
+                witness.try_recv().is_none(),
+                "stray event on another engine"
+            );
+        }
+        // The render thread survived every drop.
+        let doc = witness.open_bytes(heavy_pdf(10), None).unwrap();
+        assert!(witness
+            .render_tile_blocking(TileKey::new(doc.id(), 0, 1.0, 0, 0))
+            .is_ok());
+    }
 }
