@@ -66,6 +66,9 @@ pub struct SignRequest {
     /// RFC 3161 timestamp server for [`PadesLevel::BT`]. Overrides the
     /// backend's configured URL. There is no built-in default.
     pub tsa_url: Option<String>,
+    /// Lets the UI abort signing (e.g. while waiting for the TSA). Checked
+    /// before the PIN prompt, before the TSA request and while waiting.
+    pub cancel: Option<CancelToken>,
 }
 
 impl SignRequest {
@@ -101,10 +104,42 @@ impl SignRequest {
         self
     }
 
+    pub fn with_cancel(mut self, token: CancelToken) -> Self {
+        self.cancel = Some(token);
+        self
+    }
+
+    /// [`Error::Cancelled`] if the request's token has been cancelled.
+    pub fn check_cancelled(&self) -> Result<()> {
+        match &self.cancel {
+            Some(t) if t.is_cancelled() => Err(Error::Cancelled),
+            _ => Ok(()),
+        }
+    }
+
     /// TSA URL for B-T (`http://` or `https://`).
     pub fn with_tsa_url(mut self, url: impl Into<String>) -> Self {
         self.tsa_url = Some(url.into());
         self
+    }
+}
+
+/// Shared cancellation flag. Clone it, hand one copy to [`SignRequest::with_cancel`]
+/// and call [`CancelToken::cancel`] from any thread.
+#[derive(Clone, Debug, Default)]
+pub struct CancelToken(std::sync::Arc<std::sync::atomic::AtomicBool>);
+
+impl CancelToken {
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    pub fn cancel(&self) {
+        self.0.store(true, std::sync::atomic::Ordering::SeqCst);
+    }
+
+    pub fn is_cancelled(&self) -> bool {
+        self.0.load(std::sync::atomic::Ordering::SeqCst)
     }
 }
 

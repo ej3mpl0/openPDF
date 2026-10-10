@@ -415,6 +415,9 @@ msgstr ""
 msgid "crop box must be llx,lly,urx,ury"
 msgstr ""
 
+msgid "operation cancelled"
+msgstr ""
+
 msgid "{level} signatures are not supported yet"
 msgstr ""
 

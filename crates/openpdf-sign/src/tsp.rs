@@ -17,7 +17,7 @@ use const_oid::db::rfc5912::{
 use const_oid::{AssociatedOid, ObjectIdentifier};
 use der::asn1::{Int, OctetString, SetOfVec};
 use der::{Any, Decode, Encode, Sequence};
-use openpdf_core::{Error, Result, TimestampErrorKind};
+use openpdf_core::{CancelToken, Error, Result, TimestampErrorKind};
 use rsa::pkcs1v15::{Signature, VerifyingKey};
 use rsa::pkcs8::DecodePublicKey;
 use rsa::signature::Verifier;
@@ -128,7 +128,11 @@ fn tls_roots() -> Arc<Vec<ureq::tls::Certificate<'static>>> {
 
 /// Request a timestamp over SHA-256(`signature_value`), validate it fully and
 /// return the `TimeStampToken` (a CMS `ContentInfo`) DER.
-pub(crate) fn timestamp(tsa: &Tsa, signature_value: &[u8]) -> Result<Vec<u8>> {
+pub(crate) fn timestamp(
+    tsa: &Tsa,
+    signature_value: &[u8],
+    cancel: Option<&CancelToken>,
+) -> Result<Vec<u8>> {
     let digest = Sha256::digest(signature_value);
     let mut nonce = [0u8; 16];
     getrandom::fill(&mut nonce).map_err(|e| {
@@ -157,13 +161,63 @@ pub(crate) fn timestamp(tsa: &Tsa, signature_value: &[u8]) -> Result<Vec<u8>> {
     let body = req
         .to_der()
         .map_err(|_| ts_err(TimestampErrorKind::Malformed))?;
-    let reply = post(tsa, &body)?;
+    let reply = post_cancellable(tsa, body, cancel)?;
     let token = parse_response(&reply)?;
     validate_token(&token, signature_value, Some(&nonce_int), &tsa.trust, true).map_err(ts_err)?;
     Ok(token)
 }
 
-fn post(tsa: &Tsa, body: &[u8]) -> Result<Vec<u8>> {
+/// How often the waiting thread looks at the cancel token.
+const CANCEL_POLL: Duration = Duration::from_millis(25);
+
+/// Run the blocking HTTP exchange on a helper thread and poll `cancel` while
+/// waiting, so a cancel takes effect within ~`CANCEL_POLL` in every phase
+/// (DNS, connect, TLS, waiting for headers, reading the body). On cancel the
+/// helper is detached; it owns only the request bytes and ends at its own
+/// timeout. Nothing touches the PDF.
+fn post_cancellable(tsa: &Tsa, body: Vec<u8>, cancel: Option<&CancelToken>) -> Result<Vec<u8>> {
+    let Some(cancel) = cancel else {
+        return post(&tsa.url, tsa.timeout, &body);
+    };
+    if cancel.is_cancelled() {
+        return Err(Error::Cancelled);
+    }
+    let (tx, rx) = std::sync::mpsc::sync_channel(1);
+    let url = tsa.url.clone();
+    let timeout = tsa.timeout;
+    std::thread::Builder::new()
+        .name("openpdf-tsa".into())
+        .spawn(move || {
+            let _ = tx.send(post(&url, timeout, &body));
+        })
+        .map_err(|e| {
+            ts_err(TimestampErrorKind::Network {
+                detail: e.to_string(),
+            })
+        })?;
+    loop {
+        match rx.recv_timeout(CANCEL_POLL) {
+            Ok(r) => {
+                if cancel.is_cancelled() {
+                    return Err(Error::Cancelled);
+                }
+                return r;
+            }
+            Err(std::sync::mpsc::RecvTimeoutError::Timeout) => {
+                if cancel.is_cancelled() {
+                    return Err(Error::Cancelled);
+                }
+            }
+            Err(std::sync::mpsc::RecvTimeoutError::Disconnected) => {
+                return Err(ts_err(TimestampErrorKind::Network {
+                    detail: "timestamp request thread ended".into(),
+                }))
+            }
+        }
+    }
+}
+
+fn post(url: &str, timeout: Duration, body: &[u8]) -> Result<Vec<u8>> {
     let net = |e: ureq::Error| {
         ts_err(TimestampErrorKind::Network {
             detail: e.to_string(),
@@ -173,14 +227,14 @@ fn post(tsa: &Tsa, body: &[u8]) -> Result<Vec<u8>> {
         .root_certs(ureq::tls::RootCerts::Specific(tls_roots()))
         .build();
     let agent: ureq::Agent = ureq::Agent::config_builder()
-        .timeout_global(Some(tsa.timeout))
+        .timeout_global(Some(timeout))
         .http_status_as_error(false)
         .max_redirects(0)
         .tls_config(tls)
         .build()
         .into();
     let mut resp = agent
-        .post(&tsa.url)
+        .post(url)
         .header("Content-Type", "application/timestamp-query")
         .header("Accept", "application/timestamp-reply")
         .send(body)

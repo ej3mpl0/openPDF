@@ -123,10 +123,15 @@ pub(crate) fn sign_incremental(
     let message = byterange_bytes(&out, &[0, lt as i64, (gt + 1) as i64, rest as i64])?;
     let mut cms = make_cms(&message)?;
     if let Some(tsa) = tsa {
+        request.check_cancelled()?;
         // The token covers the SignerInfo signature value. Any failure is an
         // error: never fall back to B-B.
-        cms = cades::add_signature_timestamp(&cms, |sig| crate::tsp::timestamp(tsa, sig))?;
+        cms = cades::add_signature_timestamp(&cms, |sig| {
+            crate::tsp::timestamp(tsa, sig, request.cancel.as_ref())
+        })?;
     }
+    // A cancel that lands after the TSA replied still wins: nothing is returned.
+    request.check_cancelled()?;
     if cms.len() > contents_len {
         return Err(Error::Sign(
             "CMS signature is too large for the reserved Contents space".into(),
@@ -250,16 +255,45 @@ fn byte_range(dict: &Dictionary) -> Option<Vec<i64>> {
 
 fn contents_bytes(dict: &Dictionary) -> Option<Vec<u8>> {
     match dict.get(b"Contents").ok()? {
-        Object::String(bytes, _) => {
-            let end = bytes
-                .iter()
-                .rposition(|b| *b != 0)
-                .map(|i| i + 1)
-                .unwrap_or(0);
-            Some(bytes[..end].to_vec())
-        }
+        Object::String(bytes, _) => Some(strip_contents_padding(bytes).to_vec()),
         _ => None,
     }
+}
+
+/// `/Contents` is the CMS DER followed by zero padding. Cut it at the DER
+/// length, not at the last non-zero byte: a CMS whose RSA signature happens to
+/// end in 0x00 (about 1 in 256) would otherwise be truncated and reported invalid.
+fn strip_contents_padding(bytes: &[u8]) -> &[u8] {
+    if let Some(len) = der_tlv_len(bytes) {
+        if len <= bytes.len() {
+            return &bytes[..len];
+        }
+    }
+    let end = bytes
+        .iter()
+        .rposition(|b| *b != 0)
+        .map(|i| i + 1)
+        .unwrap_or(0);
+    &bytes[..end]
+}
+
+/// Total length (header + content) of the DER TLV at the start of `b`.
+fn der_tlv_len(b: &[u8]) -> Option<usize> {
+    if b.len() < 2 || b[0] != 0x30 {
+        return None;
+    }
+    let first = b[1] as usize;
+    if first < 0x80 {
+        return Some(2 + first);
+    }
+    let n = first & 0x7f;
+    if n == 0 || n > 4 || b.len() < 2 + n {
+        return None;
+    }
+    let len = b[2..2 + n]
+        .iter()
+        .fold(0usize, |acc, x| (acc << 8) | *x as usize);
+    Some(2 + n + len)
 }
 
 pub(crate) fn byterange_bytes(pdf: &[u8], ranges: &[i64]) -> Result<Vec<u8>> {
@@ -755,5 +789,20 @@ mod tests {
         std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
             .join("../../corpus")
             .join(name)
+    }
+
+    #[test]
+    fn contents_padding_keeps_trailing_zero_of_der() {
+        // SEQUENCE { OCTET STRING 01 00 } followed by padding.
+        let der = [0x30, 0x04, 0x04, 0x02, 0x01, 0x00];
+        let mut padded = der.to_vec();
+        padded.extend_from_slice(&[0; 16]);
+        assert_eq!(strip_contents_padding(&padded), &der);
+        let mut long = vec![0x30, 0x82, 0x01, 0x00];
+        long.extend(std::iter::repeat_n(0xAB, 255));
+        long.push(0x00);
+        let full = long.clone();
+        long.extend_from_slice(&[0; 8]);
+        assert_eq!(strip_contents_padding(&long), &full[..]);
     }
 }

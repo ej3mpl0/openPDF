@@ -199,7 +199,12 @@ impl Pkcs11Signer {
         Ok(out)
     }
 
-    fn sign_cms(&self, message: &[u8], picked: &PickedCert) -> Result<Vec<u8>> {
+    fn sign_cms(
+        &self,
+        message: &[u8],
+        picked: &PickedCert,
+        request: &SignRequest,
+    ) -> Result<Vec<u8>> {
         let module = self
             .modules
             .get(picked.module_index)
@@ -210,6 +215,8 @@ impl Pkcs11Signer {
             .or_else(|_| module.ctx.open_ro_session(picked.slot))
             .map_err(pkcs11_err)?;
 
+        // Last check before the PIN dialog.
+        request.check_cancelled()?;
         let pin: SecretPin = self.pin.request_pin(&picked.token_label)?;
         {
             let auth = AuthPin::new(pin.as_str().into());
@@ -244,6 +251,7 @@ impl Signer for Pkcs11Signer {
         // Refuse unsupported levels / a missing TSA before any token login or PIN prompt.
         let tsa = self.resolve_tsa(request)?;
         pades::ensure_supported_level(request, tsa.as_ref())?;
+        request.check_cancelled()?;
         let picked = self.pick(&request.cert_id)?;
         if !can_sign(&picked.info.usage) {
             return Err(Error::Sign("certificate is not a signing cert".into()));
@@ -251,7 +259,7 @@ impl Signer for Pkcs11Signer {
         let cert = Certificate::from_der(&picked.der).map_err(|e| Error::Sign(e.to_string()))?;
         let name = common_name_or_subject(&cert);
         pades::sign_incremental(pdf, request, &name, tsa.as_ref(), |message| {
-            self.sign_cms(message, &picked)
+            self.sign_cms(message, &picked, request)
         })
     }
 

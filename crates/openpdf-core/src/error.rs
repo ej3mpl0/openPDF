@@ -28,6 +28,9 @@ pub enum Error {
     /// PAdES B-T: the RFC 3161 timestamp could not be obtained or did not
     /// validate. The signature is never downgraded to B-B.
     Timestamp(TimestampErrorKind),
+    /// The caller cancelled the operation through a [`crate::CancelToken`].
+    /// Not a failure: the UI should treat it as a no-op. Nothing was written.
+    Cancelled,
     /// The PDF already has a signature; `op` would invalidate it.
     Signed {
         op: SignedOp,
@@ -156,6 +159,11 @@ impl fmt::Display for Error {
 }
 
 impl Error {
+    /// `true` for [`Error::Cancelled`]: the user aborted, do not show an error.
+    pub fn is_cancelled(&self) -> bool {
+        matches!(self, Error::Cancelled)
+    }
+
     /// Localized message for the active catalog. The UI may ignore this and
     /// match the variant instead.
     pub fn to_locale_string(&self) -> String {
@@ -181,6 +189,7 @@ impl Error {
                 "timestamp: {detail}",
                 &[("detail", &kind.to_locale_string())],
             ),
+            Error::Cancelled => tr("operation cancelled"),
             Error::Sign(m) => tr_args("sign: {detail}", &[("detail", &tr(m))]),
             Error::Signed { op } => tr_args(
                 "document is signed; {op} would invalidate the signature (incremental save only)",

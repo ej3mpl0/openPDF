@@ -19,7 +19,7 @@ use der::asn1::{GeneralizedTime, Int, OctetString, SetOfVec};
 use der::{Any, Decode, Encode, Sequence};
 use openpdf_core::test_support::with_locale;
 use openpdf_core::{
-    format_verify_result, Error, PadesLevel, SignRequest, Signer, TimestampErrorKind,
+    format_verify_result, CancelToken, Error, PadesLevel, SignRequest, Signer, TimestampErrorKind,
 };
 use rsa::pkcs1v15::SigningKey;
 use rsa::pkcs8::DecodePrivateKey;
@@ -56,21 +56,32 @@ enum Mode {
     Untrusted,
     Tampered,
     Reject,
+    /// Valid reply, but only after 5 s.
+    Slow,
 }
 
 /// Start a local TSA; returns its `http://127.0.0.1:<port>/` URL.
 fn spawn_tsa(mode: Mode) -> String {
+    spawn_tsa_notify(mode, None)
+}
+
+/// Like [`spawn_tsa`]; sends on `arrived` as soon as a request body is read.
+fn spawn_tsa_notify(mode: Mode, arrived: Option<std::sync::mpsc::Sender<()>>) -> String {
     let listener = TcpListener::bind("127.0.0.1:0").expect("bind");
     let url = format!("http://{}/tsa", listener.local_addr().unwrap());
     std::thread::spawn(move || {
         for stream in listener.incoming().flatten() {
-            let _ = serve(stream, mode);
+            let _ = serve(stream, mode, arrived.clone());
         }
     });
     url
 }
 
-fn serve(stream: TcpStream, mode: Mode) -> std::io::Result<()> {
+fn serve(
+    stream: TcpStream,
+    mode: Mode,
+    arrived: Option<std::sync::mpsc::Sender<()>>,
+) -> std::io::Result<()> {
     stream.set_read_timeout(Some(Duration::from_secs(10)))?;
     let mut reader = BufReader::new(stream.try_clone()?);
     let mut len = 0usize;
@@ -95,6 +106,12 @@ fn serve(stream: TcpStream, mode: Mode) -> std::io::Result<()> {
     let req = TimeStampReq::from_der(&body).expect("TimeStampReq");
     assert!(req.cert_req, "client must ask for the TSA certificate");
     assert!(req.nonce.is_some(), "client must send a nonce");
+    if let Some(tx) = arrived {
+        let _ = tx.send(());
+    }
+    if mode == Mode::Slow {
+        std::thread::sleep(Duration::from_secs(5));
+    }
     let reply = respond(mode, &req);
     let mut out = stream;
     write!(
@@ -317,7 +334,7 @@ fn bt_good_signature_verifies_with_timestamp() {
     let bb =
         pades::sign_incremental(&pdf, &SignRequest::new("soft"), "Test", None, soft_cms).unwrap();
     let infos = pades::verify_signatures(&bb, &trusted()).unwrap();
-    assert_eq!(infos[0].valid, Some(true));
+    assert_eq!(infos[0].valid, Some(true), "{:?}", infos[0]);
     assert!(infos[0].timestamp.is_none());
 }
 
@@ -356,10 +373,15 @@ fn bt_rejected_request_is_refused() {
 
 #[test]
 fn bt_unreachable_tsa_is_a_network_error() {
-    let port = {
-        let l = TcpListener::bind("127.0.0.1:0").unwrap();
-        l.local_addr().unwrap().port()
-    };
+    // Keep the port bound (a freed port can be reused by a parallel test's
+    // TSA) and drop every connection without replying.
+    let l = TcpListener::bind("127.0.0.1:0").unwrap();
+    let port = l.local_addr().unwrap().port();
+    std::thread::spawn(move || {
+        for stream in l.incoming().flatten() {
+            drop(stream);
+        }
+    });
     let kind = ts_kind(sign_bt(&format!("http://127.0.0.1:{port}/")));
     assert!(
         matches!(kind, TimestampErrorKind::Network { .. }),
@@ -498,4 +520,92 @@ fn openssl_ts_tokens_validate() {
         let r = crate::tsp::validate_token(tok, data, None, &[], true);
         assert_eq!(r, Err(TimestampErrorKind::UntrustedCert));
     }
+}
+
+#[test]
+fn bt_cancel_while_waiting_for_tsa_returns_fast_and_writes_nothing() {
+    // The TSA holds its reply for 5 s. Cancel 100 ms after the request
+    // reaches it; signing must return within 500 ms of the request arriving.
+    let (arrived_tx, arrived_rx) = std::sync::mpsc::channel();
+    let url = spawn_tsa_notify(Mode::Slow, Some(arrived_tx));
+    let pdf = std::fs::read(corpus("hello.pdf")).unwrap();
+    let original = pdf.clone();
+    let cancel = CancelToken::new();
+    let request = SignRequest::new("soft")
+        .with_level(PadesLevel::BT)
+        .with_cancel(cancel.clone());
+    let tsa = Tsa::new(Some(&url), Duration::from_secs(20), trusted()).unwrap();
+    let canceller = {
+        let cancel = cancel.clone();
+        std::thread::spawn(move || {
+            arrived_rx
+                .recv_timeout(Duration::from_secs(30))
+                .expect("TSA request");
+            let at = std::time::Instant::now();
+            std::thread::sleep(Duration::from_millis(100));
+            cancel.cancel();
+            at
+        })
+    };
+    let r = pades::sign_incremental(&pdf, &request, "Test", Some(&tsa), soft_cms);
+    let returned = std::time::Instant::now();
+    let arrived = canceller.join().unwrap();
+    match r {
+        Err(e) => assert!(e.is_cancelled(), "expected Cancelled, got {e:?}"),
+        Ok(_) => panic!("cancelled B-T must not produce a signature"),
+    }
+    let elapsed = returned - arrived;
+    assert!(elapsed < Duration::from_millis(500), "took {elapsed:?}");
+    assert_eq!(pdf, original, "input bytes changed");
+    assert_eq!(std::fs::read(corpus("hello.pdf")).unwrap(), original);
+}
+
+#[test]
+fn bt_cancel_before_tsa_request_sends_nothing() {
+    // Unroutable port: if a request were sent it would fail as Network, not Cancelled.
+    let cancel = CancelToken::new();
+    cancel.cancel();
+    let pdf = std::fs::read(corpus("hello.pdf")).unwrap();
+    let request = SignRequest::new("soft")
+        .with_level(PadesLevel::BT)
+        .with_cancel(cancel);
+    let tsa = Tsa::new(
+        Some("http://127.0.0.1:9/tsa"),
+        Duration::from_secs(5),
+        trusted(),
+    )
+    .unwrap();
+    let r = pades::sign_incremental(&pdf, &request, "Test", Some(&tsa), soft_cms);
+    assert!(matches!(r, Err(Error::Cancelled)), "{r:?}");
+}
+
+#[test]
+fn cancel_before_pin_prompt_never_asks_for_pin() {
+    with_softhsm(|| {
+        let env = test_env();
+        let signer = Pkcs11Signer::new(Pkcs11Config::with_module(&env.module), PanicPin).unwrap();
+        let cert = signer.list_certificates().unwrap()[0].clone();
+        let cancel = CancelToken::new();
+        cancel.cancel();
+        let pdf = std::fs::read(corpus("hello.pdf")).unwrap();
+        let r = signer.sign(&pdf, &SignRequest::new(cert.id.clone()).with_cancel(cancel));
+        assert!(matches!(r, Err(Error::Cancelled)), "{r:?}");
+    });
+}
+
+#[test]
+fn cancelled_error_is_translated() {
+    with_locale("es", || {
+        // Spanish lives only in po/es.po; just check it is translated.
+        assert_ne!(Error::Cancelled.to_string(), "operation cancelled")
+    });
+    with_locale("en", || {
+        assert_eq!(Error::Cancelled.to_string(), "operation cancelled")
+    });
+}
+
+#[test]
+fn cancel_token_is_clone_send_sync() {
+    fn assert_traits<T: Clone + Send + Sync + 'static>() {}
+    assert_traits::<CancelToken>();
 }
