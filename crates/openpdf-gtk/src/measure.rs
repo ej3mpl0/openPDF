@@ -235,8 +235,6 @@ pub struct BudgetReport {
     pub gsk_renderer_env: String,
     /// Realized `GskRenderer` GType name (`GskCairoRenderer` / `GskNglRenderer` / …).
     pub gsk_renderer: String,
-    /// `GL_RENDERER` from an already-created `GdkGLContext`, or `none`.
-    pub gl_renderer: String,
     /// `gtk_get_{major,minor,micro}_version`.
     pub gtk_version: String,
     /// Realized window logical size (GTK allocation).
@@ -317,7 +315,6 @@ impl Display for BudgetReport {
         write!(f, "{}", self.gtk_env)?;
         writeln!(f, "GSK_RENDERER={}", self.gsk_renderer_env)?;
         writeln!(f, "gsk_renderer={}", or_none(&self.gsk_renderer))?;
-        writeln!(f, "gl_renderer={}", or_none(&self.gl_renderer))?;
         writeln!(f, "gtk_version={}", self.gtk_version)?;
         writeln!(f, "env_overrides={}", self.env_overrides.join(","))?;
         writeln!(f, "ok={}", self.ok)?;
@@ -807,35 +804,6 @@ pub fn realized_gsk_renderer_name(widget: &impl gtk::prelude::IsA<gtk::Widget>) 
         .unwrap_or_default()
 }
 
-/// `GL_RENDERER` from `GdkGLContext::current()` only. Never creates a context.
-pub fn existing_gl_renderer() -> String {
-    if gtk::gdk::GLContext::current().is_none() {
-        return String::new();
-    }
-    gl_renderer_string().unwrap_or_default()
-}
-
-const GL_RENDERER: u32 = 0x1F01;
-
-#[link(name = "epoxy")]
-extern "C" {
-    fn epoxy_glGetString(name: u32) -> *const std::ffi::c_uchar;
-}
-
-fn gl_renderer_string() -> Option<String> {
-    unsafe {
-        let ptr = epoxy_glGetString(GL_RENDERER);
-        if ptr.is_null() {
-            return None;
-        }
-        Some(
-            std::ffi::CStr::from_ptr(ptr.cast())
-                .to_string_lossy()
-                .into_owned(),
-        )
-    }
-}
-
 fn gtk_star_env_block() -> String {
     let mut keys: Vec<String> = std::env::vars()
         .map(|(k, _)| k)
@@ -1064,13 +1032,11 @@ impl BudgetReport {
         self
     }
 
-    /// Fill realized `gsk_renderer` / `gl_renderer` / window size / scale.
-    /// Does not create a GL context.
+    /// Fill realized `gsk_renderer` / window size / scale. No GL calls.
     pub fn with_window_graphics(mut self, widget: &impl gtk::prelude::IsA<gtk::Widget>) -> Self {
         use gtk::prelude::WidgetExt;
         let w = widget.as_ref();
         self.gsk_renderer = realized_gsk_renderer_name(widget);
-        self.gl_renderer = existing_gl_renderer();
         self.window_width = w.width();
         self.window_height = w.height();
         self.scale = w.scale_factor();
@@ -1191,7 +1157,7 @@ mod tests {
         assert!(text.contains("fontconfig_fonts="));
         assert!(text.contains("gtk_icon_theme="));
         assert!(text.contains("gsk_renderer=none"));
-        assert!(text.contains("gl_renderer=none"));
+        assert!(!text.contains("gl_renderer="));
         assert!(text.contains("gtk_version="));
         assert!(text.contains("window_size=0x0"));
         assert!(text.contains("scale=0"));
@@ -1199,7 +1165,6 @@ mod tests {
         assert!(!text.contains("limit_peak_rss_bytes="));
         let named = BudgetReport {
             gsk_renderer: "GskCairoRenderer".into(),
-            gl_renderer: "llvmpipe".into(),
             gtk_version: "4.14.5".into(),
             window_width: 1280,
             window_height: 800,
@@ -1210,7 +1175,7 @@ mod tests {
         assert!(named.contains("window_size=1280x800"));
         assert!(named.contains("scale=1"));
         assert!(named.contains("gsk_renderer=GskCairoRenderer"));
-        assert!(named.contains("gl_renderer=llvmpipe"));
+        assert!(!named.contains("gl_renderer="));
         assert!(named.contains("gtk_version=4.14.5"));
     }
 
