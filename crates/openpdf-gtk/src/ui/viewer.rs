@@ -246,23 +246,22 @@ impl DocumentView {
         self.queue_repaint();
     }
 
-    /// Count cached tiles for the current page viewport and the thumbnail strip.
+    /// Count textures ready to paint for the current page viewport and thumbs.
     ///
+    /// Engine pixel-cache hits are not enough: snapshot only peeks textures.
     /// Does not `poll()` — draining the render queue here would mark
     /// `ui_all_visible` in the same draw as `ui_first_tile`.
     pub fn tile_ready(&self) -> TileReady {
         let visible = page_tile_keys(self);
         let thumbs = thumb_tile_keys(self);
+        let textures = self.shared.textures.borrow();
         TileReady {
             visible_ready: visible
                 .iter()
-                .filter(|k| self.shared.doc.paint_tile(k).is_some())
+                .filter(|k| textures.peek(k).is_some())
                 .count(),
             visible_total: visible.len(),
-            thumb_ready: thumbs
-                .iter()
-                .filter(|k| self.shared.doc.paint_tile(k).is_some())
-                .count(),
+            thumb_ready: thumbs.iter().filter(|k| textures.peek(k).is_some()).count(),
             thumb_total: thumbs.len(),
         }
     }
