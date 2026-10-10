@@ -22,14 +22,14 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        # Startup budgets match run-measure.py defaults (300 core/CLI, 1500 GUI).
+        # Core/CLI startup budget per OS; GUI limits are set on the Measure GUI step.
         # Override a single OS here without changing the script.
         include: ${{ fromJSON(
           ((github.event_name == 'push' && github.ref == 'refs/heads/main') ||
            (github.event_name == 'pull_request' && !github.event.pull_request.draft &&
             contains(github.event.pull_request.labels.*.name, 'ci:full')))
-          && '[{"os":"ubuntu-latest","measure_startup_core_ms":300,"measure_startup_gui_ms":1500},{"os":"windows-latest","measure_startup_core_ms":300},{"os":"macos-latest","measure_startup_core_ms":300}]'
-          || '[{"os":"ubuntu-latest","measure_startup_core_ms":300,"measure_startup_gui_ms":1500}]') }}
+          && '[{"os":"ubuntu-latest","measure_startup_core_ms":300},{"os":"windows-latest","measure_startup_core_ms":300},{"os":"macos-latest","measure_startup_core_ms":300}]'
+          || '[{"os":"ubuntu-latest","measure_startup_core_ms":300}]') }}
     defaults:
       run:
         shell: bash
@@ -87,9 +87,35 @@ jobs:
 
       - name: Measure GUI
         if: runner.os == 'Linux'
-        run: python3 .github/scripts/run-measure.py --kind gui
+        run: python3 .github/scripts/run-measure.py --kind gui --runs 5
         env:
-          OPENPDF_MEASURE_STARTUP_MS: ${{ matrix.measure_startup_gui_ms }}
+          # Pinned so numbers are comparable; GL under Xvfb is software and
+          # adds ~45 MiB / ~70 ms.
+          GDK_BACKEND: x11
+          GSK_RENDERER: cairo
+          OPENPDF_MEASURE_STARTUP_MS: "300"
+          OPENPDF_MEASURE_RAM_MIB: "160"
+
+      # Informational only: default GSK renderer (GL in software under Xvfb).
+      # Never gates; the cairo step above is the gate.
+      - name: Measure GUI (informational, default renderer)
+        if: runner.os == 'Linux'
+        continue-on-error: true
+        env:
+          GDK_BACKEND: x11
+          OPENPDF_MEASURE_STARTUP_MS: "1000000"
+          OPENPDF_MEASURE_RAM_MIB: "100000"
+        run: |
+          set -o pipefail
+          env -u GSK_RENDERER python3 .github/scripts/run-measure.py --kind gui --runs 5 \
+            | tee measure-default.log || true
+          median=$(grep -E '^measure: median' measure-default.log || echo 'measure: no result')
+          echo "$median"
+          {
+            echo "### GUI measure, default renderer (informational, software rendering under xvfb)"
+            echo
+            echo "\`$median\`"
+          } >> "$GITHUB_STEP_SUMMARY"
 
       - name: Record CI time
         if: always()

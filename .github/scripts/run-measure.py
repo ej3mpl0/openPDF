@@ -19,6 +19,7 @@ import argparse
 import os
 import re
 import shutil
+import statistics
 import subprocess
 import sys
 import time
@@ -61,7 +62,6 @@ def run_gui(binary: Path, frames: str) -> tuple[int, str]:
     env = os.environ.copy()
     if sys.platform.startswith("linux"):
         env.setdefault("GDK_BACKEND", "x11")
-        env.setdefault("GSK_RENDERER", "cairo")
         if not env.get("DISPLAY") and not env.get("WAYLAND_DISPLAY"):
             xvfb = shutil.which("xvfb-run")
             if not xvfb:
@@ -125,7 +125,11 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--kind", choices=sorted(DEFAULT_STARTUP_MS),
                         default=os.environ.get("OPENPDF_MEASURE_KIND", "core"))
     parser.add_argument("--frames", default=os.environ.get("OPENPDF_MEASURE_FRAMES", "32"))
+    parser.add_argument("--runs", type=int, default=int(os.environ.get("OPENPDF_MEASURE_RUNS", "5")),
+                        help="repeat N times; enforce median startup and max peak RSS")
     args = parser.parse_args(argv)
+    if args.runs < 1:
+        return fail("--runs must be >= 1")
     kind = args.kind
     ram_mib = int(os.environ.get("OPENPDF_MEASURE_RAM_MIB", "250"))
     startup_limit = int(os.environ.get("OPENPDF_MEASURE_STARTUP_MS") or DEFAULT_STARTUP_MS[kind])
@@ -135,24 +139,42 @@ def main(argv: list[str] | None = None) -> int:
         return fail(f"{kind} binary not found at {binary}; build it first "
                     f"(cargo build --release -p {'openpdf-gtk' if kind == 'gui' else 'openpdf-cli'})")
 
-    print(f"measure: kind={kind} running {binary}")
-    print(f"measure: limits ram={ram_mib} MiB startup={startup_limit} ms")
-    try:
-        code, output = run_gui(binary, args.frames) if kind == "gui" else run_core(binary)
-    except FileNotFoundError as e:
-        return fail(str(e))
-    print(output)
-    if code != 0:
-        return fail(f"binary exited {code}")
+    print(f"measure: kind={kind} running {binary} runs={args.runs}")
+    print(f"measure: limits median startup<={startup_limit} ms, max peak RSS<={ram_mib} MiB")
+    startups: list[int] = []
+    rsses: list[int] = []
+    for n in range(1, args.runs + 1):
+        try:
+            code, output = run_gui(binary, args.frames) if kind == "gui" else run_core(binary)
+        except FileNotFoundError as e:
+            return fail(str(e))
+        if code != 0:
+            print(output)
+            return fail(f"run {n}: binary exited {code}")
+        rss, startup = parse_metrics(output)
+        if rss is None or startup is None:
+            print(output)
+            return fail(f"run {n}: binary printed no startup_ms / peak_rss metrics")
+        startups.append(startup)
+        rsses.append(rss)
+        print(f"measure: run {n}/{args.runs} startup_ms={startup} peak_rss_bytes={rss} "
+              f"peak_rss_mb={rss / 1048576:.1f}")
 
-    rss, startup = parse_metrics(output)
-    if rss is None or startup is None:
-        return fail("binary printed no startup_ms / peak_rss metrics")
-    if rss > ram_mib * 1048576:
-        return fail(f"peak RSS {rss / 1048576:.1f} MiB exceeds {ram_mib} MiB")
-    if startup > startup_limit:
-        return fail(f"startup {startup} ms exceeds {startup_limit} ms")
-    print(f"measure: OK kind={kind} startup_ms={startup} peak_rss_mb={rss / 1048576:.1f}")
+    med = statistics.median(startups)
+    peak = max(rsses)
+    print(f"measure: median startup_ms={med:g} (min {min(startups)}, max {max(startups)}); "
+          f"max peak_rss_bytes={peak} peak_rss_mb={peak / 1048576:.1f} "
+          f"(median {statistics.median(rsses) / 1048576:.1f})")
+    bad = False
+    if med > startup_limit:
+        fail(f"median startup {med:g} ms exceeds {startup_limit} ms")
+        bad = True
+    if peak > ram_mib * 1048576:
+        fail(f"max peak RSS {peak / 1048576:.1f} MiB exceeds {ram_mib} MiB")
+        bad = True
+    if bad:
+        return 1
+    print(f"measure: OK kind={kind}")
     return 0
 
 
