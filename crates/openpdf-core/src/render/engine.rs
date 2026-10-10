@@ -1,4 +1,4 @@
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::path::Path;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::mpsc::{self, Receiver, RecvTimeoutError, Sender};
@@ -25,15 +25,19 @@ static NEXT_ENGINE_ID: AtomicU64 = AtomicU64::new(1);
 struct EngineSlot {
     queue: RenderQueue,
     events: Sender<TileEvent>,
+    /// Documents this engine bound; released on `Unregister`.
+    docs: HashSet<DocumentId>,
 }
 
 enum WorkerCmd {
     Bind {
+        engine: EngineId,
         id: DocumentId,
         bytes: Vec<u8>,
         reply: Sender<Result<()>>,
     },
     Unbind {
+        engine: EngineId,
         id: DocumentId,
     },
     #[cfg(test)]
@@ -242,6 +246,22 @@ fn worker_loop(pdfium: Pdfium, cmd_rx: Receiver<WorkerCmd>, cache: Arc<Mutex<Til
     }
 }
 
+/// Drop a bound document unless another live engine still has it bound.
+fn release_doc(
+    id: DocumentId,
+    docs: &mut HashMap<DocumentId, BoundDoc>,
+    engines: &HashMap<EngineId, EngineSlot>,
+    cache: &Arc<Mutex<TileCache>>,
+) {
+    if engines.values().any(|slot| slot.docs.contains(&id)) {
+        return;
+    }
+    docs.remove(&id);
+    if let Ok(mut c) = cache.lock() {
+        c.invalidate_doc(id);
+    }
+}
+
 fn handle_cmd(
     pdfium: &Pdfium,
     cmd: WorkerCmd,
@@ -250,20 +270,28 @@ fn handle_cmd(
     cache: &Arc<Mutex<TileCache>>,
 ) -> bool {
     match cmd {
-        WorkerCmd::Bind { id, bytes, reply } => {
+        WorkerCmd::Bind {
+            engine,
+            id,
+            bytes,
+            reply,
+        } => {
             let result = load_bound(pdfium, bytes).map(|bound| {
                 docs.insert(id, bound);
+                if let Some(slot) = engines.get_mut(&engine) {
+                    slot.docs.insert(id);
+                }
                 if let Ok(mut c) = cache.lock() {
                     c.invalidate_doc(id);
                 }
             });
             let _ = reply.send(result);
         }
-        WorkerCmd::Unbind { id } => {
-            docs.remove(&id);
-            if let Ok(mut c) = cache.lock() {
-                c.invalidate_doc(id);
+        WorkerCmd::Unbind { engine, id } => {
+            if let Some(slot) = engines.get_mut(&engine) {
+                slot.docs.remove(&id);
             }
+            release_doc(id, docs, engines, cache);
         }
         #[cfg(test)]
         WorkerCmd::Probe { engine, doc, reply } => {
@@ -275,11 +303,16 @@ fn handle_cmd(
                 EngineSlot {
                     queue: RenderQueue::new(),
                     events,
+                    docs: HashSet::new(),
                 },
             );
         }
         WorkerCmd::Unregister { engine } => {
-            engines.remove(&engine);
+            if let Some(slot) = engines.remove(&engine) {
+                for id in slot.docs {
+                    release_doc(id, docs, engines, cache);
+                }
+            }
         }
         WorkerCmd::Request { engine, reqs } => {
             if let Some(slot) = engines.get_mut(&engine) {
@@ -412,8 +445,23 @@ fn search_doc(doc: &PdfDocument<'_>, query: &str) -> Result<Vec<SearchHit>> {
 /// the shared render thread.
 #[derive(Clone, Debug)]
 pub struct Engine {
+    inner: Arc<EngineInner>,
+}
+
+/// Shared by all clones of an [`Engine`]; unregisters exactly once when the
+/// last clone is gone.
+#[derive(Debug)]
+struct EngineInner {
     id: EngineId,
-    events: Arc<Mutex<Receiver<TileEvent>>>,
+    events: Mutex<Receiver<TileEvent>>,
+}
+
+impl Drop for EngineInner {
+    fn drop(&mut self) {
+        if let Ok(h) = worker() {
+            let _ = h.cmd.send(WorkerCmd::Unregister { engine: self.id });
+        }
+    }
 }
 
 impl Engine {
@@ -474,6 +522,7 @@ impl Engine {
     fn bind_bytes(&self, id: DocumentId, bytes: Vec<u8>) -> Result<()> {
         let (tx, rx) = mpsc::channel();
         self.send(WorkerCmd::Bind {
+            engine: self.inner.id,
             id,
             bytes,
             reply: tx,
@@ -483,25 +532,30 @@ impl Engine {
     }
 
     pub fn close(&self, id: DocumentId) -> Result<()> {
-        self.send(WorkerCmd::Unbind { id })
+        self.send(WorkerCmd::Unbind {
+            engine: self.inner.id,
+            id,
+        })
     }
 
     /// Begin a new viewport frame: stale queued tiles are dropped.
     pub fn begin_frame(&self) -> Result<u64> {
-        self.send(WorkerCmd::Bump { engine: self.id })?;
+        self.send(WorkerCmd::Bump {
+            engine: self.inner.id,
+        })?;
         Ok(1)
     }
 
     pub fn request_tiles(&self, reqs: impl IntoIterator<Item = TileRequest>) -> Result<()> {
         self.send(WorkerCmd::Request {
-            engine: self.id,
+            engine: self.inner.id,
             reqs: reqs.into_iter().collect(),
         })
     }
 
     pub fn cancel(&self, keys: impl IntoIterator<Item = TileKey>) -> Result<()> {
         self.send(WorkerCmd::Cancel {
-            engine: self.id,
+            engine: self.inner.id,
             keys: keys.into_iter().collect(),
         })
     }
@@ -512,7 +566,7 @@ impl Engine {
         keep: impl IntoIterator<Item = TileKey>,
     ) -> Result<()> {
         self.send(WorkerCmd::CancelExcept {
-            engine: self.id,
+            engine: self.inner.id,
             doc,
             keep: keep.into_iter().collect(),
         })
@@ -523,12 +577,12 @@ impl Engine {
     }
 
     pub fn try_recv(&self) -> Option<TileEvent> {
-        let rx = self.events.lock().ok()?;
+        let rx = self.inner.events.lock().ok()?;
         rx.try_recv().ok()
     }
 
     pub fn recv_timeout(&self, timeout: Duration) -> Option<TileEvent> {
-        let rx = self.events.lock().ok()?;
+        let rx = self.inner.events.lock().ok()?;
         rx.recv_timeout(timeout).ok()
     }
 
@@ -593,17 +647,11 @@ impl Engine {
             })
             .map_err(|_| Error::pdfium("render thread closed"))?;
         Ok(Self {
-            id,
-            events: Arc::new(Mutex::new(rx)),
+            inner: Arc::new(EngineInner {
+                id,
+                events: Mutex::new(rx),
+            }),
         })
-    }
-}
-
-impl Drop for Engine {
-    fn drop(&mut self) {
-        if Arc::strong_count(&self.events) == 1 {
-            let _ = self.send(WorkerCmd::Unregister { engine: self.id });
-        }
     }
 }
 
@@ -642,7 +690,7 @@ mod drop_tests {
         }
         for _ in 0..1000 {
             let a = Engine::new().unwrap();
-            let id = a.id;
+            let id = a.inner.id;
             let b = a.clone();
             let barrier = Arc::new(std::sync::Barrier::new(2));
             let handles: Vec<_> = [a, b]
@@ -672,7 +720,7 @@ mod drop_tests {
         };
         let doc = crate::blank_document(1).unwrap();
         engine.bind(&doc).unwrap();
-        let id = engine.id;
+        let id = engine.inner.id;
         assert_eq!(probe(id, doc.id()), (true, true));
         drop(engine);
         assert_eq!(probe(id, doc.id()), (false, false));
@@ -687,7 +735,7 @@ mod drop_tests {
         let doc = crate::blank_document(1).unwrap();
         a.bind(&doc).unwrap();
         b.bind(&doc).unwrap();
-        let (ida, idb) = (a.id, b.id);
+        let (ida, idb) = (a.inner.id, b.inner.id);
         drop(a);
         assert_eq!(probe(ida, doc.id()), (false, true));
         drop(b);
