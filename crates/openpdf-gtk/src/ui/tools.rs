@@ -314,27 +314,34 @@ fn ranges_of(spec: &str, count: u32) -> openpdf_core::Result<Vec<openpdf_core::P
     parse_page_ranges(spec, count)
 }
 
+#[derive(Clone)]
+struct InsertSourceUi {
+    view: Rc<DocumentView>,
+    source: Rc<RefCell<Option<(PathBuf, Document)>>>,
+    source_l: gtk::Label,
+    warn: gtk::Label,
+}
+
 fn adopt_insert_source(
     parent: &impl IsA<gtk::Window>,
     lang: Lang,
     overlay: &adw::ToastOverlay,
-    view: &Rc<DocumentView>,
-    source: &Rc<RefCell<Option<(PathBuf, Document)>>>,
-    source_l: &gtk::Label,
-    warn: &gtk::Label,
+    ui: &InsertSourceUi,
     path: PathBuf,
 ) {
     match Document::open(&path) {
-        Ok(doc) => store_insert_source(view, source, source_l, warn, path, doc),
+        Ok(doc) => store_insert_source(ui, path, doc),
         Err(Error::PasswordRequired) => {
-            let view = view.clone();
-            let source = source.clone();
-            let source_l = source_l.clone();
-            let warn = warn.clone();
+            let ui = InsertSourceUi {
+                view: ui.view.clone(),
+                source: ui.source.clone(),
+                source_l: ui.source_l.clone(),
+                warn: ui.warn.clone(),
+            };
             let dest = path.clone();
             password::prompt(parent, lang, &path, move |pw| {
                 let doc = Document::open_with_password(&dest, pw)?;
-                store_insert_source(&view, &source, &source_l, &warn, dest.clone(), doc);
+                store_insert_source(&ui, dest.clone(), doc);
                 Ok(())
             });
         }
@@ -342,22 +349,19 @@ fn adopt_insert_source(
     }
 }
 
-fn store_insert_source(
-    view: &DocumentView,
-    source: &Rc<RefCell<Option<(PathBuf, Document)>>>,
-    source_l: &gtk::Label,
-    warn: &gtk::Label,
-    path: PathBuf,
-    src: Document,
-) {
-    source_l.set_text(&path.display().to_string());
+fn store_insert_source(ui: &InsertSourceUi, path: PathBuf, src: Document) {
+    ui.source_l.set_text(&path.display().to_string());
     let src_name = doc_file_name(&src, "PDF");
-    let _ = view.opened().with_document(|cur| {
+    let _ = ui.view.opened().with_document(|cur| {
         let cur_name = doc_file_name(cur, "PDF");
-        set_merge_warning(warn, &[cur.clone(), src.clone()], &[&cur_name, &src_name]);
+        set_merge_warning(
+            &ui.warn,
+            &[cur.clone(), src.clone()],
+            &[&cur_name, &src_name],
+        );
         Ok(())
     });
-    *source.borrow_mut() = Some((path, src));
+    *ui.source.borrow_mut() = Some((path, src));
 }
 
 fn insert_dialog(
@@ -392,12 +396,13 @@ fn insert_dialog(
 
     pick.connect_clicked({
         let win = form.win.clone();
-        let source = source.clone();
-        let source_l = source_l.clone();
-        let warn = warn.clone();
-        let view = view.clone();
         let overlay = overlay.clone();
-        let lang = lang;
+        let ui = InsertSourceUi {
+            view: view.clone(),
+            source: source.clone(),
+            source_l: source_l.clone(),
+            warn: warn.clone(),
+        };
         move |_| {
             let dialog = gtk::FileDialog::builder()
                 .title(t(lang, "Source PDF"))
@@ -406,18 +411,18 @@ fn insert_dialog(
             let filter = gtk::FileFilter::new();
             filter.add_suffix("pdf");
             dialog.set_default_filter(Some(&filter));
-            let source = source.clone();
-            let source_l = source_l.clone();
-            let warn = warn.clone();
-            let view = view.clone();
+            let ui = InsertSourceUi {
+                view: ui.view.clone(),
+                source: ui.source.clone(),
+                source_l: ui.source_l.clone(),
+                warn: ui.warn.clone(),
+            };
             let overlay = overlay.clone();
             let win = win.clone();
             glib::spawn_future_local(async move {
                 if let Ok(file) = dialog.open_future(Some(&win)).await {
                     if let Some(path) = file.path() {
-                        adopt_insert_source(
-                            &win, lang, &overlay, &view, &source, &source_l, &warn, path,
-                        );
+                        adopt_insert_source(&win, lang, &overlay, &ui, path);
                     }
                 }
             });
