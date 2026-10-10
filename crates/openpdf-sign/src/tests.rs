@@ -1490,7 +1490,9 @@ fn explicit_env_module_loads_only_that_module() {
 #[test]
 fn relative_env_module_is_rejected() {
     let r = resolve_module_paths_for_test(&Pkcs11Config::default(), Some("libsofthsm2.so".into()));
-    assert!(r.is_err());
+    let msg = r.expect_err("relative env path").to_string();
+    assert!(msg.contains("OPENPDF_PKCS11_MODULE"), "{msg}");
+    assert!(msg.contains("libsofthsm2.so"), "{msg}");
     let r = resolve_module_paths_for_test(&Pkcs11Config::default(), Some("".into()));
     assert!(r.expect("empty env falls back to defaults").len() > 1);
 }
@@ -1502,11 +1504,28 @@ fn relative_config_module_path_is_rejected() {
     let env_err =
         resolve_module_paths_for_test(&Pkcs11Config::default(), Some("libsofthsm2.so".into()))
             .expect_err("relative env path");
-    assert_eq!(
-        err.to_string(),
-        env_err.to_string(),
-        "same rule, same error"
-    );
+    let (err, env_err) = (err.to_string(), env_err.to_string());
+    assert!(err.contains("module_path"), "{err}");
+    assert!(!err.contains("OPENPDF_PKCS11_MODULE"), "{err}");
+    assert!(env_err.contains("OPENPDF_PKCS11_MODULE"), "{env_err}");
+    assert_ne!(err, env_err, "each error names its own source");
+    with_locale("es", || {
+        let es = resolve_module_paths_for_test(&Pkcs11Config::with_module("libsofthsm2.so"), None)
+            .expect_err("es")
+            .to_string();
+        assert!(
+            es.contains("module_path") && es.contains("ruta absoluta"),
+            "{es}"
+        );
+        let es_env =
+            resolve_module_paths_for_test(&Pkcs11Config::default(), Some("libsofthsm2.so".into()))
+                .expect_err("es env")
+                .to_string();
+        assert!(
+            es_env.contains("OPENPDF_PKCS11_MODULE") && es_env.contains("ruta absoluta"),
+            "{es_env}"
+        );
+    });
     assert!(Pkcs11Signer::new(
         Pkcs11Config::with_module("./libsofthsm2.so"),
         StaticPinProvider::new(USER_PIN)

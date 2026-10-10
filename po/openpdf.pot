@@ -483,3 +483,9 @@ msgstr ""
 
 msgid "no signing certificates found"
 msgstr ""
+
+msgid "PKCS#11 module_path in the configuration must be an absolute path: {path}"
+msgstr ""
+
+msgid "OPENPDF_PKCS11_MODULE must be an absolute path: {path}"
+msgstr ""
