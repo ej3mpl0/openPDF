@@ -692,3 +692,6 @@ msgstr "La verificación falló"
 
 msgid "PIN must be requested off the GTK thread"
 msgstr "El PIN debe pedirse fuera del hilo de GTK"
+
+msgid "Saved signed PDF to {path}"
+msgstr "PDF firmado guardado en {path}"
