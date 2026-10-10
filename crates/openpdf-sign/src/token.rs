@@ -302,6 +302,19 @@ fn dedup_key(token_serial: &str, cka_id: &[u8], der: &[u8]) -> (String, Vec<u8>)
     (token_serial.to_string(), id)
 }
 
+/// An explicit PKCS#11 module must be an absolute path, so `dlopen` never searches
+/// the library path or the working directory.
+fn absolute_module_path(p: PathBuf) -> Result<PathBuf> {
+    if p.is_absolute() {
+        Ok(p)
+    } else {
+        Err(Error::Sign(tr_args(
+            "OPENPDF_PKCS11_MODULE must be an absolute path: {path}",
+            &[("path", &p.display().to_string())],
+        )))
+    }
+}
+
 /// An explicit module (config or `OPENPDF_PKCS11_MODULE`) is the only one loaded.
 /// Without one, every existing built-in default is loaded.
 fn resolve_module_paths(
@@ -309,17 +322,10 @@ fn resolve_module_paths(
     env: Option<std::ffi::OsString>,
 ) -> Result<Vec<PathBuf>> {
     if let Some(p) = &config.module_path {
-        return Ok(vec![p.clone()]);
+        return Ok(vec![absolute_module_path(p.clone())?]);
     }
     if let Some(env) = env.filter(|v| !v.is_empty()) {
-        let p = PathBuf::from(env);
-        if !p.is_absolute() {
-            return Err(Error::Sign(tr_args(
-                "OPENPDF_PKCS11_MODULE must be an absolute path: {path}",
-                &[("path", &p.display().to_string())],
-            )));
-        }
-        return Ok(vec![p]);
+        return Ok(vec![absolute_module_path(PathBuf::from(env))?]);
     }
     Ok(DEFAULT_MODULES.iter().map(PathBuf::from).collect())
 }

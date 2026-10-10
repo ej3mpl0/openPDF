@@ -1494,3 +1494,29 @@ fn relative_env_module_is_rejected() {
     let r = resolve_module_paths_for_test(&Pkcs11Config::default(), Some("".into()));
     assert!(r.expect("empty env falls back to defaults").len() > 1);
 }
+
+#[test]
+fn relative_config_module_path_is_rejected() {
+    let r = resolve_module_paths_for_test(&Pkcs11Config::with_module("libsofthsm2.so"), None);
+    let err = r.expect_err("relative config path must be rejected");
+    let env_err =
+        resolve_module_paths_for_test(&Pkcs11Config::default(), Some("libsofthsm2.so".into()))
+            .expect_err("relative env path");
+    assert_eq!(
+        err.to_string(),
+        env_err.to_string(),
+        "same rule, same error"
+    );
+    assert!(Pkcs11Signer::new(
+        Pkcs11Config::with_module("./libsofthsm2.so"),
+        StaticPinProvider::new(USER_PIN)
+    )
+    .is_err());
+}
+
+#[test]
+fn default_module_paths_are_absolute() {
+    let paths = resolve_module_paths_for_test(&Pkcs11Config::default(), None).expect("defaults");
+    assert!(!paths.is_empty());
+    assert!(paths.iter().all(|p| p.is_absolute()), "{paths:?}");
+}
