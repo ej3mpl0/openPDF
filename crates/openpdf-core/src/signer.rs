@@ -118,7 +118,7 @@ pub fn usage_label(usage: &CertificateUsage) -> String {
 
 /// Common Name from a Distinguished Name.
 ///
-/// `O=AC DNIE,CN=María García (FIRMA),C=ES` → `María García (FIRMA)`.
+/// `O=AC DNIE,CN=Maria Garcia (FIRMA),C=ES` → `Maria Garcia (FIRMA)`.
 /// Slash-separated `/CN=...` forms are accepted. Falls back to `subject`.
 pub fn certificate_common_name(subject: &str) -> String {
     for part in subject.split([',', '/']) {
@@ -578,16 +578,16 @@ mod tests {
     #[test]
     fn certificate_common_name_peels_cn() {
         assert_eq!(
-            certificate_common_name("O=AC DNIE,CN=María García (FIRMA),C=ES"),
-            "María García (FIRMA)"
+            certificate_common_name("O=AC DNIE,CN=Maria Garcia (FIRMA),C=ES"),
+            "Maria Garcia (FIRMA)"
         );
         assert_eq!(
             certificate_common_name("CN=CITIZEN (SIGNING)"),
             "CITIZEN (SIGNING)"
         );
         assert_eq!(
-            certificate_common_name("/C=ES/O=AC DNIE/CN=María García (FIRMA)"),
-            "María García (FIRMA)"
+            certificate_common_name("/C=ES/O=AC DNIE/CN=Maria Garcia (FIRMA)"),
+            "Maria Garcia (FIRMA)"
         );
         assert_eq!(certificate_common_name("no-cn-here"), "no-cn-here");
     }
@@ -596,7 +596,7 @@ mod tests {
     fn describe_certificate_detail_omits_the_dn() {
         let info = CertificateInfo {
             id: "1".into(),
-            subject: "O=AC DNIE,CN=María García (FIRMA),C=ES".into(),
+            subject: "O=AC DNIE,CN=Maria Garcia (FIRMA),C=ES".into(),
             issuer: "CN=CA".into(),
             validity: CertificateValidity {
                 not_before: Some("10/01/2020 01:00:00".into()),
@@ -607,7 +607,7 @@ mod tests {
         with_locale("en", || {
             assert_eq!(
                 certificate_common_name(&info.subject),
-                "María García (FIRMA)"
+                "Maria Garcia (FIRMA)"
             );
             assert_eq!(
                 describe_certificate_detail(&info),
