@@ -112,13 +112,10 @@ pub fn crop_pages(doc: &Document, ranges: &[PageRange], crop: CropBox) -> Result
         }
     }
     for i in targets {
-        let id = pages
-            .get(&(i + 1))
-            .copied()
-            .ok_or(Error::PageOutOfRange {
-                page: i,
-                count: doc.page_count(),
-            })?;
+        let id = pages.get(&(i + 1)).copied().ok_or(Error::PageOutOfRange {
+            page: i,
+            count: doc.page_count(),
+        })?;
         if let Ok(obj) = inner.get_object_mut(id) {
             if let Ok(dict) = obj.as_dict_mut() {
                 dict.set(
@@ -171,11 +168,7 @@ mod tests {
             Err(Error::Signed { op: SignedOp::Edit })
         ));
         assert!(matches!(
-            crop_pages(
-                &signed,
-                &[],
-                CropBox::new(0.0, 0.0, 100.0, 100.0).unwrap()
-            ),
+            crop_pages(&signed, &[], CropBox::new(0.0, 0.0, 100.0, 100.0).unwrap()),
             Err(Error::Signed { op: SignedOp::Edit })
         ));
         // Extract from a signed file is a new unsigned document.

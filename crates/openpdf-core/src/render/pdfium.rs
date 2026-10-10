@@ -106,7 +106,11 @@ pub fn render_tile(
     }
 }
 
-pub fn render_page(document: &PdfDocument<'_>, page_index: u32, zoom: f32) -> Result<(u32, u32, Vec<u8>)> {
+pub fn render_page(
+    document: &PdfDocument<'_>,
+    page_index: u32,
+    zoom: f32,
+) -> Result<(u32, u32, Vec<u8>)> {
     let pages = document.pages();
     if page_index >= pages.len() as u32 {
         return Err(Error::PageOutOfRange {

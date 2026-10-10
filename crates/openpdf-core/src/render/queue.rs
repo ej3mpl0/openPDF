@@ -157,4 +157,15 @@ mod tests {
         assert_eq!(k.x, 2);
         assert!(q.pop().is_none());
     }
+
+    #[test]
+    fn same_priority_is_fifo_so_first_requested_is_first_popped() {
+        let mut q = RenderQueue::new();
+        q.push(key(0), Priority::Visible);
+        q.push(key(1), Priority::Visible);
+        q.push(key(2), Priority::Visible);
+        assert_eq!(q.pop().unwrap().0.x, 0);
+        assert_eq!(q.pop().unwrap().0.x, 1);
+        assert_eq!(q.pop().unwrap().0.x, 2);
+    }
 }

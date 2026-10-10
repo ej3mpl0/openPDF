@@ -3,7 +3,7 @@
 Native Linux PDF app. Rust + GTK4/libadwaita, render with pdfium-render (BSD). MuPDF is not used.
 
 - `openpdf-core`: document, tiles, text, undo, merge/split, `Signer`, `PinProvider`, sign UI strings
-- `openpdf-cli`: `openpdf info|render|text|merge|split` plus organize (`insert`, `extract`, `replace`, `crop`), `optimize`, `protect`/`unprotect`/`sanitize`, `watermark`/`header`/`footer`/`number`, `from-images`/`to-images`
+- `openpdf-cli`: `openpdf info|render|text|merge|split` plus organize (`insert`, `extract`, `replace`, `crop`), `optimize`, `protect`/`unprotect`/`sanitize`, `watermark`/`header`/`footer`/`number`, `from-images`/`to-images`, `ocr`, `redact`, `compare`
 - `openpdf-gtk`: UI (depends only on core)
 - `openpdf-sign`: PKCS#11 / PAdES backend (depends only on core)
 
@@ -12,6 +12,8 @@ binary constructs `Box<dyn Signer>` from `openpdf-sign` (with a UI
 `PinProvider`) and hands that trait object to the GTK UI.
 
 PDFium is loaded at runtime (`OPENPDF_PDFIUM`, next to the binary, or the system).
+
+OCR uses Tesseract only if it is present at runtime (`tesseract` on `PATH`, `libtesseract` via dlopen, `OPENPDF_TESSERACT`, or a Flatpak extension under `/app/extensions`). It is never linked, so the binary and AppImage stay the same size when Tesseract is absent. `ocr_capability()` is the UI probe.
 
 ## Localization
 

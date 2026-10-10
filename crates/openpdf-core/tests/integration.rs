@@ -1,7 +1,8 @@
 use std::time::Duration;
 
 use openpdf_core::{
-    blank_document, merge, split_all, Document, Engine, Priority, TileKey, TileRequest, TILE_SIZE,
+    blank_document, merge, split_all, Document, Engine, Priority, TileEvent, TileKey, TileRequest,
+    TILE_SIZE,
 };
 
 fn corpus(name: &str) -> std::path::PathBuf {
@@ -29,7 +30,10 @@ fn info_and_outline_without_pdfium() {
     assert_eq!(hello.page_count(), 1);
     let two = Document::open(corpus("two_page.pdf")).unwrap();
     assert_eq!(two.page_count(), 2);
-    let outline = Document::open(corpus("outline.pdf")).unwrap().outline().unwrap();
+    let outline = Document::open(corpus("outline.pdf"))
+        .unwrap()
+        .outline()
+        .unwrap();
     assert_eq!(outline.len(), 2);
 }
 
@@ -59,7 +63,10 @@ fn render_text_search_and_tile() {
 
     let raster = engine.render_page(doc.id(), 0, 1.0).unwrap();
     assert!(raster.width > 0 && raster.height > 0);
-    assert_eq!(raster.rgba.len(), (raster.width * raster.height * 4) as usize);
+    assert_eq!(
+        raster.rgba.len(),
+        (raster.width * raster.height * 4) as usize
+    );
     assert!(
         raster.rgba.iter().any(|b| *b < 250),
         "page render looks blank"
@@ -136,4 +143,50 @@ fn open_and_tile_large_pdf() {
     let tile_t = t2.elapsed();
     assert!(tile.width > 0 && tile.height > 0);
     eprintln!("large pdf tile={tile_t:?} {}x{}", tile.width, tile.height);
+}
+
+/// GUI initial view for the 32-page letter corpus: zoom 1.27 → 4×4 tiles (16).
+#[test]
+fn visible_queue_returns_top_left_before_the_rest() {
+    let Some(engine) = engine_or_skip() else {
+        return;
+    };
+    let doc = blank_document(32).unwrap();
+    engine.bind(&doc).unwrap();
+    engine.begin_frame().unwrap();
+
+    let zoom = 1.27;
+    let mut reqs = Vec::with_capacity(16);
+    for y in 0..4 {
+        for x in 0..4 {
+            reqs.push(TileRequest::visible(TileKey::new(doc.id(), 0, zoom, x, y)));
+        }
+    }
+    let t0 = std::time::Instant::now();
+    engine.request_tiles(reqs).unwrap();
+
+    let mut order = Vec::with_capacity(16);
+    let mut first_ms = 0.0;
+    let deadline = t0 + Duration::from_secs(5);
+    while order.len() < 16 && std::time::Instant::now() < deadline {
+        if let Some(TileEvent::Ready(t)) = engine.recv_timeout(Duration::from_millis(200)) {
+            if order.is_empty() {
+                first_ms = t0.elapsed().as_secs_f64() * 1000.0;
+            }
+            order.push((t.key.x, t.key.y));
+        }
+    }
+    let all_ms = t0.elapsed().as_secs_f64() * 1000.0;
+    let n = order.len();
+    assert_eq!(n, 16, "expected all 16 visible tiles, got {order:?}");
+    assert_eq!(
+        order[0],
+        (0, 0),
+        "first received tile must be the top-left one, arrival order: {order:?}"
+    );
+    let mut unique = order.clone();
+    unique.sort_unstable();
+    unique.dedup();
+    assert_eq!(unique.len(), 16, "duplicate tiles received: {order:?}");
+    eprintln!("visible queue first_ms={first_ms:.3} all_ms={all_ms:.3} n={n}");
 }

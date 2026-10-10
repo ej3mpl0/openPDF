@@ -69,8 +69,10 @@ impl PdfPermissions {
         if spec.trim().is_empty() || spec.trim() == "all" {
             return Ok(Self::all());
         }
-        let mut p = Self::default();
-        p.copy = true;
+        let mut p = Self {
+            copy: true,
+            ..Self::default()
+        };
         for part in spec.split(',') {
             match part.trim() {
                 "" => {}
