@@ -331,7 +331,7 @@ jobs:
         if: steps.gui.outputs.skip == 'false'
         run: |
           mkdir -p cold
-          xvfb-run -a --server-args="-screen 0 1280x800x24" glxinfo -B | tee glxinfo.txt || true
+          MESA_SHADER_CACHE_DISABLE=true xvfb-run -a --server-args="-screen 0 1280x800x24" glxinfo -B | tee glxinfo.txt || true
           gl=$(sed -n 's/^ *OpenGL renderer string: *//p' glxinfo.txt | head -1)
           echo "GL_RENDERER=${gl:-unknown}"
           echo "gl_renderer=$(echo "${gl:-unknown}" | tr ' ' '_')" > cold/$TAG.gl
@@ -380,8 +380,11 @@ jobs:
           [ -n "${OPENPDF_NO_GSK_CAIRO:-}" ] && unset GSK_RENDERER
           export OPENPDF_MEASURE_WRAP="$wrap $PWD/.github/scripts/env-dump.sh"
           echo "variant=${{ matrix.variant }} wrap='$OPENPDF_MEASURE_WRAP'"
+          set +e
           python3 .github/scripts/run-measure.py --kind gui --single-cold --frames 32 \
             --out "cold/$TAG.txt" 2>&1 | tee measure-1.log; rc=${PIPESTATUS[0]}
+          set -e
+          mkdir -p crash; cp measure-1.log crash/; echo "$rc" > crash/first.rc
           g=$(grep -o 'gsk_renderer=[^ ]*' measure-1.log | tail -1 || true); echo "${g:-gsk_renderer=not_printed}" | tee -a "cold/$TAG.txt"
           [ "$rc" = 0 ] || exit "$rc"
           printf 'variant=%s\nstraced=%s\n' "${{ matrix.variant }}" "$straced" >> "cold/$TAG.txt"
@@ -424,8 +427,11 @@ jobs:
           [ -n "${OPENPDF_NO_GSK_CAIRO:-}" ] && unset GSK_RENDERER
           export OPENPDF_MEASURE_WRAP="$wrap $PWD/.github/scripts/env-dump.sh"
           echo "wrap='$OPENPDF_MEASURE_WRAP'"
+          set +e
           python3 .github/scripts/run-measure.py --kind gui --single-cold --frames 32 \
-            --out "cold/$TAG.second" 2>&1 | tee measure-2.log || true
+            --out "cold/$TAG.second" 2>&1 | tee measure-2.log; rc=${PIPESTATUS[0]}
+          set -e
+          mkdir -p crash; cp measure-2.log crash/; echo "$rc" > crash/second.rc
           g=$(grep -o 'gsk_renderer=[^ ]*' measure-2.log | tail -1 || true); echo "${g:-gsk_renderer=not_printed}" | tee -a "cold/$TAG.second"
           printf 'straced=%s\n' "$straced" >> "cold/$TAG.second"
           if [ "$straced" = 1 ]; then
@@ -468,6 +474,14 @@ jobs:
         with:
           name: envs-${{ env.TAG }}
           path: envs/
+          if-no-files-found: warn
+
+      # Launch logs + exit codes for the default-renderer crash gate (cold-start-default-crash).
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        if: always() && matrix.variant == 'default' && steps.gui.outputs.skip == 'false'
+        with:
+          name: crash-${{ env.TAG }}
+          path: crash/
           if-no-files-found: warn
 
       - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
@@ -513,6 +527,44 @@ jobs:
             files=("$d/baseline.txt" "$d/measure-1.txt")
             [ -f "$d/measure-2.txt" ] && files+=("$d/measure-2.txt")
             python3 .github/scripts/env-parity.py "${files[@]}" "${args[@]}" || rc=1
+          done
+          exit $rc
+
+  # Real gate (no continue-on-error): with the GTK-chosen renderer (what users run),
+  # the app must not crash. Timings stay informational; a crash is a blocker.
+  cold-start-default-crash:
+    name: Cold start default renderer must not crash
+    needs: cold-start
+    if: always()
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
+        with:
+          pattern: crash-default-*
+          path: crash
+
+      - name: Exit code 0 and no Gsk:ERROR / Gsk-CRITICAL / Gdk-CRITICAL
+        run: |
+          shopt -s nullglob
+          dirs=(crash/crash-default-*)
+          if [ ${#dirs[@]} -eq 0 ]; then
+            if [ "${{ needs.cold-start.result }}" = skipped ]; then echo "::notice::cold-start skipped"; exit 0; fi
+            echo "::warning::no crash-default-* artifacts (GUI not built on this branch?)"; exit 0
+          fi
+          rc=0
+          for d in "${dirs[@]}"; do
+            t=${d#crash/crash-}
+            for l in first second; do
+              if [ ! -f "$d/$l.rc" ]; then echo "::error::$t $l launch: no exit code recorded"; rc=1; continue; fi
+              code=$(cat "$d/$l.rc")
+              n=1; [ "$l" = second ] && n=2
+              log="$d/measure-$n.log"
+              if [ "$code" != 0 ]; then echo "::error::$t $l launch: exit code $code"; rc=1; fi
+              if [ -f "$log" ] && grep -nE 'Gsk:ERROR|Gsk-CRITICAL|Gdk-CRITICAL' "$log"; then
+                echo "::error::$t $l launch: $(grep -m1 -oE '(Gsk:ERROR|Gsk-CRITICAL|Gdk-CRITICAL).*' "$log" | cut -c1-200)"; rc=1
+              fi
+              [ "$code" = 0 ] && ! grep -qE 'Gsk:ERROR|Gsk-CRITICAL|Gdk-CRITICAL' "$log" 2>/dev/null && echo "$t $l launch: ok"
+            done
           done
           exit $rc
 
