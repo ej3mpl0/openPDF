@@ -11,9 +11,10 @@ use gtk::glib;
 use gtk4 as gtk;
 use libadwaita as adw;
 use openpdf_core::{
-    apply_overlay, crop_pages, extract, images_to_pdf, insert_pages, optimize, parse_page_ranges,
-    pdf_to_rasters, protect, raster_to_png, sanitize_metadata, tr, unprotect, CropBox, Document,
-    Engine, OptimizeOptions, Overlay, OverlayKind, PdfPermissions, ProtectOptions, SignedOp,
+    apply_overlay, compare_pdfs, crop_pages, extract, images_to_pdf, insert_pages, ocr,
+    ocr_capability, optimize, parse_page_ranges, pdf_to_rasters, protect, raster_to_png, redact,
+    sanitize_metadata, tr, unprotect, CropBox, Document, Engine, OptimizeOptions, Overlay,
+    OverlayKind, PdfPermissions, ProtectOptions, RedactBox, SignedOp,
 };
 
 use crate::i18n::{format_core_error, t};
@@ -37,6 +38,9 @@ pub enum Tool {
     PageNumbers,
     FromImages,
     ToImages,
+    Ocr,
+    Redact,
+    Compare,
 }
 
 impl Tool {
@@ -57,22 +61,38 @@ impl Tool {
             Self::PageNumbers => "Add page numbers",
             Self::FromImages => "Build a PDF from images",
             Self::ToImages => "Render pages to PNG files",
+            Self::Ocr => "Add an invisible searchable text layer (Tesseract)",
+            Self::Redact => "Permanently remove content in a box (true redaction)",
+            Self::Compare => "Compare two PDFs (text + per-page pixels)",
         }
     }
 
     /// `Some` when this tool rewrites the open file and must refuse signatures.
     pub fn signed_block(self) -> Option<SignedOp> {
         match self {
-            Self::Insert | Self::Crop | Self::Sanitize | Self::Watermark | Self::PageNumbers => {
-                Some(SignedOp::Edit)
+            Self::Insert
+            | Self::Crop
+            | Self::Sanitize
+            | Self::Watermark
+            | Self::PageNumbers
+            | Self::Ocr => Some(SignedOp::Edit),
+            Self::Optimize | Self::Protect | Self::Unprotect | Self::Redact => {
+                Some(SignedOp::Rewrite)
             }
-            Self::Optimize | Self::Protect | Self::Unprotect => Some(SignedOp::Rewrite),
-            Self::Extract | Self::FromImages | Self::ToImages => None,
+            Self::Extract | Self::FromImages | Self::ToImages | Self::Compare => None,
         }
     }
 
     fn needs_document(self) -> bool {
-        !matches!(self, Self::FromImages)
+        !matches!(self, Self::FromImages | Self::Compare)
+    }
+
+    /// Home / menu visibility. OCR is hidden unless Tesseract is present.
+    pub fn is_offered(self) -> bool {
+        match self {
+            Self::Ocr => ocr_capability().available,
+            _ => true,
+        }
     }
 }
 
@@ -108,6 +128,9 @@ pub fn present(
         Tool::PageNumbers => overlay_dialog(parent, overlay, lang, view, OverlayKind::PageNumber),
         Tool::FromImages => from_images_dialog(parent, overlay, lang, engine),
         Tool::ToImages => to_images_dialog(parent, overlay, lang, view, engine),
+        Tool::Ocr => ocr_dialog(parent, overlay, lang, view, engine),
+        Tool::Redact => redact_dialog(parent, overlay, lang, view, engine),
+        Tool::Compare => compare_dialog(parent, overlay, lang, view, engine),
     }
 }
 
@@ -793,6 +816,520 @@ fn write_doc(doc: &Document, path: &Path) -> Result<(), String> {
     std::fs::write(path, bytes).map_err(|e| e.to_string())
 }
 
+fn ocr_dialog(
+    parent: &impl IsA<gtk::Window>,
+    overlay: &adw::ToastOverlay,
+    lang: Lang,
+    view: Option<Rc<DocumentView>>,
+    engine: Option<Engine>,
+) {
+    let cap = ocr_capability();
+    if !cap.available {
+        show_toast(
+            overlay,
+            t(
+                lang,
+                "OCR is unavailable (install tesseract-ocr or set OPENPDF_TESSERACT to the binary or libtesseract)",
+            ),
+        );
+        return;
+    }
+    let Some(view) = view else { return };
+    let Some(engine) = engine else {
+        show_toast(
+            overlay,
+            t(
+                lang,
+                "Preview uses a placeholder renderer because PDFium is not available.",
+            ),
+        );
+        return;
+    };
+    let form = form(parent, lang, Tool::Ocr, Some(view.opened()));
+    let lang_refs: Vec<&str> = cap.languages.iter().map(String::as_str).collect();
+    let drop = if lang_refs.is_empty() {
+        let d = gtk::DropDown::from_strings(&["eng"]);
+        d.set_sensitive(false);
+        d
+    } else {
+        gtk::DropDown::from_strings(&lang_refs)
+    };
+    let pages = entry(t(lang, "1-based ranges, e.g. 1-3,5"));
+    form.col
+        .append(&labeled(lang, "Tesseract language (eng, spa, …)", &drop));
+    form.col
+        .append(&labeled(lang, "1-based ranges, e.g. 1-3,5", &pages));
+    form.apply.connect_clicked({
+        let win = form.win.clone();
+        let overlay = overlay.clone();
+        let view = view.clone();
+        let blocked = form.blocked;
+        let langs = cap.languages.clone();
+        move |_| {
+            if blocked {
+                return;
+            }
+            let language = langs
+                .get(drop.selected() as usize)
+                .cloned()
+                .unwrap_or_else(|| "eng".into());
+            if !langs.is_empty() && !langs.iter().any(|l| l == &language) {
+                let err =
+                    openpdf_core::Error::invalid(openpdf_core::InvalidKind::OcrLanguageMissing {
+                        language: language.clone(),
+                        installed: langs.join(", "),
+                        hint: String::new(),
+                    });
+                show_toast(&overlay, &format_core_error(&err));
+                return;
+            }
+            let ranges = match ranges_of(&pages.text(), page_count(&view)) {
+                Ok(r) => r,
+                Err(e) => {
+                    show_toast(&overlay, &format_core_error(&e));
+                    return;
+                }
+            };
+            let opts = openpdf_core::OcrOptions {
+                language,
+                pages: ranges,
+            };
+            let engine = engine.clone();
+            apply_in_place(&overlay, lang, &view, |doc| ocr(&engine, doc, &opts));
+            win.close();
+        }
+    });
+    form.win.present();
+}
+
+fn redact_dialog(
+    parent: &impl IsA<gtk::Window>,
+    overlay: &adw::ToastOverlay,
+    lang: Lang,
+    view: Option<Rc<DocumentView>>,
+    engine: Option<Engine>,
+) {
+    let Some(view) = view else { return };
+    let form = form(parent, lang, Tool::Redact, Some(view.opened()));
+    form.win.set_default_size(520, 640);
+
+    let warn = gtk::Label::new(Some(t(
+        lang,
+        "Redaction is permanent. Selected content is removed and cannot be recovered.",
+    )));
+    warn.add_css_class("error");
+    warn.set_wrap(true);
+    warn.set_xalign(0.0);
+    form.col.append(&warn);
+    form.col.append(&gtk::Label::new(Some(t(
+        lang,
+        "Drag on the page to select a redaction area.",
+    ))));
+
+    let page = gtk::SpinButton::with_range(1.0, f64::from(page_count(&view).max(1)), 1.0);
+    page.set_value(1.0);
+    form.col.append(&labeled(lang, "Page", &page));
+
+    let selection = Rc::new(RefCell::new(None::<(f64, f64, f64, f64)>));
+    let preview = gtk::DrawingArea::new();
+    preview.set_content_width(400);
+    preview.set_content_height(520);
+    preview.set_hexpand(true);
+    preview.set_vexpand(true);
+
+    let raster = Rc::new(RefCell::new(None::<(u32, u32, Vec<u8>, f32, f32)>));
+    reload_redact_preview(&view, engine.as_ref(), 0, &raster, &preview);
+
+    page.connect_value_changed({
+        let view = view.clone();
+        let raster = raster.clone();
+        let preview = preview.clone();
+        let engine = engine.clone();
+        let selection = selection.clone();
+        move |spin| {
+            *selection.borrow_mut() = None;
+            let idx = (spin.value() as u32).saturating_sub(1);
+            reload_redact_preview(&view, engine.as_ref(), idx, &raster, &preview);
+            preview.queue_draw();
+        }
+    });
+
+    preview.set_draw_func({
+        let raster = raster.clone();
+        let selection = selection.clone();
+        move |_, cr, w, h| {
+            cr.set_source_rgb(0.9, 0.9, 0.9);
+            cr.rectangle(0.0, 0.0, f64::from(w), f64::from(h));
+            let _ = cr.fill();
+            if let Some((rw, rh, rgba, _, _)) = raster.borrow().as_ref() {
+                paint_rgba(cr, *rw, *rh, rgba, w, h);
+            }
+            if let Some((x0, y0, x1, y1)) = *selection.borrow() {
+                let x = x0.min(x1);
+                let y = y0.min(y1);
+                let ww = (x1 - x0).abs();
+                let hh = (y1 - y0).abs();
+                cr.set_source_rgba(0.8, 0.1, 0.1, 0.25);
+                cr.rectangle(x, y, ww, hh);
+                let _ = cr.fill();
+                cr.set_source_rgb(0.7, 0.05, 0.05);
+                cr.set_line_width(2.0);
+                cr.rectangle(x, y, ww, hh);
+                let _ = cr.stroke();
+            }
+        }
+    });
+
+    let drag = gtk::GestureDrag::new();
+    drag.connect_drag_begin({
+        let selection = selection.clone();
+        move |_, x, y| {
+            *selection.borrow_mut() = Some((x, y, x, y));
+        }
+    });
+    drag.connect_drag_update({
+        let selection = selection.clone();
+        let preview = preview.clone();
+        move |g, dx, dy| {
+            if let Some((ox, oy)) = g.start_point() {
+                if let Some(sel) = selection.borrow_mut().as_mut() {
+                    sel.2 = ox + dx;
+                    sel.3 = oy + dy;
+                }
+                preview.queue_draw();
+            }
+        }
+    });
+    preview.add_controller(drag);
+    form.col.append(&preview);
+
+    form.apply.connect_clicked({
+        let win = form.win.clone();
+        let overlay = overlay.clone();
+        let view = view.clone();
+        let blocked = form.blocked;
+        let selection = selection.clone();
+        let raster = raster.clone();
+        let preview = preview.clone();
+        move |_| {
+            if blocked {
+                return;
+            }
+            let Some((x0, y0, x1, y1)) = *selection.borrow() else {
+                show_toast(&overlay, &tr("no redaction boxes"));
+                return;
+            };
+            let Some((rw, rh, _, pw, ph)) = *raster.borrow() else {
+                show_toast(&overlay, &tr("no redaction boxes"));
+                return;
+            };
+            let alloc_w = f64::from(preview.width().max(1));
+            let alloc_h = f64::from(preview.height().max(1));
+            let scale = (alloc_w / f64::from(rw.max(1))).min(alloc_h / f64::from(rh.max(1)));
+            let ox = (alloc_w - f64::from(rw) * scale) / 2.0;
+            let oy = (alloc_h - f64::from(rh) * scale) / 2.0;
+            let to_pdf = |px: f64, py: f64| -> (f32, f32) {
+                let nx = ((px - ox) / scale).clamp(0.0, f64::from(rw));
+                let ny = ((py - oy) / scale).clamp(0.0, f64::from(rh));
+                let pdf_x = (nx / f64::from(rw.max(1))) * f64::from(pw);
+                let pdf_y = (1.0 - ny / f64::from(rh.max(1))) * f64::from(ph);
+                (pdf_x as f32, pdf_y as f32)
+            };
+            let (ax, ay) = to_pdf(x0, y0);
+            let (bx, by) = to_pdf(x1, y1);
+            let page_idx = (page.value() as u32).saturating_sub(1);
+            let box_ =
+                match RedactBox::new(page_idx, ax.min(bx), ay.min(by), ax.max(bx), ay.max(by)) {
+                    Ok(b) => b,
+                    Err(e) => {
+                        show_toast(&overlay, &format_core_error(&e));
+                        return;
+                    }
+                };
+            apply_in_place(&overlay, lang, &view, |doc| redact(doc, &[box_]));
+            win.close();
+        }
+    });
+    form.win.present();
+}
+
+fn reload_redact_preview(
+    view: &DocumentView,
+    engine: Option<&Engine>,
+    page: u32,
+    slot: &RefCell<Option<(u32, u32, Vec<u8>, f32, f32)>>,
+    preview: &gtk::DrawingArea,
+) {
+    let Some(engine) = engine else {
+        *slot.borrow_mut() = None;
+        return;
+    };
+    let Ok(bytes) = view.opened().to_bytes() else {
+        *slot.borrow_mut() = None;
+        return;
+    };
+    let Ok(doc) = Document::from_bytes(bytes, None) else {
+        *slot.borrow_mut() = None;
+        return;
+    };
+    if engine.bind(&doc).is_err() {
+        *slot.borrow_mut() = None;
+        return;
+    }
+    let info = view.opened().pages().get(page as usize).copied();
+    let (pw, ph) = info
+        .map(|p| (p.width as f32, p.height as f32))
+        .unwrap_or((612.0, 792.0));
+    let zoom = (400.0 / pw).clamp(0.2, 2.0);
+    match engine.render_page(doc.id(), page, zoom) {
+        Ok(r) => {
+            *slot.borrow_mut() = Some((r.width, r.height, r.rgba, pw, ph));
+            let aspect = f64::from(r.height.max(1)) / f64::from(r.width.max(1));
+            preview.set_content_height((400.0 * aspect) as i32);
+        }
+        Err(_) => *slot.borrow_mut() = None,
+    }
+}
+
+fn paint_rgba(cr: &gtk::cairo::Context, rw: u32, rh: u32, rgba: &[u8], aw: i32, ah: i32) {
+    let pixbuf = gtk::gdk_pixbuf::Pixbuf::from_mut_slice(
+        rgba.to_vec(),
+        gtk::gdk_pixbuf::Colorspace::Rgb,
+        true,
+        8,
+        rw as i32,
+        rh as i32,
+        rw as i32 * 4,
+    );
+    let scale = (f64::from(aw) / f64::from(rw.max(1))).min(f64::from(ah) / f64::from(rh.max(1)));
+    let dw = f64::from(rw) * scale;
+    let dh = f64::from(rh) * scale;
+    let x = (f64::from(aw) - dw) / 2.0;
+    let y = (f64::from(ah) - dh) / 2.0;
+    cr.save().ok();
+    cr.translate(x, y);
+    cr.scale(scale, scale);
+    cr.set_source_pixbuf(&pixbuf, 0.0, 0.0);
+    let _ = cr.paint();
+    cr.restore().ok();
+}
+
+fn compare_dialog(
+    parent: &impl IsA<gtk::Window>,
+    overlay: &adw::ToastOverlay,
+    lang: Lang,
+    view: Option<Rc<DocumentView>>,
+    engine: Option<Engine>,
+) {
+    let Some(engine) = engine else {
+        show_toast(
+            overlay,
+            t(
+                lang,
+                "Preview uses a placeholder renderer because PDFium is not available.",
+            ),
+        );
+        return;
+    };
+    let dialog = gtk::FileDialog::builder()
+        .title(t(lang, "Second PDF"))
+        .modal(true)
+        .build();
+    let filter = gtk::FileFilter::new();
+    filter.add_suffix("pdf");
+    dialog.set_default_filter(Some(&filter));
+    let parent = parent.upcast_ref::<gtk::Window>().clone();
+    let overlay = overlay.clone();
+    glib::spawn_future_local(async move {
+        let file = match dialog.open_future(Some(&parent)).await {
+            Ok(f) => f,
+            Err(_) => return,
+        };
+        let Some(path) = file.path() else { return };
+        let right = match Document::open(&path) {
+            Ok(d) => d,
+            Err(e) => {
+                show_toast(&overlay, &format_core_error(&e));
+                return;
+            }
+        };
+        let left = match view.as_ref() {
+            Some(v) => match v.opened().with_document(|d| Ok(d.clone())) {
+                Ok(d) => d,
+                Err(e) => {
+                    show_toast(&overlay, &e.to_string());
+                    return;
+                }
+            },
+            None => {
+                show_toast(&overlay, t(lang, "Open a PDF before using this tool."));
+                return;
+            }
+        };
+        let report = match compare_pdfs(&engine, &left, &right, 0.75) {
+            Ok(r) => r,
+            Err(e) => {
+                show_toast(&overlay, &format_core_error(&e));
+                return;
+            }
+        };
+        present_compare_window(&parent, lang, &engine, left, right, report);
+    });
+}
+
+fn present_compare_window(
+    parent: &gtk::Window,
+    lang: Lang,
+    engine: &Engine,
+    left: Document,
+    right: Document,
+    report: openpdf_core::CompareReport,
+) {
+    let win = adw::Window::new();
+    win.set_transient_for(Some(parent));
+    win.set_title(Some(t(lang, "Compare two PDFs (text + per-page pixels)")));
+    win.set_default_size(960, 640);
+    let header = adw::HeaderBar::new();
+    let toolbar = adw::ToolbarView::new();
+    toolbar.add_top_bar(&header);
+
+    let status = if report.identical {
+        t(lang, "identical")
+    } else {
+        t(lang, "differ")
+    };
+    let summary = gtk::Label::new(Some(&openpdf_core::tr_args(
+        "pages: {left} vs {right}",
+        &[
+            ("left", &report.left_pages.to_string()),
+            ("right", &report.right_pages.to_string()),
+        ],
+    )));
+    summary.set_margin_top(8);
+    let verdict = gtk::Label::new(Some(status));
+    verdict.add_css_class("title-2");
+
+    let current = Rc::new(std::cell::Cell::new(0u32));
+    let left_area = gtk::DrawingArea::new();
+    let right_area = gtk::DrawingArea::new();
+    left_area.set_hexpand(true);
+    right_area.set_hexpand(true);
+    left_area.set_content_height(420);
+    right_area.set_content_height(420);
+
+    let left_raster = Rc::new(RefCell::new(None::<(u32, u32, Vec<u8>)>));
+    let right_raster = Rc::new(RefCell::new(None::<(u32, u32, Vec<u8>)>));
+    load_compare_page(engine, &left, &right, 0, &left_raster, &right_raster);
+
+    let paint = |slot: Rc<RefCell<Option<(u32, u32, Vec<u8>)>>>| {
+        move |_: &gtk::DrawingArea, cr: &gtk::cairo::Context, w: i32, h: i32| {
+            cr.set_source_rgb(0.92, 0.92, 0.92);
+            cr.rectangle(0.0, 0.0, f64::from(w), f64::from(h));
+            let _ = cr.fill();
+            if let Some((rw, rh, rgba)) = slot.borrow().as_ref() {
+                paint_rgba(cr, *rw, *rh, rgba, w, h);
+            }
+        }
+    };
+    left_area.set_draw_func(paint(left_raster.clone()));
+    right_area.set_draw_func(paint(right_raster.clone()));
+
+    let panes = gtk::Box::new(gtk::Orientation::Horizontal, 8);
+    panes.set_homogeneous(true);
+    let lcol = gtk::Box::new(gtk::Orientation::Vertical, 4);
+    lcol.append(&gtk::Label::new(Some(t(lang, "First PDF"))));
+    lcol.append(&left_area);
+    let rcol = gtk::Box::new(gtk::Orientation::Vertical, 4);
+    rcol.append(&gtk::Label::new(Some(t(lang, "Second PDF"))));
+    rcol.append(&right_area);
+    panes.append(&lcol);
+    panes.append(&rcol);
+
+    let list = gtk::ListBox::new();
+    list.add_css_class("boxed-list");
+    for diff in &report.pages {
+        let row = adw::ActionRow::new();
+        let text = if diff.text_equal {
+            t(lang, "text equal")
+        } else {
+            t(lang, "text differs")
+        };
+        let pixels = if diff.pixel_equal {
+            t(lang, "pixels equal").to_string()
+        } else {
+            openpdf_core::tr_args(
+                "pixels differ ({changed}/{total})",
+                &[
+                    ("changed", &diff.changed_pixels.to_string()),
+                    ("total", &diff.total_pixels.to_string()),
+                ],
+            )
+        };
+        row.set_title(&openpdf_core::tr_args(
+            "page {n}: {text}; {pixels}",
+            &[
+                ("n", &(diff.page + 1).to_string()),
+                ("text", text),
+                ("pixels", &pixels),
+            ],
+        ));
+        let page = diff.page;
+        let engine = engine.clone();
+        let left = left.clone();
+        let right = right.clone();
+        let left_raster = left_raster.clone();
+        let right_raster = right_raster.clone();
+        let left_area = left_area.clone();
+        let right_area = right_area.clone();
+        let current = current.clone();
+        row.set_activatable(true);
+        row.connect_activated(move |_| {
+            current.set(page);
+            load_compare_page(&engine, &left, &right, page, &left_raster, &right_raster);
+            left_area.queue_draw();
+            right_area.queue_draw();
+        });
+        list.append(&row);
+    }
+
+    let scroll = gtk::ScrolledWindow::new();
+    scroll.set_min_content_height(140);
+    scroll.set_child(Some(&list));
+
+    let col = gtk::Box::new(gtk::Orientation::Vertical, 8);
+    col.set_margin_top(8);
+    col.set_margin_start(12);
+    col.set_margin_end(12);
+    col.set_margin_bottom(12);
+    col.append(&verdict);
+    col.append(&summary);
+    col.append(&panes);
+    col.append(&scroll);
+    toolbar.set_content(Some(&col));
+    win.set_content(Some(&toolbar));
+    win.present();
+}
+
+fn load_compare_page(
+    engine: &Engine,
+    left: &Document,
+    right: &Document,
+    page: u32,
+    left_slot: &RefCell<Option<(u32, u32, Vec<u8>)>>,
+    right_slot: &RefCell<Option<(u32, u32, Vec<u8>)>>,
+) {
+    let _ = engine.bind(left);
+    *left_slot.borrow_mut() = engine
+        .render_page(left.id(), page, 0.6)
+        .ok()
+        .map(|r| (r.width, r.height, r.rgba));
+    let _ = engine.bind(right);
+    *right_slot.borrow_mut() = engine
+        .render_page(right.id(), page, 0.6)
+        .ok()
+        .map(|r| (r.width, r.height, r.rgba));
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -806,6 +1343,10 @@ mod tests {
         assert_eq!(Tool::Extract.signed_block(), None);
         assert_eq!(Tool::FromImages.signed_block(), None);
         assert_eq!(Tool::ToImages.signed_block(), None);
+        assert_eq!(Tool::Ocr.signed_block(), Some(SignedOp::Edit));
+        assert_eq!(Tool::Redact.signed_block(), Some(SignedOp::Rewrite));
+        assert_eq!(Tool::Compare.signed_block(), None);
+        assert!(!Tool::Ocr.is_offered() || ocr_capability().available);
     }
 
     #[test]

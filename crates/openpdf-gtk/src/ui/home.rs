@@ -159,7 +159,13 @@ fn tools_group(lang: Lang, on_action: impl Fn(HomeAction) + 'static) -> adw::Pre
         Tool::PageNumbers,
         Tool::FromImages,
         Tool::ToImages,
+        Tool::Ocr,
+        Tool::Redact,
+        Tool::Compare,
     ] {
+        if !tool.is_offered() {
+            continue;
+        }
         add_action_row(&group, tool.title(lang), None, {
             let cb = on_action.clone();
             move || cb(HomeAction::Tool(tool))
