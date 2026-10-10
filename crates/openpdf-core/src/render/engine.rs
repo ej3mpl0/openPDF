@@ -81,6 +81,99 @@ enum WorkerCmd {
     },
 }
 
+/// Font warmup state, once per process (the worker is a process singleton).
+///
+/// PDFium enumerates the system font directories lazily, on the first render
+/// (on Linux ~1500 files under /usr/share/fonts, ~150 ms cold). The render
+/// thread does that once right after start, on a tiny in-memory PDF, so it
+/// overlaps with the app's UI startup instead of the first visible tile.
+#[cfg_attr(not(target_os = "linux"), allow(dead_code))]
+static FONT_WARMUP_RUNS: AtomicU64 = AtomicU64::new(0);
+static FONT_WARMUP_DONE: OnceLock<Duration> = OnceLock::new();
+
+/// A 1x1 pt page showing one glyph in a non-embedded, non-standard font, so
+/// PDFium has to consult its system font mapper.
+#[cfg_attr(not(target_os = "linux"), allow(dead_code))]
+fn font_warmup_pdf() -> Result<Vec<u8>> {
+    use lopdf::{dictionary, Object, Stream};
+    let mut doc = lopdf::Document::with_version("1.4");
+    let pages_id = doc.new_object_id();
+    let font_id = doc.add_object(dictionary! {
+        "Type" => "Font",
+        "Subtype" => "TrueType",
+        "BaseFont" => "OpenPDFWarmupSans",
+        "Encoding" => "WinAnsiEncoding",
+    });
+    let content = doc.add_object(Stream::new(
+        dictionary! {},
+        b"BT /F1 1 Tf 0 0 Td (a) Tj ET".to_vec(),
+    ));
+    let page_id = doc.add_object(dictionary! {
+        "Type" => "Page",
+        "Parent" => pages_id,
+        "MediaBox" => vec![0.into(), 0.into(), 1.into(), 1.into()],
+        "Contents" => content,
+        "Resources" => dictionary! { "Font" => dictionary! { "F1" => font_id } },
+    });
+    doc.objects.insert(
+        pages_id,
+        Object::Dictionary(dictionary! {
+            "Type" => "Pages",
+            "Kids" => vec![page_id.into()],
+            "Count" => 1,
+        }),
+    );
+    let catalog = doc.add_object(dictionary! { "Type" => "Catalog", "Pages" => pages_id });
+    doc.trailer.set("Root", catalog);
+    let mut out = Vec::new();
+    doc.save_to(&mut out)
+        .map_err(|e| Error::pdfium(e.to_string()))?;
+    Ok(out)
+}
+
+/// Set when the warmup starts (test hook to force overlap with `bind`).
+#[cfg(test)]
+static FONT_WARMUP_BEGUN: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+/// While false, the test build holds the warmup open (max 10 s) so a test can
+/// deterministically send `bind` during it.
+#[cfg(test)]
+static FONT_WARMUP_RELEASE: std::sync::atomic::AtomicBool =
+    std::sync::atomic::AtomicBool::new(false);
+
+/// Render the warmup page once. Errors and panics are swallowed: the warmup is
+/// only an optimisation, the first real render would scan fonts anyway, and
+/// it must never take the render thread down.
+#[cfg(target_os = "linux")]
+fn font_warmup(pdfium: &Pdfium, started: Instant) {
+    FONT_WARMUP_RUNS.fetch_add(1, Ordering::SeqCst);
+    let body = std::panic::AssertUnwindSafe(|| {
+        #[cfg(test)]
+        {
+            FONT_WARMUP_BEGUN.store(true, Ordering::SeqCst);
+            let until = Instant::now() + Duration::from_secs(10);
+            while !FONT_WARMUP_RELEASE.load(Ordering::SeqCst) && Instant::now() < until {
+                thread::sleep(Duration::from_millis(1));
+            }
+        }
+        if let Ok(bytes) = font_warmup_pdf() {
+            if let Ok(doc) = pdfium.load_pdf_from_byte_vec(bytes, None) {
+                let _ = pdfium_bind::render_page(&doc, 0, 1.0);
+            }
+        }
+        #[cfg(test)]
+        panic!("test-only: warmup panic must be caught");
+    });
+    let _ = std::panic::catch_unwind(body);
+    let _ = FONT_WARMUP_DONE.set(started.elapsed());
+}
+
+/// Milliseconds from the start of PDFium init until the render thread finished
+/// its one-time system font warmup. `None` while it runs, if PDFium is not
+/// loaded, or on non-Linux (PDFium uses GDI/CoreText there, no warmup).
+pub fn font_warmup_ms() -> Option<f64> {
+    FONT_WARMUP_DONE.get().map(|d| d.as_secs_f64() * 1000.0)
+}
+
 struct WorkerHandle {
     cmd: Sender<WorkerCmd>,
     cache: Arc<Mutex<TileCache>>,
@@ -107,7 +200,7 @@ fn start_worker(bundled: Option<&Path>) -> Result<WorkerHandle> {
 
     thread::Builder::new()
         .name("openpdf-render".into())
-        .spawn(move || worker_loop(pdfium, cmd_rx, cache_thread))
+        .spawn(move || worker_loop(pdfium, cmd_rx, cache_thread, t_load))
         .map_err(|e| Error::pdfium(e.to_string()))?;
 
     Ok(WorkerHandle {
@@ -131,11 +224,29 @@ fn load_bound(pdfium: &Pdfium, bytes: Vec<u8>) -> Result<BoundDoc> {
     Ok(BoundDoc { doc })
 }
 
-fn worker_loop(pdfium: Pdfium, cmd_rx: Receiver<WorkerCmd>, cache: Arc<Mutex<TileCache>>) {
+fn worker_loop(
+    pdfium: Pdfium,
+    cmd_rx: Receiver<WorkerCmd>,
+    cache: Arc<Mutex<TileCache>>,
+    started: Instant,
+) {
     let mut docs: HashMap<DocumentId, BoundDoc> = HashMap::new();
     let mut engines: HashMap<EngineId, EngineSlot> = HashMap::new();
     let mut order: Vec<EngineId> = Vec::new();
     let mut next = 0usize;
+
+    // Commands already waiting (register, bind) go first; then the font scan,
+    // before any tile render. Commands sent during the warmup queue in the
+    // channel and are handled right after it.
+    while let Ok(cmd) = cmd_rx.try_recv() {
+        if !handle_cmd(&pdfium, cmd, &mut docs, &mut engines, &cache) {
+            return;
+        }
+    }
+    #[cfg(target_os = "linux")]
+    font_warmup(&pdfium, started);
+    #[cfg(not(target_os = "linux"))]
+    let _ = started;
 
     loop {
         while let Ok(cmd) = cmd_rx.try_recv() {
@@ -422,6 +533,13 @@ impl Engine {
         }
     }
 
+    /// Milliseconds from the start of PDFium init until the render thread
+    /// finished its one-time system font warmup; `None` while it is running
+    /// (or if PDFium is unavailable).
+    pub fn font_warmup_ms(&self) -> Option<f64> {
+        font_warmup_ms()
+    }
+
     /// Last tile/page buffer copy after PDFium render. See `pdfium::last_convert_ms`.
     pub fn last_convert_ms(&self) -> f64 {
         pdfium_bind::last_convert_ms()
@@ -436,18 +554,27 @@ impl Engine {
         }
     }
 
+    /// Blocking. The first bind of the process may wait up to
+    /// [`font_warmup_ms`] (~150-200 ms cold on Linux) while the render thread
+    /// scans system fonts. Do not call from a UI thread.
     pub fn open(&self, path: impl AsRef<Path>) -> Result<Document> {
         let doc = Document::open(path)?;
         self.bind(&doc)?;
         Ok(doc)
     }
 
+    /// Blocking. The first bind of the process may wait up to
+    /// [`font_warmup_ms`] (~150-200 ms cold on Linux) while the render thread
+    /// scans system fonts. Do not call from a UI thread.
     pub fn open_bytes(&self, bytes: Vec<u8>, path: Option<std::path::PathBuf>) -> Result<Document> {
         let doc = Document::from_bytes(bytes, path)?;
         self.bind(&doc)?;
         Ok(doc)
     }
 
+    /// Blocking. The first bind of the process may wait up to
+    /// [`font_warmup_ms`] (~150-200 ms cold on Linux) while the render thread
+    /// scans system fonts. Do not call from a UI thread.
     pub fn bind(&self, doc: &Document) -> Result<()> {
         let bytes = if doc.is_dirty() {
             doc.to_bytes()?
@@ -457,10 +584,16 @@ impl Engine {
         self.bind_bytes(doc.id(), bytes)
     }
 
+    /// Blocking. The first bind of the process may wait up to
+    /// [`font_warmup_ms`] (~150-200 ms cold on Linux) while the render thread
+    /// scans system fonts. Do not call from a UI thread.
     pub fn refresh(&self, doc: &Document) -> Result<()> {
         self.bind(doc)
     }
 
+    /// Blocking. The first bind of the process may wait up to
+    /// [`font_warmup_ms`] (~150-200 ms cold on Linux) while the render thread
+    /// scans system fonts. Do not call from a UI thread.
     fn bind_bytes(&self, id: DocumentId, bytes: Vec<u8>) -> Result<()> {
         let (tx, rx) = mpsc::channel();
         self.send(WorkerCmd::Bind {
@@ -594,5 +727,131 @@ impl Drop for Engine {
         if Arc::strong_count(&self.events) == 1 {
             let _ = self.send(WorkerCmd::Unregister { engine: self.id });
         }
+    }
+}
+
+#[cfg(test)]
+mod font_warmup_tests {
+    use super::*;
+
+    fn engine_or_skip() -> Option<Engine> {
+        match Engine::new() {
+            Ok(e) => Some(e),
+            Err(e) if std::env::var("CI").is_err() => {
+                eprintln!("skipping: {e}");
+                None
+            }
+            Err(e) => panic!("PDFium required in CI: {e}"),
+        }
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn font_warmup_runs_once_and_does_not_deadlock() {
+        let Some(first) = engine_or_skip() else {
+            return;
+        };
+        let bytes = crate::blank_document(1).unwrap().to_bytes().unwrap();
+
+        // Many engines registering, binding and rendering concurrently while
+        // the warmup may still be running: all must finish, warmup only once.
+        let (done_tx, done_rx) = mpsc::channel();
+        for _ in 0..8 {
+            let done_tx = done_tx.clone();
+            let bytes = bytes.clone();
+            thread::spawn(move || {
+                let doc = Document::from_bytes(bytes, None).unwrap();
+                let engine = Engine::new().unwrap();
+                engine.bind(&doc).unwrap();
+                let tile = engine
+                    .render_tile_blocking(TileKey::new(doc.id(), 0, 1.0, 0, 0))
+                    .unwrap();
+                done_tx.send(tile.width > 0).unwrap();
+            });
+        }
+        drop(done_tx);
+        for _ in 0..8 {
+            let ok = done_rx
+                .recv_timeout(Duration::from_secs(30))
+                .expect("engine thread deadlocked or panicked");
+            assert!(ok);
+        }
+
+        let deadline = Instant::now() + Duration::from_secs(30);
+        while first.font_warmup_ms().is_none() {
+            assert!(Instant::now() < deadline, "font warmup never finished");
+            thread::sleep(Duration::from_millis(5));
+        }
+        assert!(first.font_warmup_ms().unwrap() >= first.pdfium_load_ms());
+        assert_eq!(FONT_WARMUP_RUNS.load(Ordering::SeqCst), 1);
+    }
+
+    /// Forces `bind` to arrive while the warmup is running, then checks it
+    /// finishes and waits no longer than about the warmup itself.
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn bind_during_warmup_waits_then_completes() {
+        let Some(engine) = engine_or_skip() else {
+            FONT_WARMUP_RELEASE.store(true, Ordering::SeqCst);
+            return;
+        };
+        let deadline = Instant::now() + Duration::from_secs(30);
+        while !FONT_WARMUP_BEGUN.load(Ordering::SeqCst) {
+            assert!(Instant::now() < deadline, "warmup never began");
+            thread::sleep(Duration::from_millis(1));
+        }
+        let overlapped = font_warmup_ms().is_none();
+        let bytes = crate::blank_document(1).unwrap().to_bytes().unwrap();
+        let doc = Document::from_bytes(bytes, None).unwrap();
+        let (tx, rx) = mpsc::channel();
+        let t0 = Instant::now();
+        let h = thread::spawn(move || {
+            engine.bind(&doc).unwrap();
+            tx.send(t0.elapsed()).unwrap();
+        });
+        thread::sleep(Duration::from_millis(20));
+        let release_at = t0.elapsed();
+        FONT_WARMUP_RELEASE.store(true, Ordering::SeqCst);
+        let took = rx
+            .recv_timeout(Duration::from_secs(30))
+            .expect("bind deadlocked behind warmup");
+        h.join().unwrap();
+        let warm = font_warmup_ms().expect("warmup done");
+        let real_scan = Duration::from_secs_f64(warm / 1000.0);
+        eprintln!(
+            "bind_during_warmup: overlapped={overlapped} bind_ms={:.1} held_ms={:.1} font_warmup_ms={warm:.1}",
+            took.as_secs_f64() * 1000.0,
+            release_at.as_secs_f64() * 1000.0,
+        );
+        assert!(took <= release_at + real_scan + Duration::from_secs(2));
+    }
+
+    /// The test build panics inside the warmup; the render thread must survive.
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn warmup_panic_does_not_kill_render_thread() {
+        let Some(engine) = engine_or_skip() else {
+            return;
+        };
+        FONT_WARMUP_RELEASE.store(true, Ordering::SeqCst);
+        let deadline = Instant::now() + Duration::from_secs(30);
+        while font_warmup_ms().is_none() {
+            assert!(Instant::now() < deadline, "warmup never finished");
+            thread::sleep(Duration::from_millis(5));
+        }
+        let bytes = crate::blank_document(1).unwrap().to_bytes().unwrap();
+        let doc = Document::from_bytes(bytes, None).unwrap();
+        engine.bind(&doc).unwrap();
+        let tile = engine
+            .render_tile_blocking(TileKey::new(doc.id(), 0, 1.0, 0, 0))
+            .unwrap();
+        assert!(tile.width > 0);
+    }
+
+    #[test]
+    fn font_warmup_pdf_is_valid() {
+        let bytes = font_warmup_pdf().unwrap();
+        let doc = lopdf::Document::load_mem(&bytes).unwrap();
+        assert_eq!(doc.get_pages().len(), 1);
     }
 }

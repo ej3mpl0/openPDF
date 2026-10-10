@@ -67,9 +67,9 @@ pub use pin::{PinProvider, SecretPin};
 pub use protect::{protect, sanitize_metadata, unprotect, PdfPermissions, ProtectOptions};
 pub use redact::{redact, RedactBox};
 pub use render::{
-    page_pixel_size, pdfium_library_name, quantize_zoom, tile_grid, tile_rect, Engine, Priority,
-    Raster, SearchHit, Tile, TileCache, TileEvent, TileKey, TileRequest, DEFAULT_CACHE_BYTES,
-    TILE_SIZE,
+    font_warmup_ms, page_pixel_size, pdfium_library_name, quantize_zoom, tile_grid, tile_rect,
+    Engine, Priority, Raster, SearchHit, Tile, TileCache, TileEvent, TileKey, TileRequest,
+    DEFAULT_CACHE_BYTES, TILE_SIZE,
 };
 pub use signer::{
     describe_certificate, format_verify_result, format_verify_results, pin_prompt_text,

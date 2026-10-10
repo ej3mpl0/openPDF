@@ -123,6 +123,7 @@ Keys:
   first_ready_ms     first TileEvent::Ready after requesting those tiles
   first_ready_x first_ready_y
   visible_tiles_ms   time until every visible tile is Ready
+  font_warmup_ms     PDFium init start until the render thread's font warmup is done
 
 Budgets (optional env, fail if exceeded):
   OPENPDF_BENCH_MAX_OPEN_MS  OPENPDF_BENCH_MAX_TILE_MS
@@ -133,7 +134,7 @@ Page count: OPENPDF_BENCH_PAGES (default 80).
 
 fn format_line(os: &str, arch: &str, fields: &MeasureFields<'_>) -> String {
     format!(
-        "openpdf_measure version=1 os={os} arch={arch} pages={n} open_ms={open_ms:.3} first_tile_ms={first_tile_ms:.3} peak_rss_bytes={rss} pdfium_load_ms={pdfium_load_ms:.3} doc_open_ms={doc_open_ms:.3} convert_ms={convert_ms:.3} visible_tiles={vt} first_ready_ms={first_ready_ms:.3} first_ready_x={fx} first_ready_y={fy} visible_tiles_ms={visible_tiles_ms:.3}",
+        "openpdf_measure version=1 os={os} arch={arch} pages={n} open_ms={open_ms:.3} first_tile_ms={first_tile_ms:.3} peak_rss_bytes={rss} pdfium_load_ms={pdfium_load_ms:.3} doc_open_ms={doc_open_ms:.3} convert_ms={convert_ms:.3} visible_tiles={vt} first_ready_ms={first_ready_ms:.3} first_ready_x={fx} first_ready_y={fy} visible_tiles_ms={visible_tiles_ms:.3} font_warmup_ms={font_warmup_ms:.3}",
         n = fields.pages,
         open_ms = fields.open_ms,
         first_tile_ms = fields.first_tile_ms,
@@ -146,6 +147,7 @@ fn format_line(os: &str, arch: &str, fields: &MeasureFields<'_>) -> String {
         fx = fields.first_ready_x,
         fy = fields.first_ready_y,
         visible_tiles_ms = fields.visible_tiles_ms,
+        font_warmup_ms = fields.font_warmup_ms,
     )
 }
 
@@ -162,6 +164,7 @@ struct MeasureFields<'a> {
     first_ready_x: i32,
     first_ready_y: i32,
     visible_tiles_ms: f64,
+    font_warmup_ms: f64,
 }
 
 fn gui_visible_keys(doc: openpdf_core::DocumentId) -> Vec<TileKey> {
@@ -287,6 +290,11 @@ fn main() {
         }
     };
 
+    let font_warmup_ms = openpdf_core::font_warmup_ms().unwrap_or(if cfg!(target_os = "linux") {
+        -1.0
+    } else {
+        0.0
+    });
     let rss = peak_rss_bytes();
     let rss_s = rss.map(|v| v.to_string()).unwrap_or_else(|| "na".into());
 
@@ -306,6 +314,7 @@ fn main() {
             first_ready_x,
             first_ready_y,
             visible_tiles_ms,
+            font_warmup_ms,
         },
     );
     debug_assert!(
