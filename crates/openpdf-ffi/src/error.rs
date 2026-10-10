@@ -39,6 +39,42 @@ pub enum FfiError {
     EngineUnavailable { message: String },
     #[error("{message}")]
     DocumentChanged { message: String },
+    /// Catch-all for future `#[non_exhaustive]` core variants. Never used for
+    /// [`Self::CertUnusable`] or [`Self::SignerUnavailable`].
+    #[error("{message}")]
+    Other { message: String },
+    /// Structured unusable-certificate error (reason + RFC 3339 dates, not text).
+    #[error("{message}")]
+    CertUnusable {
+        message: String,
+        reason: CertUnusableReason,
+        not_before: Option<String>,
+        not_after: Option<String>,
+    },
+    /// Structured PKCS#11 load failure (reason + path/detail, not text).
+    #[error("{message}")]
+    SignerUnavailable {
+        message: String,
+        reason: SignerUnavailableReason,
+        module: Option<String>,
+        detail: Option<String>,
+    },
+}
+
+/// Why a certificate cannot produce a PAdES signature. Match this; do not parse text.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, uniffi::Enum)]
+pub enum CertUnusableReason {
+    AuthenticationOnly,
+    Expired,
+    NotYetValid,
+    UnsupportedKey,
+}
+
+/// Why PKCS#11 (or another token backend) could not be loaded.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, uniffi::Enum)]
+pub enum SignerUnavailableReason {
+    ModuleNotFound,
+    LoadFailed,
 }
 
 impl FfiError {
@@ -88,9 +124,60 @@ impl FfiError {
             CoreError::Sign(_) => Self::Sign { message },
             CoreError::PinCancelled => Self::PinCancelled { message },
             CoreError::Signed { .. } => Self::Signed { message },
-            // `Error` is `#[non_exhaustive]`; unknown variants still carry
-            // the translated message so a UI can show *something*.
-            _ => Self::Sign { message },
+            // `Error` is `#[non_exhaustive]`. CertUnusable (#31) and
+            // SignerUnavailable (#24) map through their dedicated helpers
+            // once those variants exist on this crate's core; the wildcard
+            // is `Other`, never `Sign`.
+            _ => Self::Other { message },
+        }
+    }
+
+    /// Map a structured unusable-certificate reason. Never returns [`Self::Other`] or [`Self::Sign`].
+    pub(crate) fn from_cert_unusable(
+        reason: CertUnusableReason,
+        not_before: Option<String>,
+        not_after: Option<String>,
+    ) -> Self {
+        crate::ensure_i18n();
+        let message = match reason {
+            CertUnusableReason::AuthenticationOnly => openpdf_core::tr("Authentication only"),
+            CertUnusableReason::Expired => openpdf_core::tr_args(
+                "Certificate expired on {not_after}",
+                &[("not_after", not_after.as_deref().unwrap_or(""))],
+            ),
+            CertUnusableReason::NotYetValid => openpdf_core::tr_args(
+                "Certificate not valid before {not_before}",
+                &[("not_before", not_before.as_deref().unwrap_or(""))],
+            ),
+            CertUnusableReason::UnsupportedKey => openpdf_core::tr("Unsupported key algorithm"),
+        };
+        Self::CertUnusable {
+            message,
+            reason,
+            not_before,
+            not_after,
+        }
+    }
+
+    pub(crate) fn from_signer_unavailable(
+        reason: SignerUnavailableReason,
+        module: Option<String>,
+        detail: Option<String>,
+    ) -> Self {
+        crate::ensure_i18n();
+        let message = match reason {
+            SignerUnavailableReason::ModuleNotFound => {
+                openpdf_core::tr("PKCS#11 module not available")
+            }
+            SignerUnavailableReason::LoadFailed => {
+                openpdf_core::tr("Could not load the PKCS#11 module")
+            }
+        };
+        Self::SignerUnavailable {
+            message,
+            reason,
+            module,
+            detail,
         }
     }
 
@@ -145,6 +232,31 @@ impl FfiError {
             },
             Self::DocumentChanged { message } => Self::DocumentChanged {
                 message: redact_msg(message),
+            },
+            Self::Other { message } => Self::Other {
+                message: redact_msg(message),
+            },
+            Self::CertUnusable {
+                message,
+                reason,
+                not_before,
+                not_after,
+            } => Self::CertUnusable {
+                message: redact_msg(message),
+                reason,
+                not_before,
+                not_after,
+            },
+            Self::SignerUnavailable {
+                message,
+                reason,
+                module,
+                detail,
+            } => Self::SignerUnavailable {
+                message: redact_msg(message),
+                reason,
+                module,
+                detail,
             },
         }
     }
@@ -206,5 +318,80 @@ mod tests {
         let err = FfiError::from_core(Error::PinCancelled);
         assert!(matches!(err, FfiError::PinCancelled { .. }), "got {err:?}");
         assert_eq!(err.to_string(), openpdf_core::tr("PIN entry was cancelled"));
+    }
+
+    #[test]
+    fn cert_unusable_never_falls_into_generic_arm() {
+        let err = FfiError::from_cert_unusable(
+            CertUnusableReason::Expired,
+            None,
+            Some("2020-01-01T00:00:00Z".into()),
+        );
+        match err {
+            FfiError::CertUnusable {
+                reason,
+                not_after,
+                not_before,
+                ..
+            } => {
+                assert_eq!(reason, CertUnusableReason::Expired);
+                assert_eq!(not_after.as_deref(), Some("2020-01-01T00:00:00Z"));
+                assert!(not_before.is_none());
+            }
+            FfiError::Other { .. } | FfiError::Sign { .. } => {
+                panic!("CertUnusable fell into the generic arm: {err:?}");
+            }
+            other => panic!("expected CertUnusable, got {other:?}"),
+        }
+
+        let auth = FfiError::from_cert_unusable(CertUnusableReason::AuthenticationOnly, None, None);
+        assert!(
+            matches!(
+                auth,
+                FfiError::CertUnusable {
+                    reason: CertUnusableReason::AuthenticationOnly,
+                    ..
+                }
+            ),
+            "got {auth:?}"
+        );
+        assert!(!matches!(auth, FfiError::Other { .. }));
+        assert!(!matches!(auth, FfiError::Sign { .. }));
+    }
+
+    #[test]
+    fn signer_unavailable_is_structured_not_generic() {
+        let err = FfiError::from_signer_unavailable(
+            SignerUnavailableReason::LoadFailed,
+            Some("/usr/lib/softhsm/libsofthsm2.so".into()),
+            Some("dlopen failed".into()),
+        );
+        match err {
+            FfiError::SignerUnavailable {
+                reason,
+                module,
+                detail,
+                ..
+            } => {
+                assert_eq!(reason, SignerUnavailableReason::LoadFailed);
+                assert_eq!(module.as_deref(), Some("/usr/lib/softhsm/libsofthsm2.so"));
+                assert_eq!(detail.as_deref(), Some("dlopen failed"));
+            }
+            FfiError::Other { .. } | FfiError::Sign { .. } => {
+                panic!("SignerUnavailable fell into the generic arm: {err:?}");
+            }
+            other => panic!("expected SignerUnavailable, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn unknown_core_variant_maps_to_other_not_sign() {
+        // The non_exhaustive wildcard is `Other`. Sign stays only for Error::Sign.
+        let sign = FfiError::from_core(Error::Sign("token rejected".into()));
+        assert!(matches!(sign, FfiError::Sign { .. }), "got {sign:?}");
+        let other = FfiError::Other {
+            message: "future-core-variant".into(),
+        };
+        assert!(!matches!(other, FfiError::Sign { .. }));
     }
 }

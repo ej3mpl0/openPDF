@@ -25,11 +25,11 @@ pub struct OpenPdf {
 #[uniffi::export]
 impl OpenPdf {
     #[uniffi::constructor]
-    pub fn new() -> Arc<Self> {
+    pub fn new() -> Result<Arc<Self>, FfiError> {
         crate::ensure_i18n();
-        Arc::new(Self {
-            engine: Engine::new().ok(),
-        })
+        Ok(Arc::new(Self {
+            engine: Some(Engine::new()?),
+        }))
     }
 
     pub fn open(&self, path: String) -> Result<Arc<PdfDocument>, FfiError> {
@@ -62,7 +62,7 @@ impl PdfDocument {
     #[uniffi::constructor]
     pub fn open(path: String) -> Result<Arc<Self>, FfiError> {
         crate::ensure_i18n();
-        Self::open_with_engine(Engine::new().ok(), path)
+        Self::open_with_engine(Some(Engine::new()?), path)
     }
 
     pub fn page_count(&self) -> Result<u32, FfiError> {
@@ -513,7 +513,7 @@ pub fn list_certificates(pin: Box<dyn PinProvider>) -> Result<Vec<Certificate>, 
 #[uniffi::export]
 pub fn images_to_pdf_paths(paths: Vec<String>) -> Result<Arc<PdfDocument>, FfiError> {
     crate::ensure_i18n();
-    PdfDocument::from_images(Engine::new().ok(), paths)
+    PdfDocument::from_images(Some(Engine::new()?), paths)
 }
 
 #[uniffi::export]

@@ -24,7 +24,8 @@
 //!     --language swift --out-dir bindings/swift
 //! cargo install uniffi-bindgen-cs \
 //!     --git https://github.com/NordSecurity/uniffi-bindgen-cs \
-//!     --tag v0.10.0+v0.29.4
+//!     --rev e4f18be96ca812571fd85fc39555646158b06b9c \
+//!     --locked
 //! uniffi-bindgen-cs --library --out-dir bindings/csharp \
 //!     target/release/libopenpdf_ffi.so
 //! ```
@@ -73,7 +74,7 @@ mod pin;
 mod types;
 
 pub use document::{images_to_pdf_paths, list_certificates, tile_size, OpenPdf, PdfDocument};
-pub use error::FfiError;
+pub use error::{CertUnusableReason, FfiError, SignerUnavailableReason};
 pub use i18n::{describe_pin_status, pin_prompt, translate};
 pub use pin::{PinProvider, SecretPin};
 pub use types::{
@@ -125,7 +126,7 @@ mod tests {
 
     #[test]
     fn open_via_library_handle() {
-        let lib = OpenPdf::new();
+        let lib = OpenPdf::new().unwrap();
         let two = lib.open(corpus_path("two_page.pdf")).unwrap();
         assert_eq!(two.page_count().unwrap(), 2);
     }
