@@ -457,7 +457,7 @@ fn recognize_library(
 
 fn rgba_to_rgb(raster: &Raster) -> Vec<u8> {
     let mut rgb = Vec::with_capacity((raster.width * raster.height * 3) as usize);
-    for px in raster.rgba.chunks_exact(4) {
+    for px in raster.rgba.as_chunks::<4>().0 {
         rgb.extend_from_slice(&px[..3]);
     }
     rgb
@@ -482,7 +482,7 @@ fn parse_tsv(tsv: &str) -> Vec<Word> {
             continue;
         }
         let conf: f32 = cols[10].parse().unwrap_or(-1.0);
-        if conf >= 0.0 && conf < 20.0 {
+        if (0.0..20.0).contains(&conf) {
             continue;
         }
         let left: f32 = cols[6].parse().unwrap_or(0.0);

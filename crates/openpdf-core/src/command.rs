@@ -57,6 +57,10 @@ impl History {
         !self.redo.is_empty()
     }
 
+    pub fn is_empty(&self) -> bool {
+        self.undo.is_empty()
+    }
+
     pub fn len(&self) -> usize {
         self.undo.len()
     }
@@ -91,8 +95,10 @@ mod tests {
     #[test]
     fn history_undo_redo_flags() {
         let mut h = History::new();
+        assert!(h.is_empty());
         assert!(!h.can_undo());
         h.push(Applied::Move { from: 0, to: 1 });
+        assert!(!h.is_empty());
         assert!(h.can_undo());
         assert!(!h.can_redo());
         let a = h.pop_undo().unwrap();

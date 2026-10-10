@@ -1,6 +1,6 @@
 use std::collections::HashMap;
 use std::path::Path;
-use std::sync::mpsc::{self, Receiver, RecvTimeoutError, Sender, TryRecvError};
+use std::sync::mpsc::{self, Receiver, RecvTimeoutError, Sender};
 use std::sync::{Arc, Mutex, OnceLock};
 use std::thread;
 use std::time::Duration;
@@ -421,10 +421,7 @@ impl Engine {
     pub fn try_recv(&self) -> Option<TileEvent> {
         let h = worker().ok()?;
         let rx = h.events.lock().ok()?;
-        match rx.try_recv() {
-            Ok(ev) => Some(ev),
-            Err(TryRecvError::Empty | TryRecvError::Disconnected) => None,
-        }
+        rx.try_recv().ok()
     }
 
     pub fn recv_timeout(&self, timeout: Duration) -> Option<TileEvent> {

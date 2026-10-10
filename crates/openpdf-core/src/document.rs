@@ -460,7 +460,7 @@ fn parse_box(obj: &Object) -> Result<(f32, f32)> {
 fn number(obj: &Object) -> Result<f32> {
     match obj {
         Object::Integer(i) => Ok(*i as f32),
-        Object::Real(r) => Ok(*r as f32),
+        Object::Real(r) => Ok(*r),
         _ => Err(Error::structure("expected number")),
     }
 }

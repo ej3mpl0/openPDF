@@ -92,7 +92,9 @@ fn pixel_diff(
     }
     let total = aw * ah;
     let mut changed = 0u32;
-    for (pa, pb) in a.chunks_exact(4).zip(b.chunks_exact(4)) {
+    let (a_px, _) = a.as_chunks::<4>();
+    let (b_px, _) = b.as_chunks::<4>();
+    for (pa, pb) in a_px.iter().zip(b_px) {
         if pa != pb {
             changed += 1;
         }
