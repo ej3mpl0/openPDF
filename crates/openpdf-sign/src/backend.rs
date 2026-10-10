@@ -2,8 +2,8 @@
 
 use der::Decode;
 use openpdf_core::{
-    describe_unusable, tr, tr_args, CertUnusable, CertificateInfo, Error, InvalidKind, PinProvider,
-    Result, SignRequest, SignatureInfo, Signer,
+    tr, tr_args, CertificateInfo, Error, InvalidKind, PinProvider, Result, SignRequest,
+    SignatureInfo, Signer,
 };
 use x509_cert::Certificate;
 
@@ -53,7 +53,7 @@ pub(crate) fn sign_pdf(
             ))
         })?;
     if let Some(reason) = &picked.info.unusable {
-        return Err(sign_error_for_unusable(reason));
+        return Err(Error::CertUnusable(reason.clone()));
     }
     if !can_use_for_pades(&picked.info.usage) {
         return Err(Error::Sign(tr("certificate is not a signing cert")));
@@ -65,20 +65,6 @@ pub(crate) fn sign_pdf(
     let id = picked.info.id.clone();
     pades::sign_incremental(pdf, request, &name, |message| {
         cades::sign_detached(message, &der, |tbs| backend.sign_bytes(&id, tbs))
-    })
-}
-
-/// Map a structured unusable reason to a sign error.
-///
-/// [`CertUnusable`] is `#[non_exhaustive]`; this crate (and GTK) must keep a
-/// wildcard arm so a future `Revoked` variant does not break the build.
-fn sign_error_for_unusable(reason: &CertUnusable) -> Error {
-    Error::Sign(match reason {
-        CertUnusable::AuthenticationOnly
-        | CertUnusable::Expired { .. }
-        | CertUnusable::NotYetValid { .. }
-        | CertUnusable::UnsupportedKey => describe_unusable(reason),
-        _ => describe_unusable(reason),
     })
 }
 

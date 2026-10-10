@@ -2,6 +2,7 @@ use std::fmt;
 use std::io;
 
 use crate::i18n::{tr, tr_args};
+use crate::signer::{describe_unusable, CertUnusable};
 
 /// Crate-wide error type. Variants are stable so the GTK UI can localize them
 /// itself; [`Display`] uses the shared gettext catalog.
@@ -31,6 +32,9 @@ pub enum Error {
     Signed {
         op: SignedOp,
     },
+    /// The chosen certificate cannot sign (expired, not yet valid, auth-only, ...).
+    /// Match the reason instead of parsing [`Display`].
+    CertUnusable(CertUnusable),
 }
 
 /// User-facing invalid-input cases. Match this instead of parsing [`Display`].
@@ -112,6 +116,8 @@ impl Error {
                 "document is signed; {op} would invalidate the signature (incremental save only)",
                 &[("op", &tr(op.msgid()))],
             ),
+            // describe_unusable already returns catalog text; do not tr() it again.
+            Error::CertUnusable(reason) => describe_unusable(reason),
         }
     }
 }
@@ -226,5 +232,52 @@ mod tests {
         assert!(matches!(Error::PinRequired, Error::PinRequired));
         assert!(matches!(Error::PinCancelled, Error::PinCancelled));
         assert!(matches!(Error::PinLocked, Error::PinLocked));
+    }
+
+    #[test]
+    fn cert_unusable_display_translates_once() {
+        let expired = CertUnusable::Expired {
+            not_after: "2020-01-01T00:00:00Z".into(),
+        };
+        let reasons = [
+            expired.clone(),
+            CertUnusable::NotYetValid {
+                not_before: "2099-01-01T00:00:00Z".into(),
+            },
+            CertUnusable::AuthenticationOnly,
+        ];
+        crate::test_support::with_locale("en", || {
+            assert_eq!(
+                Error::CertUnusable(expired.clone()).to_string(),
+                "Certificate has expired (valid until 2020-01-01T00:00:00Z)"
+            );
+            assert_eq!(
+                Error::CertUnusable(CertUnusable::AuthenticationOnly).to_string(),
+                "Authentication only"
+            );
+        });
+        crate::test_support::with_locale("es", || {
+            for r in &reasons {
+                let shown = Error::CertUnusable(r.clone()).to_string();
+                // Exactly describe_unusable: no "sign:" wrapper, no second tr().
+                assert_eq!(shown, describe_unusable(r));
+                assert!(!shown.starts_with(&tr_args("sign: {detail}", &[("detail", "")])));
+            }
+            let es = Error::CertUnusable(expired.clone()).to_string();
+            assert_ne!(
+                es,
+                "Certificate has expired (valid until 2020-01-01T00:00:00Z)"
+            );
+            assert!(es.contains("2020-01-01T00:00:00Z"), "{es}");
+        });
+    }
+
+    #[test]
+    fn cert_unusable_is_matchable() {
+        let err = Error::CertUnusable(CertUnusable::AuthenticationOnly);
+        assert!(matches!(
+            err,
+            Error::CertUnusable(CertUnusable::AuthenticationOnly)
+        ));
     }
 }

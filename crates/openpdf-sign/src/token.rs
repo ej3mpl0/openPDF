@@ -259,7 +259,7 @@ impl KeyBackend for Pkcs11Backend {
         }
         let picked = self.pick(cert_id)?;
         if let Some(reason) = &picked.info.unusable {
-            return Err(Error::Sign(openpdf_core::describe_unusable(reason)));
+            return Err(Error::CertUnusable(reason.clone()));
         }
         if !can_use_for_pades(&picked.info.usage) {
             return Err(Error::Sign(openpdf_core::tr(
@@ -593,7 +593,7 @@ impl Pkcs11Backend {
     pub(crate) fn open_live_session(&self, cert_id: &str) -> Result<LiveSignSession<'_>> {
         let picked = self.pick(cert_id)?;
         if let Some(reason) = &picked.info.unusable {
-            return Err(Error::Sign(openpdf_core::describe_unusable(reason)));
+            return Err(Error::CertUnusable(reason.clone()));
         }
         if !can_use_for_pades(&picked.info.usage) {
             return Err(Error::Sign(openpdf_core::tr(
