@@ -34,7 +34,10 @@ fn stdout_line_has_new_keys_and_no_ui_prefix() {
         .output()
         .expect("measure");
     if !out.status.success() {
-        eprintln!("skip: measure failed ({})", String::from_utf8_lossy(&out.stderr));
+        eprintln!(
+            "skip: measure failed ({})",
+            String::from_utf8_lossy(&out.stderr)
+        );
         return;
     }
     let line = String::from_utf8_lossy(&out.stdout);
