@@ -107,7 +107,11 @@ jobs:
         with:
           fetch-depth: 0
 
-      - uses: dtolnay/rust-toolchain@stable
+      - name: Install Rust from rust-toolchain.toml
+        shell: bash
+        run: |
+          rustup toolchain install
+          rustup show active-toolchain
 
       - name: Install GTK4, libadwaita, and AppImage tools
         run: |

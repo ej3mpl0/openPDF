@@ -1,3 +1,5 @@
 [toolchain]
-channel = "stable"
+# Pinned; bump deliberately. CI and release read this file on all OSes.
+channel = "1.99.0"
+components = ["rustfmt", "clippy"]
 profile = "minimal"

@@ -90,7 +90,11 @@ jobs:
         with:
           fetch-depth: 0
 
-      - uses: dtolnay/rust-toolchain@stable
+      - name: Install Rust from rust-toolchain.toml
+        shell: bash
+        run: |
+          rustup toolchain install
+          rustup show active-toolchain
       - uses: Swatinem/rust-cache@v2
         with:
           prefix-key: release-linux-appimage
@@ -133,7 +137,11 @@ jobs:
         shell: bash
     steps:
       - uses: actions/checkout@v4
-      - uses: dtolnay/rust-toolchain@stable
+      - name: Install Rust from rust-toolchain.toml
+        shell: bash
+        run: |
+          rustup toolchain install
+          rustup show active-toolchain
       - uses: Swatinem/rust-cache@v2
         with:
           prefix-key: release-windows-cli
@@ -194,7 +202,11 @@ jobs:
         shell: bash
     steps:
       - uses: actions/checkout@v4
-      - uses: dtolnay/rust-toolchain@stable
+      - name: Install Rust from rust-toolchain.toml
+        shell: bash
+        run: |
+          rustup toolchain install
+          rustup show active-toolchain
       - uses: Swatinem/rust-cache@v2
         with:
           prefix-key: release-macos-cli-${{ matrix.os }}
