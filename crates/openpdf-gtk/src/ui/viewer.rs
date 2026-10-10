@@ -1026,50 +1026,46 @@ mod tests {
     /// pixel size is an exact tile multiple.
     #[test]
     fn snapshot_zero_and_unit_and_147_tile_multiple() {
-        if !gtk::is_initialized() {
-            if gtk::init().is_err() {
-                eprintln!("snapshot sizes: skipped (no GTK display)");
-                return;
+        let Some(()) = crate::test_gtk::on_gtk_thread(|| {
+            let doc = crate::backend::MockDocument::sample(2);
+            let opened = Rc::new(crate::session::Opened::Mock(crate::session::MockView::new(
+                doc,
+            )));
+            let mut settings = crate::settings::Settings::default();
+            settings.show_thumbnails = true;
+            settings.zoom_mode = crate::settings::ZoomMode::Percent;
+            settings.zoom_percent = 147;
+            let view = build(opened, &settings, crate::Lang::En);
+
+            for (w, h) in [(0.0, 0.0), (1.0, 1.0)] {
+                let pages = paint::snapshot_widget(view.pages_canvas(), w, h);
+                let thumbs = paint::snapshot_widget(view.thumbs_canvas(), w, h);
+                let _ = pages.to_node();
+                let _ = thumbs.to_node();
             }
-        } else if !gtk::is_initialized_main_thread() {
-            eprintln!("snapshot sizes: skipped (GTK initialized on another thread)");
+
+            let zoom = 1.47;
+            let page_pt = f64::from(DEFAULT_TILE_SIZE) * 2.0 / zoom;
+            let (pw, ph) = crate::tiles::page_pixel_size(
+                crate::PageSize {
+                    width: page_pt,
+                    height: page_pt,
+                },
+                zoom,
+            );
+            assert_eq!(
+                pw % DEFAULT_TILE_SIZE,
+                0,
+                "147% page width must be a tile multiple, got {pw}"
+            );
+            assert_eq!(ph % DEFAULT_TILE_SIZE, 0);
+            let snap = paint::snapshot_widget(view.pages_canvas(), f64::from(pw), f64::from(ph));
+            let _ = snap.to_node();
+            let _ = paint::image_surface_from_rgba(0, DEFAULT_TILE_SIZE, &[0; 4]);
+            let _ = paint::image_surface_from_rgba(DEFAULT_TILE_SIZE, 0, &[0; 4]);
+        }) else {
+            eprintln!("snapshot sizes: skipped (no GTK display)");
             return;
-        }
-        let doc = crate::backend::MockDocument::sample(2);
-        let opened = Rc::new(crate::session::Opened::Mock(crate::session::MockView::new(
-            doc,
-        )));
-        let mut settings = crate::settings::Settings::default();
-        settings.show_thumbnails = true;
-        settings.zoom_mode = crate::settings::ZoomMode::Percent;
-        settings.zoom_percent = 147;
-        let view = build(opened, &settings, crate::Lang::En);
-
-        for (w, h) in [(0.0, 0.0), (1.0, 1.0)] {
-            let pages = paint::snapshot_widget(view.pages_canvas(), w, h);
-            let thumbs = paint::snapshot_widget(view.thumbs_canvas(), w, h);
-            let _ = pages.to_node();
-            let _ = thumbs.to_node();
-        }
-
-        let zoom = 1.47;
-        let page_pt = f64::from(DEFAULT_TILE_SIZE) * 2.0 / zoom;
-        let (pw, ph) = crate::tiles::page_pixel_size(
-            crate::PageSize {
-                width: page_pt,
-                height: page_pt,
-            },
-            zoom,
-        );
-        assert_eq!(
-            pw % DEFAULT_TILE_SIZE,
-            0,
-            "147% page width must be a tile multiple, got {pw}"
-        );
-        assert_eq!(ph % DEFAULT_TILE_SIZE, 0);
-        let snap = paint::snapshot_widget(view.pages_canvas(), f64::from(pw), f64::from(ph));
-        let _ = snap.to_node();
-        let _ = paint::image_surface_from_rgba(0, DEFAULT_TILE_SIZE, &[0; 4]);
-        let _ = paint::image_surface_from_rgba(DEFAULT_TILE_SIZE, 0, &[0; 4]);
+        };
     }
 }

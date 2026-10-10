@@ -1142,9 +1142,6 @@ mod tests {
     /// again. Peak RSS is informational (no assert).
     #[test]
     fn viewport_cache_reuses_tiles_at_3840x2160_and_1920x1080_scale_2() {
-        use gtk::prelude::*;
-        use gtk4 as gtk;
-
         let Ok(engine) = Engine::new() else {
             eprintln!("viewport cache reuse: Engine::new skipped (no PDFium)");
             return;
@@ -1164,26 +1161,22 @@ mod tests {
             }
         };
 
-        if !gtk::is_initialized() {
-            if gtk::init().is_err() {
-                let _ = std::fs::remove_file(&path);
-                eprintln!("viewport cache reuse: skipped (no GTK display)");
-                return;
-            }
-        } else if !gtk::is_initialized_main_thread() {
+        let Some(()) = crate::test_gtk::on_gtk_thread(move || {
+            use gtk::prelude::*;
+            use gtk4 as gtk;
+            let scroll = gtk::ScrolledWindow::new();
+            scroll.set_size_request(1920, 1080);
+            eprintln!(
+                "viewport cache reuse: gtk scale_factor={}",
+                scroll.scale_factor()
+            );
+            scroll_reuse_case(&engine, &session, &scroll, 3840, 2160, 1.0);
+            scroll_reuse_case(&engine, &session, &scroll, 1920, 1080, 2.0);
+        }) else {
             let _ = std::fs::remove_file(&path);
-            eprintln!("viewport cache reuse: skipped (GTK initialized on another thread)");
+            eprintln!("viewport cache reuse: skipped (no GTK display)");
             return;
-        }
-        let scroll = gtk::ScrolledWindow::new();
-        scroll.set_size_request(1920, 1080);
-        eprintln!(
-            "viewport cache reuse: gtk scale_factor={}",
-            scroll.scale_factor()
-        );
-
-        scroll_reuse_case(&engine, &session, &scroll, 3840, 2160, 1.0);
-        scroll_reuse_case(&engine, &session, &scroll, 1920, 1080, 2.0);
+        };
         let _ = std::fs::remove_file(&path);
     }
 

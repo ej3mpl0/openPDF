@@ -25,6 +25,8 @@ pub mod pin;
 pub mod session;
 pub mod settings;
 pub mod sign;
+#[cfg(test)]
+pub mod test_gtk;
 pub mod tiles;
 pub mod ui;
 

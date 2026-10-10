@@ -89,48 +89,49 @@ mod tests {
 
     #[test]
     fn slow_bind_keeps_main_loop_dispatching() {
-        let ctx = glib::MainContext::default();
-        let Ok(_acquire) = ctx.acquire() else {
+        let Some(()) = crate::test_gtk::on_gtk_thread(|| {
+            let ctx = glib::MainContext::default();
+            TEST_SLOW_BIND_MS.store(200, Ordering::SeqCst);
+
+            let dispatched = Rc::new(Cell::new(false));
+            let finished = Rc::new(Cell::new(false));
+            let overlap = Rc::new(Cell::new(false));
+
+            glib::timeout_add_local(Duration::from_millis(40), {
+                let dispatched = dispatched.clone();
+                let finished = finished.clone();
+                let overlap = overlap.clone();
+                move || {
+                    dispatched.set(true);
+                    if !finished.get() {
+                        overlap.set(true);
+                    }
+                    glib::ControlFlow::Break
+                }
+            });
+
+            spawn_engine_bind(|| (), {
+                let finished = finished.clone();
+                move |()| finished.set(true)
+            });
+
+            let start = std::time::Instant::now();
+            while start.elapsed() < Duration::from_secs(2) && !finished.get() {
+                let _ = ctx.iteration(true);
+            }
+            TEST_SLOW_BIND_MS.store(0, Ordering::SeqCst);
+
+            assert!(
+                dispatched.get(),
+                "glib timeout must fire while bind is on the worker"
+            );
+            assert!(finished.get(), "slow bind must finish");
+            assert!(
+                overlap.get(),
+                "timeout must run before spawn_engine_bind completes"
+            );
+        }) else {
             return;
         };
-        TEST_SLOW_BIND_MS.store(200, Ordering::SeqCst);
-
-        let dispatched = Rc::new(Cell::new(false));
-        let finished = Rc::new(Cell::new(false));
-        let overlap = Rc::new(Cell::new(false));
-
-        glib::timeout_add_local(Duration::from_millis(40), {
-            let dispatched = dispatched.clone();
-            let finished = finished.clone();
-            let overlap = overlap.clone();
-            move || {
-                dispatched.set(true);
-                if !finished.get() {
-                    overlap.set(true);
-                }
-                glib::ControlFlow::Break
-            }
-        });
-
-        spawn_engine_bind(|| (), {
-            let finished = finished.clone();
-            move |()| finished.set(true)
-        });
-
-        let start = std::time::Instant::now();
-        while start.elapsed() < Duration::from_secs(2) && !finished.get() {
-            let _ = ctx.iteration(true);
-        }
-        TEST_SLOW_BIND_MS.store(0, Ordering::SeqCst);
-
-        assert!(
-            dispatched.get(),
-            "glib timeout must fire while bind is on the worker"
-        );
-        assert!(finished.get(), "slow bind must finish");
-        assert!(
-            overlap.get(),
-            "timeout must run before spawn_engine_bind completes"
-        );
     }
 }
