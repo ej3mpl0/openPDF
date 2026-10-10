@@ -28,6 +28,10 @@ use crate::pin::StaticPinProvider;
 use crate::token::{Pkcs11Config, Pkcs11Signer};
 use crate::{verify_pdf, CertificateUsage};
 
+// TEST-ONLY. Throwaway SoftHSM2 token PINs for a token these tests create in
+// a temp dir and destroy afterwards. The signing key and certificate are
+// generated at test time on that token; they are never used in production and
+// no real DNIe/FNMT material is involved. Allowlisted in .gitleaks.toml.
 const USER_PIN: &str = "1234";
 const SO_PIN: &str = "12345678";
 const KEY_ID: &[u8] = &[0x01];
