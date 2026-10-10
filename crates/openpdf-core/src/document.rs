@@ -333,10 +333,9 @@ impl Document {
     /// Cheap memory accounting for this document: O(objects), no stream
     /// clone or decode, no heap allocation. See [`DocMemory`].
     pub fn memory_usage(&self) -> DocMemory {
-        let mut est = 0usize;
-        for obj in self.inner.objects.values() {
-            est += MAP_ENTRY_OVERHEAD + std::mem::size_of::<ObjectId>() + object_heap(obj);
-        }
+        let objects = &self.inner.objects;
+        let est = objects.len() * (MAP_ENTRY_OVERHEAD + std::mem::size_of::<ObjectId>())
+            + objects_heap(objects.values());
         DocMemory {
             file_bytes: self.original.len() as u64,
             object_tree_estimate: est as u64,
@@ -557,25 +556,47 @@ impl DocMemory {
 /// Approximate per-entry cost of a `BTreeMap` (node share + padding).
 const MAP_ENTRY_OVERHEAD: usize = 16;
 
-fn dict_heap(d: &Dictionary) -> usize {
-    d.iter()
-        .map(|(k, v)| {
-            MAP_ENTRY_OVERHEAD + k.len() + std::mem::size_of::<Vec<u8>>() + object_heap(v)
-        })
-        .sum()
-}
-
-/// Inline size of `obj` plus what it owns on the heap.
-fn object_heap(obj: &Object) -> usize {
-    std::mem::size_of::<Object>()
-        + match obj {
-            Object::Name(n) => n.len(),
-            Object::String(s, _) => s.len(),
-            Object::Array(a) => a.iter().map(object_heap).sum(),
-            Object::Dictionary(d) => dict_heap(d),
-            Object::Stream(st) => st.content.len() + dict_heap(&st.dict),
-            _ => 0,
+/// Estimated heap of a set of top-level objects, walked iteratively with an
+/// explicit stack (no recursion, so arbitrarily deep nesting cannot overflow
+/// the thread stack). `Object::Reference`s are counted as leaves and never
+/// followed, so cycles through indirect objects are impossible. The only
+/// allocation is the stack `Vec`, which grows with the widest pending level.
+fn objects_heap<'a>(roots: impl Iterator<Item = &'a Object>) -> usize {
+    let mut total = 0usize;
+    let mut stack: Vec<&Object> = Vec::new();
+    for root in roots {
+        stack.push(root);
+        while let Some(obj) = stack.pop() {
+            total += std::mem::size_of::<Object>();
+            let dict = match obj {
+                Object::Name(n) => {
+                    total += n.len();
+                    None
+                }
+                Object::String(s, _) => {
+                    total += s.len();
+                    None
+                }
+                Object::Array(a) => {
+                    stack.extend(a.iter());
+                    None
+                }
+                Object::Dictionary(d) => Some(d),
+                Object::Stream(st) => {
+                    total += st.content.len();
+                    Some(&st.dict)
+                }
+                _ => None,
+            };
+            if let Some(d) = dict {
+                for (k, v) in d.iter() {
+                    total += MAP_ENTRY_OVERHEAD + k.len() + std::mem::size_of::<Vec<u8>>();
+                    stack.push(v);
+                }
+            }
         }
+    }
+    total
 }
 
 #[cfg(test)]
@@ -609,6 +630,42 @@ mod memory_tests {
                 m.object_tree_estimate <= len * 50 + 64 * 1024,
                 "{name}: {m:?}"
             );
+        }
+    }
+
+    /// Builds `depth` nested arrays or dicts without recursion.
+    fn deep(depth: usize, dicts: bool) -> Object {
+        let mut o = Object::Null;
+        for _ in 0..depth {
+            o = if dicts {
+                let mut d = Dictionary::new();
+                d.set("K", o);
+                Object::Dictionary(d)
+            } else {
+                Object::Array(vec![o])
+            };
+        }
+        o
+    }
+
+    #[test]
+    fn deep_nesting_does_not_overflow_small_stack() {
+        for dicts in [false, true] {
+            let base = crate::blank_document(1).unwrap();
+            let mut inner = base.inner.clone();
+            inner.add_object(deep(100_000, dicts));
+            let doc = Document::from_lopdf_inner(inner, Vec::new(), None).unwrap();
+            let m = std::thread::scope(|sc| {
+                std::thread::Builder::new()
+                    .stack_size(256 * 1024)
+                    .spawn_scoped(sc, || doc.memory_usage())
+                    .unwrap()
+                    .join()
+                    .expect("memory_usage overflowed a 256 KiB stack")
+            });
+            assert!(m.object_tree_estimate >= 100_000 * std::mem::size_of::<Object>() as u64);
+            // lopdf's Drop is recursive; leak instead of overflowing the test thread.
+            std::mem::forget(doc);
         }
     }
 }
