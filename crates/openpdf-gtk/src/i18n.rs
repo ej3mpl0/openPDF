@@ -117,6 +117,8 @@ pub fn format_core_error(err: &Error) -> String {
         ),
         Error::Signed { op } => format_signed_op(*op),
         Error::SignerUnavailable { reason } => describe_signer_unavailable(reason),
+        Error::PinCancelled => tr("PIN entry was cancelled"),
+        _ => err.to_locale_string(),
     }
 }
 
@@ -233,5 +235,10 @@ mod tests {
         );
         assert_ne!(format_core_error(&err), "PKCS#11 module not available");
         set_locale("en");
+        assert_eq!(
+            format_core_error(&Error::PinCancelled),
+            "PIN entry was cancelled"
+        );
+        assert!(!matches!(Error::PinCancelled, Error::Sign(_)));
     }
 }

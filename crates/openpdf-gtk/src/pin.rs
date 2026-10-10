@@ -1,6 +1,10 @@
 //! GTK PIN dialog. Implements [`openpdf_core::PinProvider`] and returns
 //! [`SecretPin`]. Prompt text comes from [`openpdf_core::pin_prompt_text`].
 //! This crate never imports `openpdf-sign`.
+//!
+//! The PIN is [`Zeroizing<String>`] from the GTK entry, through the channel,
+//! until [`SecretPin`]. The entry buffer is cleared immediately after read.
+//! Cancel or an empty field is [`Error::PinCancelled`] (unit, no payload).
 
 use std::cell::Cell;
 use std::rc::Rc;
@@ -10,6 +14,7 @@ use adw::prelude::*;
 use gtk4 as gtk;
 use libadwaita as adw;
 use openpdf_core::{pin_prompt_text, tr, Error, PinProvider, Result, SecretPin};
+use zeroize::Zeroizing;
 
 /// Modal PIN dialog. Stateless so the application binary can build it
 /// before the viewer exists.
@@ -18,11 +23,11 @@ pub struct GtkPinProvider;
 
 impl PinProvider for GtkPinProvider {
     fn request_pin(&self, token_label: &str) -> Result<SecretPin> {
-        request_pin_blocking(&pin_prompt_text(token_label)).map(SecretPin::new)
+        request_pin_blocking(&pin_prompt_text(token_label)).map(|pin| SecretPin::new(pin.as_str()))
     }
 }
 
-fn request_pin_blocking(prompt: &str) -> Result<String> {
+fn request_pin_blocking(prompt: &str) -> Result<Zeroizing<String>> {
     if !gtk::is_initialized() {
         return Err(Error::Sign("PIN dialog needs a display".into()));
     }
@@ -43,13 +48,27 @@ fn request_pin_blocking(prompt: &str) -> Result<String> {
         }
     }
     ctx.invoke(launch);
-    rx.recv()
-        .unwrap_or_else(|_| Err(Error::Sign("PIN entry cancelled".into())))
+    rx.recv().unwrap_or_else(|_| Err(Error::PinCancelled))
 }
 
-fn present_pin_dialog(prompt: &str, tx: Sender<Result<String>>) {
+fn take_pin(entry: &gtk::PasswordEntry) -> Zeroizing<String> {
+    let pin = Zeroizing::new(entry.text().to_string());
+    entry.set_text("");
+    pin
+}
+
+fn submit_pin(send: &Rc<impl Fn(Result<Zeroizing<String>>)>, entry: &gtk::PasswordEntry) {
+    let pin = take_pin(entry);
+    if pin.is_empty() {
+        send(Err(Error::PinCancelled));
+    } else {
+        send(Ok(pin));
+    }
+}
+
+fn present_pin_dialog(prompt: &str, tx: Sender<Result<Zeroizing<String>>>) {
     let sent = Rc::new(Cell::new(false));
-    let send = Rc::new(move |value: Result<String>| {
+    let send = Rc::new(move |value: Result<Zeroizing<String>>| {
         if !sent.replace(true) {
             let _ = tx.send(value);
         }
@@ -105,7 +124,7 @@ fn present_pin_dialog(prompt: &str, tx: Sender<Result<String>>) {
         let win = win.clone();
         let send = send.clone();
         move |_| {
-            send(Err(Error::Sign("PIN entry cancelled".into())));
+            send(Err(Error::PinCancelled));
             win.close();
         }
     });
@@ -114,7 +133,7 @@ fn present_pin_dialog(prompt: &str, tx: Sender<Result<String>>) {
         let entry = entry.clone();
         let send = send.clone();
         move |_| {
-            send(Ok(entry.text().to_string()));
+            submit_pin(&send, &entry);
             win.close();
         }
     });
@@ -122,12 +141,12 @@ fn present_pin_dialog(prompt: &str, tx: Sender<Result<String>>) {
         let win = win.clone();
         let send = send.clone();
         move |entry| {
-            send(Ok(entry.text().to_string()));
+            submit_pin(&send, entry);
             win.close();
         }
     });
     win.connect_close_request(move |_| {
-        send(Err(Error::Sign("PIN entry cancelled".into())));
+        send(Err(Error::PinCancelled));
         gtk::glib::Propagation::Proceed
     });
 
@@ -145,5 +164,25 @@ mod tests {
             GtkPinProvider.request_pin("test"),
             Err(Error::Sign(_))
         ));
+    }
+
+    #[test]
+    fn pin_cancelled_is_unit_variant() {
+        assert!(matches!(Error::PinCancelled, Error::PinCancelled));
+        assert!(!matches!(Error::PinCancelled, Error::Sign(_)));
+    }
+
+    #[test]
+    fn take_pin_clears_the_entry_into_zeroizing() {
+        // Without a display the widget constructors still work in unit tests
+        // on this crate's GTK; skip if GTK cannot init.
+        if gtk::init().is_err() && !gtk::is_initialized() {
+            return;
+        }
+        let entry = gtk::PasswordEntry::new();
+        entry.set_text("s3cret");
+        let pin = take_pin(&entry);
+        assert_eq!(pin.as_str(), "s3cret");
+        assert_eq!(entry.text().as_str(), "");
     }
 }

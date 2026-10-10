@@ -87,7 +87,9 @@ impl Signer for LazyPkcs11 {
     }
 
     fn verify(&self, pdf: &[u8]) -> Result<Vec<SignatureInfo>> {
-        self.get()?.verify(pdf)
+        // PAdES verify is CMS + ByteRange. It must not open a token or load
+        // the PKCS#11 module — `get()` stays for list_certificates / sign.
+        openpdf_sign::verify_pdf(pdf)
     }
 }
 
@@ -216,5 +218,56 @@ mod tests {
         );
         assert!(lazy.list_certificates().unwrap().is_empty());
         assert_eq!(calls.load(Ordering::SeqCst), 2, "success is cached");
+    }
+
+    #[test]
+    fn verify_signed_pdf_does_not_load_pkcs11() {
+        let calls = Arc::new(AtomicU32::new(0));
+        let lazy = LazyPkcs11::new({
+            let calls = calls.clone();
+            move || {
+                calls.fetch_add(1, Ordering::SeqCst);
+                Err(Error::signer_unavailable(
+                    SignerUnavailableReason::ModuleNotFound,
+                ))
+            }
+        });
+        let pdf = stub_signed_pdf();
+        let infos = lazy
+            .verify(&pdf)
+            .expect("verify must not need a PKCS#11 module");
+        assert_eq!(
+            calls.load(Ordering::SeqCst),
+            0,
+            "verify must not call the PKCS#11 loader"
+        );
+        assert!(
+            !infos.is_empty(),
+            "signed PDF must still produce SignatureInfo"
+        );
+        assert_eq!(infos[0].valid, Some(false));
+    }
+
+    /// Incremental /Type /Sig dictionary so verify runs without SoftHSM.
+    fn stub_signed_pdf() -> Vec<u8> {
+        use lopdf::{Dictionary, Document, IncrementalDocument, Object};
+        let hello = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("../../corpus/hello.pdf");
+        let pdf = std::fs::read(&hello).expect("corpus/hello.pdf");
+        let prev = Document::load_mem(&pdf).unwrap();
+        let mut inc = IncrementalDocument::create_from(pdf, prev);
+        let mut dict = Dictionary::new();
+        dict.set("Type", Object::Name(b"Sig".to_vec()));
+        dict.set("Filter", Object::Name(b"Adobe.PPKLite".to_vec()));
+        dict.set("SubFilter", Object::Name(b"adbe.pkcs7.detached".to_vec()));
+        dict.set(
+            "ByteRange",
+            Object::Array(vec![0.into(), 0.into(), 0.into(), 0.into()]),
+        );
+        dict.set("Contents", Object::string_literal(""));
+        inc.new_document.add_object(Object::Dictionary(dict));
+        let mut out = Vec::new();
+        inc.save_to(&mut out).unwrap();
+        out
     }
 }
