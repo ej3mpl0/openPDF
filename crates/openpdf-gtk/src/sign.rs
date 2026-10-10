@@ -10,8 +10,9 @@ use openpdf_core::{
 };
 
 pub use openpdf_core::{
-    describe_certificate, describe_pin_status, describe_unusable, format_verify_result,
-    format_verify_results, pin_prompt_text, usage_label, CertUnusable, TokenPinStatus,
+    certificate_common_name, describe_certificate, describe_certificate_detail,
+    describe_pin_status, describe_unusable, format_verify_result, format_verify_results,
+    pin_prompt_text, usage_label, CertUnusable, TokenPinStatus,
 };
 
 /// Empty signer for tests and `--measure`. The application binary injects

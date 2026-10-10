@@ -5,8 +5,8 @@ use std::sync::Arc;
 use crate::i18n::{format_core_error, t};
 use crate::pin::set_pending_pin_status;
 use crate::sign::{
-    certificate_can_sign, describe_certificate, describe_pin_status, sign_request_for,
-    unusable_reason,
+    certificate_can_sign, certificate_common_name, describe_certificate_detail,
+    describe_pin_status, sign_request_for, unusable_reason,
 };
 use crate::Lang;
 use adw::prelude::*;
@@ -137,11 +137,11 @@ fn certificate_row(
 ) -> adw::ActionRow {
     let can_sign = certificate_can_sign(&cert);
     let row = adw::ActionRow::new();
-    row.set_title(&escape(&certificate_cn(&cert.subject)));
+    row.set_title(&escape(&certificate_common_name(&cert.subject)));
     let mut subtitle = describe_certificate_local(&cert);
     if let Some(reason) = &cert.unusable {
         subtitle.push_str(" · ");
-        subtitle.push_str(&unusable_reason(reason));
+        subtitle.push_str(&describe_unusable_local(reason));
     }
     if let Some(status) = &cert.pin_status {
         if let Some(warn) = describe_pin_status(status) {
@@ -184,25 +184,8 @@ fn escape(s: &str) -> String {
         .replace('>', "&gt;")
 }
 
-/// Row title: holder's CN, not the raw DN. Core `describe_certificate` still
-/// owns the subtitle; we only peel `CN=` here until Jian extends the helper.
-pub(crate) fn certificate_cn(subject: &str) -> String {
-    for part in subject.split([',', '/']) {
-        let part = part.trim();
-        let rest = part
-            .strip_prefix("CN=")
-            .or_else(|| part.strip_prefix("cn="))
-            .or_else(|| part.strip_prefix("CN ="));
-        if let Some(cn) = rest {
-            let cn = cn.trim();
-            if !cn.is_empty() {
-                return cn.to_string();
-            }
-        }
-    }
-    subject.trim().to_string()
-}
-
+/// RFC 3339 / ISO-8601 from the token → the user's locale and local time.
+/// Core keeps the raw strings (UniFFI); glib owns `%x %X`.
 fn format_cert_time(raw: &str) -> String {
     let raw = raw.trim();
     if let Ok(dt) = gtk::glib::DateTime::from_iso8601(raw, None) {
@@ -215,6 +198,20 @@ fn format_cert_time(raw: &str) -> String {
     raw.to_string()
 }
 
+fn describe_unusable_local(reason: &openpdf_core::CertUnusable) -> String {
+    use openpdf_core::CertUnusable;
+    let formatted = match reason {
+        CertUnusable::Expired { not_after } => CertUnusable::Expired {
+            not_after: format_cert_time(not_after),
+        },
+        CertUnusable::NotYetValid { not_before } => CertUnusable::NotYetValid {
+            not_before: format_cert_time(not_before),
+        },
+        other => other.clone(),
+    };
+    unusable_reason(&formatted)
+}
+
 fn describe_certificate_local(cert: &CertificateInfo) -> String {
     let mut info = cert.clone();
     if let Some(a) = info.validity.not_before.as_mut() {
@@ -223,7 +220,7 @@ fn describe_certificate_local(cert: &CertificateInfo) -> String {
     if let Some(b) = info.validity.not_after.as_mut() {
         *b = format_cert_time(b);
     }
-    describe_certificate(&info)
+    describe_certificate_detail(&info)
 }
 
 #[cfg(test)]
@@ -231,12 +228,20 @@ mod tests {
     use super::*;
 
     #[test]
-    fn certificate_cn_takes_the_common_name() {
+    fn picker_title_is_the_common_name() {
         assert_eq!(
-            certificate_cn("O=AC DNIE,CN=María García (FIRMA),C=ES"),
+            certificate_common_name("O=AC DNIE,CN=María García (FIRMA),C=ES"),
             "María García (FIRMA)"
         );
-        assert_eq!(certificate_cn("CN=CITIZEN (SIGNING)"), "CITIZEN (SIGNING)");
-        assert_eq!(certificate_cn("no-cn-here"), "no-cn-here");
+    }
+
+    #[test]
+    fn format_cert_time_drops_rfc3339_z() {
+        let formatted = format_cert_time("2020-01-01T00:00:00Z");
+        assert!(
+            !formatted.contains('Z'),
+            "locale/local time must not keep the RFC3339 Z: {formatted}"
+        );
+        assert_ne!(formatted, "2020-01-01T00:00:00Z");
     }
 }
