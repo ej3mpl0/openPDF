@@ -12,6 +12,8 @@ members = [
 edition = "2021"
 license = "MPL-2.0"
 version = "0.1.0"
+# Same as PR #6 / 1c120f2 (Flatpak rust-stable//26.08). Apply on rebase onto #6.
+rust-version = "1.98.0"
 
 [workspace.dependencies]
 openpdf-core = { path = "crates/openpdf-core" }
