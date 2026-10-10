@@ -4,11 +4,10 @@ use std::path::{Path, PathBuf};
 use anyhow::{bail, Context, Result};
 use clap::{value_parser, Arg, ArgMatches, Command};
 use openpdf_core::{
-    apply_overlay, compare_pdfs, crop_pages, default_ocr_engine, extract, images_to_pdf,
-    insert_pages, ocr, ocr_capability, ocr_install_hint, optimize, parse_page_ranges,
-    pdf_to_rasters, protect, raster_to_png, redact, replace_pages, sanitize_metadata, tr, tr_args,
-    unprotect, CropBox, Document, Engine, OcrOptions, OptimizeOptions, Overlay, OverlayKind,
-    PageRange, PdfPermissions, ProtectOptions, RedactBox,
+    apply_overlay, compare_pdfs, crop_pages, extract, images_to_pdf, insert_pages, ocr, optimize,
+    parse_page_ranges, pdf_to_rasters, protect, raster_to_png, redact, replace_pages,
+    sanitize_metadata, tr, tr_args, unprotect, CropBox, Document, Engine, OcrOptions,
+    OptimizeOptions, Overlay, OverlayKind, PageRange, PdfPermissions, ProtectOptions, RedactBox,
 };
 
 use crate::{decorate, engine, path_arg};
@@ -486,13 +485,14 @@ fn to_images_cmd(m: &ArgMatches) -> Result<()> {
 
 fn ocr_cmd(m: &ArgMatches) -> Result<()> {
     if m.get_flag("list-langs") {
-        let cap = ocr_capability();
+        let ocr_eng = openpdf_ocr_native::default_engine();
+        let cap = ocr_eng.capability();
         if !cap.available {
             bail!(
                 "{}",
                 tr_args(
                     "OCR is unavailable ({hint})",
-                    &[("hint", &ocr_install_hint())]
+                    &[("hint", &openpdf_ocr_native::install_hint())]
                 )
             );
         }
@@ -515,7 +515,7 @@ fn ocr_cmd(m: &ArgMatches) -> Result<()> {
         pages: Vec::new(),
     };
     opts.pages = ranges_or_all(&doc, m.get_one::<String>("pages").map(String::as_str))?;
-    let ocr_eng = default_ocr_engine();
+    let ocr_eng = openpdf_ocr_native::default_engine();
     save_out(ocr(&engine, ocr_eng.as_ref(), &doc, &opts)?, &output)
 }
 

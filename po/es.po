@@ -418,6 +418,12 @@ msgstr "el recorte debe ser llx,lly,urx,ury"
 msgid "OCR is unavailable ({hint})"
 msgstr "OCR no está disponible ({hint})"
 
+msgid "install the Windows OCR language pack"
+msgstr "instale el paquete de idioma de OCR de Windows"
+
+msgid "install the Vision OCR language pack in System Settings"
+msgstr "instale el paquete de idioma de Vision en Ajustes del sistema"
+
 msgid "OCR language {language} is not installed (have: {installed}). {hint}"
 msgstr "el idioma de OCR {language} no está instalado (hay: {installed}). {hint}"
 
