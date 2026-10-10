@@ -483,3 +483,9 @@ msgstr "la firma ECDSA tiene un tamaño de campo incorrecto"
 
 msgid "no signing certificates found"
 msgstr "no se encontraron certificados de firma"
+
+msgid "PKCS#11 module not available"
+msgstr "Módulo PKCS#11 no disponible"
+
+msgid "Could not load the PKCS#11 module"
+msgstr "No se pudo cargar el módulo PKCS#11"

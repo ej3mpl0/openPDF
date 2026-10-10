@@ -29,7 +29,9 @@ pub mod test_support;
 
 pub use command::{Command, History};
 pub use document::{Document, DocumentId, PageInfo};
-pub use error::{Error, InvalidKind, Result, SignedOp};
+pub use error::{
+    describe_signer_unavailable, Error, InvalidKind, Result, SignedOp, SignerUnavailableReason,
+};
 pub use i18n::{
     available_locales, current_locale, detect_locale, init as init_i18n, set_locale, tr, tr_args,
 };
