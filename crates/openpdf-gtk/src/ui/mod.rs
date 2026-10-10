@@ -15,6 +15,7 @@ use std::sync::Arc;
 
 use crate::measure::{
     self, peak_rss_bytes, BudgetReport, DEFAULT_MEASURE_PAGES, MAX_MEASURE_WAIT_MS,
+    MIN_THUMB_TILES, MIN_VISIBLE_TILES,
 };
 use crate::settings::{Settings, Theme};
 use crate::sign::{NoopVerifier, UnavailableSigner};
@@ -259,8 +260,16 @@ fn watch_measure(
                 view.queue_repaint();
             }
             // startup_ms is marked from the DrawingArea draw path, not here.
+            // Do not finish on a stale mark from a tiny first allocation:
+            // Xvfb often grows the viewport afterward and tile_ready drops
+            // to 0/N until the new keys are painted.
             let startup_ms = measure::ui_all_visible_painted_ms();
-            if laid_out.get() && view.viewport_allocated() && startup_ms > 0 {
+            if laid_out.get()
+                && view.viewport_allocated()
+                && startup_ms > 0
+                && ready.visible_ready >= MIN_VISIBLE_TILES
+                && ready.thumb_ready >= MIN_THUMB_TILES
+            {
                 finish_measure(
                     &app,
                     &report,
