@@ -474,8 +474,8 @@ mod encryption_tests {
     fn owner_only_source_stays_encrypted_through_merge_and_extract() {
         let src = owner_only();
         assert!(src.is_encrypted());
-        let want = encrypt_profile(src.original_slice());
-        let p = p_value(src.original_slice());
+        let want = encrypt_profile(src.original_bytes());
+        let p = p_value(src.original_bytes());
         assert!(p < 0 && p & 8 == 0, "/P {p}");
         assert_eq!(
             merge_encryption_source(&[plain(), src.clone()]),
@@ -533,7 +533,7 @@ mod encryption_tests {
         ));
         assert_eq!(
             encrypt_profile(&bytes),
-            encrypt_profile(user.original_slice())
+            encrypt_profile(user.original_bytes())
         );
         assert_eq!(reopen(bytes).page_count(), 4);
     }
@@ -543,10 +543,10 @@ mod encryption_tests {
         let src = owner_only();
         let merged = merge(&[src.clone(), plain()]).unwrap();
         let bytes = merged.to_bytes().unwrap();
-        assert_eq!(p_value(&bytes), p_value(src.original_slice()));
+        assert_eq!(p_value(&bytes), p_value(src.original_bytes()));
         assert_eq!(
             encrypt_profile(&bytes),
-            encrypt_profile(src.original_slice())
+            encrypt_profile(src.original_bytes())
         );
         let doc = Document::from_bytes(bytes, None).unwrap();
         assert!(doc.is_encrypted());
@@ -572,7 +572,7 @@ mod encryption_tests {
             Some((0, EncryptionSourceKind::UserPassword))
         );
         let bytes = merge(&[a.clone(), b]).unwrap().to_bytes().unwrap();
-        assert_eq!(encrypt_profile(&bytes), encrypt_profile(a.original_slice()));
+        assert_eq!(encrypt_profile(&bytes), encrypt_profile(a.original_bytes()));
         assert!(matches!(
             Document::from_bytes(bytes.clone(), None),
             Err(crate::Error::PasswordRequired)
@@ -634,7 +634,7 @@ mod encryption_tests {
     /// password must not count as a user-password input.
     #[test]
     fn owner_only_opened_with_owner_password_does_not_outrank_user_password() {
-        let src = owner_only().original_slice().to_vec();
+        let src = owner_only().original_bytes().to_vec();
         let owner_opened = open_with(src, "owner").unwrap();
         assert!(owner_opened.is_encrypted());
         let user = aes256();
@@ -652,7 +652,7 @@ mod encryption_tests {
         ));
         assert_eq!(
             encrypt_profile(&bytes),
-            encrypt_profile(user.original_slice())
+            encrypt_profile(user.original_bytes())
         );
 
         // Alone (or with plain inputs) it stays owner-only: empty user
@@ -668,7 +668,7 @@ mod encryption_tests {
             let bytes = out.to_bytes().unwrap();
             assert_eq!(
                 encrypt_profile(&bytes),
-                encrypt_profile(owner_opened.original_slice())
+                encrypt_profile(owner_opened.original_bytes())
             );
             assert!(Document::from_bytes(bytes, None).unwrap().is_encrypted());
         }
@@ -681,7 +681,7 @@ mod encryption_tests {
         let bytes = merged.to_bytes().unwrap();
         assert_eq!(
             encrypt_profile(&bytes),
-            encrypt_profile(src.original_slice())
+            encrypt_profile(src.original_bytes())
         );
         assert_eq!(reopen(bytes).page_count(), 4);
     }
@@ -693,10 +693,10 @@ mod encryption_tests {
             ("aes128", aes128()),
             ("rc4-128", rc4_128()),
         ] {
-            let want = encrypt_profile(src.original_slice());
+            let want = encrypt_profile(src.original_bytes());
             // The source really is restricted (no "modify", bit 4) and /P is
             // the usual negative 32-bit value.
-            let p = p_value(src.original_slice());
+            let p = p_value(src.original_bytes());
             assert!(p < 0 && p & 8 == 0, "{name}: /P {p}");
             let all = parse_page_ranges("1-2", 2).unwrap();
             let two = parse_page_ranges("1,2", 2).unwrap();

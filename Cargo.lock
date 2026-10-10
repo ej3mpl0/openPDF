@@ -1534,7 +1534,6 @@ dependencies = [
  "image",
  "lopdf 0.44.0",
  "pdfium-render",
- "self_cell",
  "thiserror 2.0.21",
  "zeroize",
 ]
@@ -1951,12 +1950,6 @@ checksum = "e891af845473308773346dc847b2c23ee78fe442e0472ac50e22a18a93d3ae5a"
 dependencies = [
  "zeroize",
 ]
-
-[[package]]
-name = "self_cell"
-version = "1.3.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "2ab42ca02749e120097e328d91d415325bdf43b1c72c4c8badf37375fe40a813"
 
 [[package]]
 name = "semver"

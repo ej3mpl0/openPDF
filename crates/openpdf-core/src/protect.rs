@@ -199,7 +199,7 @@ pub fn unprotect(doc: &Document, password: &str) -> Result<Document> {
     if password.is_empty() {
         return Err(Error::PasswordRequired);
     }
-    load_lopdf(doc.original_slice(), Some(password))?;
+    load_lopdf(doc.original_bytes(), Some(password))?;
     let mut inner = doc.assembled_lopdf()?;
     if inner.is_encrypted() {
         // Not decrypted at open (cannot happen through the public API).
