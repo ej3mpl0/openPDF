@@ -710,3 +710,24 @@ msgstr ""
 
 msgid "missing password on stdin"
 msgstr ""
+
+msgid "Password required"
+msgstr ""
+
+msgid "Password"
+msgstr ""
+
+msgid "Enter the password for «{file}»"
+msgstr ""
+
+msgid "The result will be protected with the password of «{file}»"
+msgstr ""
+
+msgid "The result will open without a password but keep the restrictions of «{file}»"
+msgstr ""
+
+msgid "The result will keep the protection of «{file}»"
+msgstr ""
+
+msgid "The passwords of the other files will no longer open it."
+msgstr ""

@@ -16,10 +16,11 @@ use gtk::gio;
 use gtk::glib::{self, clone};
 use gtk4 as gtk;
 use libadwaita as adw;
-use openpdf_core::{tr_args, Engine, Signer, Verifier};
+use openpdf_core::{tr_args, Engine, Error, Signer, Verifier};
 
 use super::about;
 use super::home::{self, HomeAction};
+use super::password;
 use super::preferences;
 use super::show_toast;
 use super::sign as sign_ui;
@@ -411,23 +412,41 @@ fn ensure_engine(ctx: &Ctx) -> Option<Engine> {
 
 fn open_path_inner(ctx: &Ctx, path: &Path) {
     crate::measure::mark_doc_load_start();
-    let opened = if let Some(engine) = ensure_engine(ctx) {
-        match Session::open(&engine, path) {
-            Ok(session) => Opened::Core(session),
-            Err(e) => {
-                show_toast(&ctx.toast, &e.to_string());
-                return;
+    let path_buf = path.to_path_buf();
+    if let Some(engine) = ensure_engine(ctx) {
+        match engine.open(&path_buf) {
+            Ok(doc) => finish_open(
+                ctx,
+                Opened::Core(Session::from_doc(engine, doc, &path_buf)),
+                &path_buf,
+            ),
+            Err(Error::PasswordRequired) => {
+                let lang = ctx.settings.borrow().lang();
+                let parent = ctx.window.clone();
+                let ctx = ctx.clone();
+                let engine = engine.clone();
+                let dest = path_buf.clone();
+                password::prompt(&parent, lang, &path_buf, move |pw| {
+                    let doc = engine.open_with_password(&dest, pw)?;
+                    finish_open(
+                        &ctx,
+                        Opened::Core(Session::from_doc(engine.clone(), doc, &dest)),
+                        &dest,
+                    );
+                    Ok(())
+                });
             }
+            Err(e) => show_toast(&ctx.toast, &format_core_error(&e)),
         }
-    } else {
-        match MockDocument::open(path) {
-            Ok(doc) => Opened::Mock(MockView::new(doc)),
-            Err(e) => {
-                show_toast(&ctx.toast, &e.to_string());
-                return;
-            }
-        }
-    };
+        return;
+    }
+    match MockDocument::open(&path_buf) {
+        Ok(doc) => finish_open(ctx, Opened::Mock(MockView::new(doc)), &path_buf),
+        Err(e) => show_toast(&ctx.toast, &e.to_string()),
+    }
+}
+
+fn finish_open(ctx: &Ctx, opened: Opened, path: &Path) {
     crate::measure::mark_doc_loaded();
     ctx.settings.borrow_mut().push_recent(path);
     let settings = ctx.settings.clone();

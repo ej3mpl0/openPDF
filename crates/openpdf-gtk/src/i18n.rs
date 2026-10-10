@@ -119,6 +119,8 @@ pub fn format_core_error(err: &Error) -> String {
         Error::Signed { op } => format_signed_op(*op),
         Error::SignerUnavailable { reason } => describe_signer_unavailable(reason),
         Error::PinCancelled => tr("PIN entry was cancelled"),
+        Error::PasswordRequired => tr("password is required"),
+        Error::WrongPassword => tr("wrong password"),
         _ => err.to_locale_string(),
     }
 }

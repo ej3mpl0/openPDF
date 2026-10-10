@@ -1,6 +1,7 @@
 // SPDX-License-Identifier: MPL-2.0
 mod about;
 mod home;
+mod password;
 mod preferences;
 mod sign;
 mod tools;

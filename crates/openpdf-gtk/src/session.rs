@@ -5,7 +5,7 @@ use std::sync::{Arc, Mutex};
 
 use openpdf_core::{
     Command, Document, DocumentId, Engine, OutlineItem, Priority, SearchHit, SignRequest, Signer,
-    Tile, TileKey, TileRequest,
+    Tile, TileKey, TileRequest, Zeroizing,
 };
 
 use crate::backend::{BackendError, DocumentBackend, MockDocument, PageSize, TileBitmap};
@@ -46,17 +46,32 @@ pub fn sibling_signed_path(src: &Path) -> PathBuf {
 impl Session {
     pub fn open(engine: &Engine, path: &Path) -> Result<Self, BackendError> {
         let doc = engine.open(path).map_err(core_err)?;
+        Ok(Self::from_doc(engine.clone(), doc, path))
+    }
+
+    pub fn open_with_password(
+        engine: &Engine,
+        path: &Path,
+        password: Zeroizing<String>,
+    ) -> Result<Self, BackendError> {
+        let doc = engine
+            .open_with_password(path, password)
+            .map_err(core_err)?;
+        Ok(Self::from_doc(engine.clone(), doc, path))
+    }
+
+    pub(crate) fn from_doc(engine: Engine, doc: Document, path: &Path) -> Self {
         let title = path
             .file_name()
             .and_then(|s| s.to_str())
             .unwrap_or("document.pdf")
             .to_string();
-        Ok(Self {
-            engine: engine.clone(),
+        Self {
+            engine,
             doc: RefCell::new(doc),
             title: RefCell::new(title),
             path: RefCell::new(Some(path.to_path_buf())),
-        })
+        }
     }
 
     pub fn title(&self) -> String {
@@ -127,12 +142,12 @@ impl Session {
     }
 
     pub fn save(&self) -> Result<(), BackendError> {
-        let Some(path) = &self.path else {
+        let Some(path) = self.path.borrow().clone() else {
             return Err(BackendError::Invalid(openpdf_core::tr(
                 "Placeholder has no PDF bytes.",
             )));
         };
-        self.save_to(path)
+        self.save_to(&path)
     }
 
     pub fn save_to(&self, path: &Path) -> Result<(), BackendError> {
