@@ -414,3 +414,6 @@ msgstr "--at empieza en 1"
 
 msgid "crop box must be llx,lly,urx,ury"
 msgstr "el recorte debe ser llx,lly,urx,ury"
+
+msgid "{level} signatures are not supported yet"
+msgstr "las firmas {level} todavía no están soportadas"
