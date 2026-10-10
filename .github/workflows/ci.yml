@@ -382,7 +382,7 @@ jobs:
           echo "variant=${{ matrix.variant }} wrap='$OPENPDF_MEASURE_WRAP'"
           python3 .github/scripts/run-measure.py --kind gui --single-cold --frames 32 \
             --out "cold/$TAG.txt" 2>&1 | tee measure-1.log; rc=${PIPESTATUS[0]}
-          g=$(grep -o 'gsk_renderer=[^ ]*' measure-1.log | tail -1); echo "${g:-gsk_renderer=not_printed}" | tee -a "cold/$TAG.txt"
+          g=$(grep -o 'gsk_renderer=[^ ]*' measure-1.log | tail -1 || true); echo "${g:-gsk_renderer=not_printed}" | tee -a "cold/$TAG.txt"
           [ "$rc" = 0 ] || exit "$rc"
           printf 'variant=%s\nstraced=%s\n' "${{ matrix.variant }}" "$straced" >> "cold/$TAG.txt"
           if [ "$straced" = 1 ]; then
@@ -426,7 +426,7 @@ jobs:
           echo "wrap='$OPENPDF_MEASURE_WRAP'"
           python3 .github/scripts/run-measure.py --kind gui --single-cold --frames 32 \
             --out "cold/$TAG.second" 2>&1 | tee measure-2.log || true
-          g=$(grep -o 'gsk_renderer=[^ ]*' measure-2.log | tail -1); echo "${g:-gsk_renderer=not_printed}" | tee -a "cold/$TAG.second"
+          g=$(grep -o 'gsk_renderer=[^ ]*' measure-2.log | tail -1 || true); echo "${g:-gsk_renderer=not_printed}" | tee -a "cold/$TAG.second"
           printf 'straced=%s\n' "$straced" >> "cold/$TAG.second"
           if [ "$straced" = 1 ]; then
             python3 .github/scripts/strace-summary.py strace/trace-second.txt | tee strace/summary-second.md
