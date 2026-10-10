@@ -4,20 +4,9 @@ fn main() {
     let dest = format!("{out}/icons.gresource");
     let xml = "data/icons.gresource.xml";
     println!("cargo:rerun-if-changed={xml}");
-    for name in [
-        "document-open-symbolic",
-        "sidebar-show-symbolic",
-        "open-menu-symbolic",
-        "go-up-symbolic",
-        "go-down-symbolic",
-        "zoom-in-symbolic",
-        "zoom-out-symbolic",
-        "edit-delete-symbolic",
-        "object-rotate-right-symbolic",
-        "dialog-password-symbolic",
-    ] {
-        println!("cargo:rerun-if-changed=data/icons/scalable/actions/{name}.svg");
-    }
+    println!("cargo:rerun-if-changed=data/icons/scalable/actions/document-open-symbolic.svg");
+    println!("cargo:rerun-if-changed=data/icons/scalable/actions/sidebar-show-symbolic.svg");
+    println!("cargo:rerun-if-changed=data/icons/scalable/actions/open-menu-symbolic.svg");
     let status = std::process::Command::new("glib-compile-resources")
         .args(["--sourcedir", "data", "--target", &dest, xml])
         .status()

@@ -7,12 +7,5 @@
     <file alias="scalable/actions/document-open-symbolic.svg">icons/scalable/actions/document-open-symbolic.svg</file>
     <file alias="scalable/actions/sidebar-show-symbolic.svg">icons/scalable/actions/sidebar-show-symbolic.svg</file>
     <file alias="scalable/actions/open-menu-symbolic.svg">icons/scalable/actions/open-menu-symbolic.svg</file>
-    <file alias="scalable/actions/go-up-symbolic.svg">icons/scalable/actions/go-up-symbolic.svg</file>
-    <file alias="scalable/actions/go-down-symbolic.svg">icons/scalable/actions/go-down-symbolic.svg</file>
-    <file alias="scalable/actions/zoom-in-symbolic.svg">icons/scalable/actions/zoom-in-symbolic.svg</file>
-    <file alias="scalable/actions/zoom-out-symbolic.svg">icons/scalable/actions/zoom-out-symbolic.svg</file>
-    <file alias="scalable/actions/edit-delete-symbolic.svg">icons/scalable/actions/edit-delete-symbolic.svg</file>
-    <file alias="scalable/actions/object-rotate-right-symbolic.svg">icons/scalable/actions/object-rotate-right-symbolic.svg</file>
-    <file alias="scalable/actions/dialog-password-symbolic.svg">icons/scalable/actions/dialog-password-symbolic.svg</file>
   </gresource>
 </gresources>
