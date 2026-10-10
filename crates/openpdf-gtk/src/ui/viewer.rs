@@ -976,6 +976,7 @@ fn maybe_mark_startup(view: &DocumentView) {
     }
 }
 
+#[cfg(test)]
 pub(crate) fn paint_rgba(
     cr: &cairo::Context,
     x: f64,
