@@ -5,12 +5,12 @@
 //! Certificate / verify text comes from `openpdf-core`.
 
 use openpdf_core::{
-    CertificateInfo, CertificateUsage, Error, InvalidKind, Result, SignRequest, SignatureInfo,
-    Signer,
+    CertificateInfo, Error, InvalidKind, Result, SignRequest, SignatureInfo, Signer,
 };
 
 pub use openpdf_core::{
-    describe_certificate, format_verify_result, format_verify_results, pin_prompt_text, usage_label,
+    describe_certificate, describe_pin_status, describe_unusable, format_verify_result,
+    format_verify_results, pin_prompt_text, usage_label, CertUnusable, TokenPinStatus,
 };
 
 /// Empty signer for tests and `--measure`. The application binary injects
@@ -36,9 +36,21 @@ impl Signer for UnavailableSigner {
     }
 }
 
-/// Only [`CertificateUsage::Signing`] certificates can be used for PAdES.
+/// Pickable when core did not mark the cert unusable and the token PIN is not locked.
 pub fn certificate_can_sign(cert: &CertificateInfo) -> bool {
-    cert.usage.contains(&CertificateUsage::Signing)
+    cert.unusable.is_none() && !cert.pin_status.is_some_and(|s| s.locked)
+}
+
+/// Core's translated reason. The `_` arm is required because
+/// [`CertUnusable`] is `#[non_exhaustive]`.
+pub fn unusable_reason(reason: &CertUnusable) -> String {
+    match reason {
+        CertUnusable::AuthenticationOnly
+        | CertUnusable::Expired { .. }
+        | CertUnusable::NotYetValid { .. }
+        | CertUnusable::UnsupportedKey => describe_unusable(reason),
+        _ => describe_unusable(reason),
+    }
 }
 
 /// Build the request the UI is allowed to send. No PIN field exists here.
@@ -53,7 +65,7 @@ pub fn sign_request_for(cert_id: impl Into<String>) -> SignRequest {
 mod tests {
     use super::*;
     use openpdf_core::test_support::with_locale;
-    use openpdf_core::CertificateValidity;
+    use openpdf_core::{CertificateUsage, CertificateValidity};
 
     fn dnie_certs() -> Vec<CertificateInfo> {
         vec![
@@ -63,6 +75,8 @@ mod tests {
                 issuer: "CN=AC DNIE 001".into(),
                 validity: CertificateValidity::default(),
                 usage: vec![CertificateUsage::Authentication],
+                unusable: Some(CertUnusable::AuthenticationOnly),
+                pin_status: None,
             },
             CertificateInfo {
                 id: "dnie-sign".into(),
@@ -70,6 +84,8 @@ mod tests {
                 issuer: "CN=AC DNIE 001".into(),
                 validity: CertificateValidity::default(),
                 usage: vec![CertificateUsage::Signing],
+                unusable: None,
+                pin_status: None,
             },
         ]
     }
@@ -85,11 +101,37 @@ mod tests {
     }
 
     #[test]
-    fn only_signing_usage_is_pickable() {
+    fn unusable_certs_are_not_pickable() {
         let certs = dnie_certs();
         assert!(!certificate_can_sign(&certs[0]));
         assert!(certificate_can_sign(&certs[1]));
         assert_eq!(sign_request_for(&certs[1].id).cert_id, "dnie-sign");
+        with_locale("en", || {
+            let reason = certs[0].unusable.as_ref().unwrap();
+            assert_eq!(unusable_reason(reason), describe_unusable(reason));
+            let expired = CertUnusable::Expired {
+                not_after: "2020-01-01T00:00:00Z".into(),
+            };
+            assert_eq!(unusable_reason(&expired), describe_unusable(&expired));
+        });
+    }
+
+    #[test]
+    fn locked_token_is_not_pickable() {
+        let mut cert = dnie_certs().remove(1);
+        cert.pin_status = Some(TokenPinStatus::new(false, false, true, false));
+        assert!(!certificate_can_sign(&cert));
+        with_locale("en", || {
+            assert_eq!(
+                describe_pin_status(cert.pin_status.as_ref().unwrap()).as_deref(),
+                Some("Token PIN is locked")
+            );
+            let last = TokenPinStatus::new(false, true, false, false);
+            assert_eq!(
+                describe_pin_status(&last).as_deref(),
+                Some("Last PIN attempt")
+            );
+        });
     }
 
     #[test]

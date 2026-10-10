@@ -707,8 +707,8 @@ fn paint_pages(cr: &cairo::Context, view: &DocumentView) {
             if let Some(bmp) = view.shared.doc.paint_tile(key) {
                 paint_rgba(cr, tile_x, tile_y, bmp.width, bmp.height, &bmp.rgba, true);
             } else if let Some(low) = view.shared.doc.paint_tile(&key.preview()) {
-                let _ = cr.save();
-                let _ = cr.translate(tile_x, tile_y);
+                cr.save().ok();
+                cr.translate(tile_x, tile_y);
                 let sx = f64::from(key.tile_size) / f64::from(low.width.max(1));
                 let sy = f64::from(key.tile_size) / f64::from(low.height.max(1));
                 cr.scale(sx.min(4.0), sy.min(4.0));
@@ -756,7 +756,7 @@ fn paint_thumbs(cr: &cairo::Context, view: &DocumentView) {
         cr.set_font_size(11.0);
         let label = format!("{}", page.page + 1);
         if let Ok(ext) = cr.text_extents(&label) {
-            let _ = cr.move_to(
+            cr.move_to(
                 page.x + (page.width - ext.width()) / 2.0,
                 page.y + page.height + 12.0,
             );
@@ -800,7 +800,7 @@ fn paint_rgba(
     // snapshot path; this is the cheap equivalent of uploading once.
     thread_local! {
         static LAST: std::cell::RefCell<Option<(usize, usize, Vec<u8>)>> =
-            std::cell::RefCell::new(None);
+            const { std::cell::RefCell::new(None) };
     }
     let key = (rgba.as_ptr() as usize, rgba.len());
     let data = LAST.with(|slot| {

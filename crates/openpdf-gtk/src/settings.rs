@@ -247,10 +247,12 @@ mod tests {
         let _ = fs::remove_dir_all(&tmp);
         fs::create_dir_all(&tmp).unwrap();
         std::env::set_var("OPENPDF_CONFIG_DIR", &tmp);
-        let mut s = Settings::default();
-        s.language = "es".into();
-        s.theme = Theme::Dark;
-        s.show_thumbnails = false;
+        let mut s = Settings {
+            language: "es".into(),
+            theme: Theme::Dark,
+            show_thumbnails: false,
+            ..Settings::default()
+        };
         s.push_recent(Path::new("/tmp/a.pdf"));
         s.push_recent(Path::new("/tmp/b.pdf"));
         s.push_recent(Path::new("/tmp/a.pdf"));

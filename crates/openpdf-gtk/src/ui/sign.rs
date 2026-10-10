@@ -2,7 +2,11 @@ use std::rc::Rc;
 use std::sync::Arc;
 
 use crate::i18n::{format_core_error, t};
-use crate::sign::{certificate_can_sign, describe_certificate, sign_request_for};
+use crate::pin::set_pending_pin_status;
+use crate::sign::{
+    certificate_can_sign, describe_certificate, describe_pin_status, sign_request_for,
+    unusable_reason,
+};
 use crate::Lang;
 use adw::prelude::*;
 use gtk::glib;
@@ -122,7 +126,7 @@ fn show_certificate_list(
 }
 
 fn certificate_row(
-    lang: Lang,
+    _lang: Lang,
     cert: CertificateInfo,
     win: &adw::Window,
     on_pick: Rc<impl Fn(SignRequest) + 'static>,
@@ -131,16 +135,24 @@ fn certificate_row(
     let row = adw::ActionRow::new();
     row.set_title(&escape(&cert.subject));
     let mut subtitle = describe_certificate(&cert);
-    if !can_sign {
+    if let Some(reason) = &cert.unusable {
         subtitle.push_str(" · ");
-        subtitle.push_str(t(lang, "Not a signing certificate"));
+        subtitle.push_str(&unusable_reason(reason));
+    }
+    if let Some(status) = &cert.pin_status {
+        if let Some(warn) = describe_pin_status(status) {
+            subtitle.push_str(" · ");
+            subtitle.push_str(&warn);
+        }
     }
     row.set_subtitle(&escape(&subtitle));
     row.set_sensitive(can_sign);
     row.set_activatable(can_sign);
     if can_sign {
         let win_c = win.clone();
+        let pin_status = cert.pin_status;
         row.connect_activated(move |_| {
+            set_pending_pin_status(pin_status);
             on_pick(sign_request_for(cert.id.clone()));
             win_c.close();
         });

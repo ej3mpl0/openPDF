@@ -116,6 +116,9 @@ pub fn format_core_error(err: &Error) -> String {
             &[("detail", &tr(m))],
         ),
         Error::Signed { op } => format_signed_op(*op),
+        Error::PinRequired => tr("PIN is required"),
+        Error::PinCancelled => tr("PIN entry was cancelled"),
+        Error::PinLocked => tr("Token PIN is locked"),
         Error::SignerUnavailable { reason } => describe_signer_unavailable(reason),
     }
 }

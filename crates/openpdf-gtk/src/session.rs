@@ -305,6 +305,7 @@ impl MockView {
     }
 }
 
+#[allow(clippy::large_enum_variant)]
 pub enum Opened {
     Core(Session),
     Mock(MockView),

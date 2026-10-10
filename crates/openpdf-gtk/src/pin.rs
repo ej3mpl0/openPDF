@@ -5,32 +5,53 @@
 use std::cell::Cell;
 use std::rc::Rc;
 use std::sync::mpsc::{self, Sender};
+use std::sync::Mutex;
 
 use adw::prelude::*;
 use gtk4 as gtk;
 use libadwaita as adw;
-use openpdf_core::{pin_prompt_text, tr, Error, PinProvider, Result, SecretPin};
+use openpdf_core::{
+    describe_pin_status, pin_prompt_text, tr, Error, PinProvider, Result, SecretPin, TokenPinStatus,
+};
 
 /// Modal PIN dialog. Stateless so the application binary can build it
 /// before the viewer exists.
 #[derive(Clone, Debug, Default)]
 pub struct GtkPinProvider;
 
-impl PinProvider for GtkPinProvider {
-    fn request_pin(&self, token_label: &str) -> Result<SecretPin> {
-        request_pin_blocking(&pin_prompt_text(token_label)).map(SecretPin::new)
+static PENDING_PIN_STATUS: Mutex<Option<TokenPinStatus>> = Mutex::new(None);
+
+/// Stash PKCS#11 PIN flags from the picker so the dialog can warn.
+pub fn set_pending_pin_status(status: Option<TokenPinStatus>) {
+    if let Ok(mut slot) = PENDING_PIN_STATUS.lock() {
+        *slot = status;
     }
 }
 
-fn request_pin_blocking(prompt: &str) -> Result<String> {
+fn take_pending_pin_status() -> Option<TokenPinStatus> {
+    PENDING_PIN_STATUS
+        .lock()
+        .ok()
+        .and_then(|mut slot| slot.take())
+}
+
+impl PinProvider for GtkPinProvider {
+    fn request_pin(&self, token_label: &str) -> Result<SecretPin> {
+        let warning = take_pending_pin_status().and_then(|s| describe_pin_status(&s));
+        request_pin_blocking(&pin_prompt_text(token_label), warning.as_deref()).map(SecretPin::new)
+    }
+}
+
+fn request_pin_blocking(prompt: &str, warning: Option<&str>) -> Result<String> {
     if !gtk::is_initialized() {
-        return Err(Error::Sign("PIN dialog needs a display".into()));
+        return Err(Error::PinRequired);
     }
     let (tx, rx) = mpsc::channel();
     let prompt = prompt.to_string();
     let launch = {
         let tx = tx.clone();
-        move || present_pin_dialog(&prompt, tx)
+        let warning = warning.map(str::to_string);
+        move || present_pin_dialog(&prompt, warning.as_deref(), tx)
     };
     let ctx = gtk::glib::MainContext::default();
     if ctx.is_owner() {
@@ -43,11 +64,20 @@ fn request_pin_blocking(prompt: &str) -> Result<String> {
         }
     }
     ctx.invoke(launch);
-    rx.recv()
-        .unwrap_or_else(|_| Err(Error::Sign("PIN entry cancelled".into())))
+    rx.recv().unwrap_or(Err(Error::PinCancelled))
 }
 
-fn present_pin_dialog(prompt: &str, tx: Sender<Result<String>>) {
+fn submit_pin(send: &Rc<impl Fn(Result<String>)>, entry: &gtk::PasswordEntry) {
+    let text = entry.text().to_string();
+    entry.set_text("");
+    if text.is_empty() {
+        send(Err(Error::PinCancelled));
+    } else {
+        send(Ok(text));
+    }
+}
+
+fn present_pin_dialog(prompt: &str, warning: Option<&str>, tx: Sender<Result<String>>) {
     let sent = Rc::new(Cell::new(false));
     let send = Rc::new(move |value: Result<String>| {
         if !sent.replace(true) {
@@ -96,6 +126,13 @@ fn present_pin_dialog(prompt: &str, tx: Sender<Result<String>>) {
     col.set_margin_start(16);
     col.set_margin_end(16);
     col.append(&label);
+    if let Some(warn) = warning {
+        let banner = gtk::Label::new(Some(warn));
+        banner.set_wrap(true);
+        banner.set_xalign(0.0);
+        banner.add_css_class("warning");
+        col.append(&banner);
+    }
     col.append(&entry);
     col.append(&buttons);
     toolbar.set_content(Some(&col));
@@ -105,7 +142,7 @@ fn present_pin_dialog(prompt: &str, tx: Sender<Result<String>>) {
         let win = win.clone();
         let send = send.clone();
         move |_| {
-            send(Err(Error::Sign("PIN entry cancelled".into())));
+            send(Err(Error::PinCancelled));
             win.close();
         }
     });
@@ -114,7 +151,7 @@ fn present_pin_dialog(prompt: &str, tx: Sender<Result<String>>) {
         let entry = entry.clone();
         let send = send.clone();
         move |_| {
-            send(Ok(entry.text().to_string()));
+            submit_pin(&send, &entry);
             win.close();
         }
     });
@@ -122,12 +159,12 @@ fn present_pin_dialog(prompt: &str, tx: Sender<Result<String>>) {
         let win = win.clone();
         let send = send.clone();
         move |entry| {
-            send(Ok(entry.text().to_string()));
+            submit_pin(&send, entry);
             win.close();
         }
     });
     win.connect_close_request(move |_| {
-        send(Err(Error::Sign("PIN entry cancelled".into())));
+        send(Err(Error::PinCancelled));
         gtk::glib::Propagation::Proceed
     });
 
@@ -143,7 +180,7 @@ mod tests {
     fn without_display_returns_error() {
         assert!(matches!(
             GtkPinProvider.request_pin("test"),
-            Err(Error::Sign(_))
+            Err(Error::PinRequired)
         ));
     }
 }

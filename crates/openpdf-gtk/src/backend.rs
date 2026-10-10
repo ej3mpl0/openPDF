@@ -239,7 +239,7 @@ fn render_placeholder_tile(
                 b = accent.2;
             }
             // Tile grid so lazy loading is visible while core is missing.
-            if px % req.tile_size == 0 || py % req.tile_size == 0 {
+            if px.is_multiple_of(req.tile_size) || py.is_multiple_of(req.tile_size) {
                 r = r.saturating_sub(18);
                 g = g.saturating_sub(18);
                 b = b.saturating_sub(18);

@@ -113,10 +113,12 @@ pub fn run_measure(pages: usize) -> i32 {
     let report_c = report.clone();
     app.connect_activate(move |app| {
         let ui_activate_ms = measure::process_elapsed_ms();
-        let mut settings = Settings::default();
-        settings.restore_last = false;
-        settings.show_thumbnails = true;
-        settings.language = "en".into();
+        let settings = Settings {
+            restore_last: false,
+            show_thumbnails: true,
+            language: "en".into(),
+            ..Settings::default()
+        };
         settings.apply_locale();
         apply_theme(settings.theme);
         install_accels(app);

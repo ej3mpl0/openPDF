@@ -327,13 +327,10 @@ fn open_file_dialog(ctx: &Ctx) {
 
     let ctx = ctx.clone();
     glib::spawn_future_local(async move {
-        match dialog.open_future(Some(&ctx.window)).await {
-            Ok(file) => {
-                if let Some(path) = file.path() {
-                    open_path_inner(&ctx, &path);
-                }
+        if let Ok(file) = dialog.open_future(Some(&ctx.window)).await {
+            if let Some(path) = file.path() {
+                open_path_inner(&ctx, &path);
             }
-            Err(_) => {}
         }
     });
 }

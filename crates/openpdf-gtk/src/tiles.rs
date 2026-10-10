@@ -147,6 +147,7 @@ pub fn layout_single(
 }
 
 /// Tiles that intersect the viewport, plus a one-tile halo (adjacent).
+#[allow(clippy::too_many_arguments)]
 pub fn visible_tiles(
     layout: &PageLayout,
     view_x: f64,
