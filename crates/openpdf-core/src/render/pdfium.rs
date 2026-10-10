@@ -235,6 +235,23 @@ fn force_rgba(mut bytes: Vec<u8>, w: u32, h: u32) -> Vec<u8> {
     bytes
 }
 
+fn crop_rgba(src: &[u8], src_w: u32, src_h: u32, x: u32, y: u32, w: u32, h: u32) -> Vec<u8> {
+    let mut out = vec![0u8; (w as usize) * (h as usize) * 4];
+    for row in 0..h {
+        let sy = y + row;
+        if sy >= src_h {
+            break;
+        }
+        let src_off = ((sy * src_w + x) as usize) * 4;
+        let dst_off = (row as usize) * (w as usize) * 4;
+        let count = ((w.min(src_w.saturating_sub(x))) as usize) * 4;
+        if src_off + count <= src.len() {
+            out[dst_off..dst_off + count].copy_from_slice(&src[src_off..src_off + count]);
+        }
+    }
+    out
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -267,21 +284,4 @@ mod tests {
             assert!(p.is_absolute(), "CWD leaked: {p:?}");
         }
     }
-}
-
-fn crop_rgba(src: &[u8], src_w: u32, src_h: u32, x: u32, y: u32, w: u32, h: u32) -> Vec<u8> {
-    let mut out = vec![0u8; (w as usize) * (h as usize) * 4];
-    for row in 0..h {
-        let sy = y + row;
-        if sy >= src_h {
-            break;
-        }
-        let src_off = ((sy * src_w + x) as usize) * 4;
-        let dst_off = (row as usize) * (w as usize) * 4;
-        let count = ((w.min(src_w.saturating_sub(x))) as usize) * 4;
-        if src_off + count <= src.len() {
-            out[dst_off..dst_off + count].copy_from_slice(&src[src_off..src_off + count]);
-        }
-    }
-    out
 }

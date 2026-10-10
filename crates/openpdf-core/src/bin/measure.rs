@@ -1,14 +1,12 @@
-//! Machine-readable open / first-tile / peak-RSS measurement.
-//!
-//! ```text
-//! cargo run -p openpdf-core --release --bin openpdf-measure
-//! cargo bench -p openpdf-core --bench perf
-//! ```
-//!
-//! One line of `key=value` fields. Optional budgets (milliseconds / bytes) fail
-//! the process when exceeded:
-//! `OPENPDF_BENCH_MAX_OPEN_MS`, `OPENPDF_BENCH_MAX_TILE_MS`,
-//! `OPENPDF_BENCH_MAX_RSS_BYTES`. Page count: `OPENPDF_BENCH_PAGES` (default 80).
+// Machine-readable open / first-tile / peak-RSS measurement.
+//
+// cargo run -p openpdf-core --release --bin openpdf-measure
+// cargo bench -p openpdf-core --bench perf
+//
+// One line of `key=value` fields. Optional budgets (milliseconds / bytes) fail
+// the process when exceeded:
+// `OPENPDF_BENCH_MAX_OPEN_MS`, `OPENPDF_BENCH_MAX_TILE_MS`,
+// `OPENPDF_BENCH_MAX_RSS_BYTES`. Page count: `OPENPDF_BENCH_PAGES` (default 80).
 
 use std::time::Instant;
 
