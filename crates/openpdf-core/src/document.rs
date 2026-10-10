@@ -113,7 +113,12 @@ pub(crate) fn load_lopdf(bytes: &[u8], password: Option<&str>) -> Result<LopdfDo
 ///
 /// If the state cannot be re-encoded we answer `true` (the stricter choice:
 /// a merge then keeps requiring a password rather than dropping it).
-pub(crate) fn needs_user_password(doc: &LopdfDocument) -> bool {
+pub(crate) fn needs_user_password(doc: &LopdfDocument, opened_without_password: bool) -> bool {
+    // Loaded without any password yet decrypted: the empty user password
+    // worked, so the file is owner-only. No need to check /U.
+    if opened_without_password && doc.was_encrypted() {
+        return false;
+    }
     let Some(state) = doc.encryption_state.as_ref() else {
         return false;
     };
@@ -251,7 +256,7 @@ impl Document {
         // ops that change encryption (protect -> per its user password,
         // unprotect -> false, merge -> its chosen source, derived ops ->
         // same state as their source) get the flag of their own output.
-        let requires_user_password = needs_user_password(&inner);
+        let requires_user_password = needs_user_password(&inner, password.get().is_none());
         Ok(Self {
             id: DocumentId::next(),
             path,
@@ -681,7 +686,7 @@ mod tests {
                     needs,
                     "{name} (owner pw)"
                 );
-                assert_eq!(needs_user_password(&by_owner.inner), needs, "{name}");
+                assert_eq!(needs_user_password(&by_owner.inner, false), needs, "{name}");
 
                 if needs {
                     let by_user =
@@ -696,6 +701,9 @@ mod tests {
                     let open = Document::from_bytes(bytes, None).unwrap();
                     assert!(open.is_encrypted(), "{name}");
                     assert!(!open.requires_user_password(), "{name} (no pw)");
+                    // The no-password shortcut and the full /U check agree.
+                    assert!(!needs_user_password(&open.inner, true), "{name}");
+                    assert!(!needs_user_password(&open.inner, false), "{name}");
                 }
             }
         }

@@ -102,6 +102,38 @@ fn engine_renders_protected_pdf_opened_with_password() {
     engine.refresh(&edited).unwrap();
 }
 
+/// `CI` counts as set only when non-empty and not `false` / `0` (any case).
+fn ci_enabled(value: Option<&str>) -> bool {
+    match value.map(str::trim) {
+        None | Some("") => false,
+        Some(v) => !v.eq_ignore_ascii_case("false") && v != "0",
+    }
+}
+
+#[test]
+fn ci_env_parsing() {
+    for off in [
+        None,
+        Some(""),
+        Some("  "),
+        Some("0"),
+        Some("false"),
+        Some("FALSE"),
+        Some("False"),
+    ] {
+        assert!(!ci_enabled(off), "{off:?}");
+    }
+    for on in [
+        Some("1"),
+        Some("true"),
+        Some("TRUE"),
+        Some("yes"),
+        Some("github"),
+    ] {
+        assert!(ci_enabled(on), "{on:?}");
+    }
+}
+
 /// Run qpdf; `None` (skip) only when it is not installed and CI is unset.
 /// In CI a missing qpdf is a test failure.
 fn run_qpdf(args: &[&str], bytes: &[u8]) -> Option<std::process::Output> {
@@ -120,7 +152,9 @@ fn run_qpdf(args: &[&str], bytes: &[u8]) -> Option<std::process::Output> {
     std::fs::remove_file(&path).ok();
     match out {
         Ok(o) => Some(o),
-        Err(e) if std::env::var_os("CI").is_some() => panic!("qpdf required in CI: {e}"),
+        Err(e) if ci_enabled(std::env::var("CI").ok().as_deref()) => {
+            panic!("qpdf required in CI: {e}")
+        }
         Err(e) => {
             eprintln!("skipping qpdf checks: {e}");
             None
