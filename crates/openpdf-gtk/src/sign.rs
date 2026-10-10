@@ -5,7 +5,7 @@
 //! Certificate / verify text comes from `openpdf-core`.
 
 use openpdf_core::{
-    CertificateInfo, Error, InvalidKind, Result, SignRequest, SignatureInfo, Signer,
+    CertificateInfo, Error, InvalidKind, Result, SignRequest, SignatureInfo, Signer, Verifier,
 };
 
 pub use openpdf_core::{
@@ -31,6 +31,16 @@ impl Signer for UnavailableSigner {
         ))
     }
 
+    fn verify(&self, _pdf: &[u8]) -> Result<Vec<SignatureInfo>> {
+        Ok(Vec::new())
+    }
+}
+
+/// Empty verifier for tests and `--measure`. The application binary injects
+/// an `openpdf-sign` implementation (`PdfVerifier`) instead.
+pub struct NoopVerifier;
+
+impl Verifier for NoopVerifier {
     fn verify(&self, _pdf: &[u8]) -> Result<Vec<SignatureInfo>> {
         Ok(Vec::new())
     }

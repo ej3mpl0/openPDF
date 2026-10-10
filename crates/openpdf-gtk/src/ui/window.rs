@@ -13,7 +13,7 @@ use gtk::gio;
 use gtk::glib::{self, clone};
 use gtk4 as gtk;
 use libadwaita as adw;
-use openpdf_core::{Engine, Signer};
+use openpdf_core::{Engine, Signer, Verifier};
 
 use super::about;
 use super::home;
@@ -28,6 +28,7 @@ struct Ctx {
     /// first frame is not blocked on PDFium.
     engine: Rc<RefCell<Option<Engine>>>,
     signer: Arc<dyn Signer>,
+    verifier: Arc<dyn Verifier>,
     window: adw::ApplicationWindow,
     tab_view: adw::TabView,
     toast: adw::ToastOverlay,
@@ -44,7 +45,12 @@ pub struct OpenPdfWindow {
 }
 
 impl OpenPdfWindow {
-    pub fn new(app: &adw::Application, settings: Settings, signer: Arc<dyn Signer>) -> Self {
+    pub fn new(
+        app: &adw::Application,
+        settings: Settings,
+        signer: Arc<dyn Signer>,
+        verifier: Arc<dyn Verifier>,
+    ) -> Self {
         let lang = settings.lang();
         let settings = Rc::new(RefCell::new(settings));
         let current = Rc::new(RefCell::new(None));
@@ -92,6 +98,7 @@ impl OpenPdfWindow {
         let ctx = Ctx {
             engine,
             signer,
+            verifier,
             window: window.clone(),
             tab_view: tab_view.clone(),
             toast: toast.clone(),
@@ -400,7 +407,7 @@ fn add_opened(ctx: &Ctx, opened: Opened) {
                 "Signed document — read-only. Rotate, delete and reorder are disabled.",
             ),
         );
-        maybe_show_verify(&ctx.toast, ctx.signer.clone(), view.opened());
+        maybe_show_verify(&ctx.toast, ctx.verifier.clone(), view.opened());
     } else if placeholder {
         show_toast(
             &ctx.toast,
@@ -412,7 +419,7 @@ fn add_opened(ctx: &Ctx, opened: Opened) {
     }
 }
 
-fn maybe_show_verify(overlay: &adw::ToastOverlay, signer: Arc<dyn Signer>, opened: &Opened) {
+fn maybe_show_verify(overlay: &adw::ToastOverlay, verifier: Arc<dyn Verifier>, opened: &Opened) {
     let bytes = match opened.to_bytes() {
         Ok(bytes) => bytes,
         Err(e) => {
@@ -423,7 +430,7 @@ fn maybe_show_verify(overlay: &adw::ToastOverlay, signer: Arc<dyn Signer>, opene
     let overlay = overlay.clone();
     let (tx, rx) = std::sync::mpsc::channel();
     std::thread::spawn(move || {
-        let _ = tx.send(signer.verify(&bytes));
+        let _ = tx.send(verifier.verify(&bytes));
     });
     glib::timeout_add_local(std::time::Duration::from_millis(16), move || {
         match rx.try_recv() {
@@ -449,6 +456,7 @@ fn start_sign(ctx: &Ctx) {
         return;
     };
     let signer = ctx.signer.clone();
+    let verifier = ctx.verifier.clone();
     let overlay = ctx.toast.clone();
     sign_ui::present_picker(&ctx.window, &ctx.toast, lang, signer.clone(), move |req| {
         match sign_ui::try_sign(view.opened(), &req, signer.as_ref()) {
@@ -461,7 +469,7 @@ fn start_sign(ctx: &Ctx) {
                         "Signed document — read-only. Rotate, delete and reorder are disabled.",
                     ),
                 );
-                maybe_show_verify(&overlay, signer.clone(), view.opened());
+                maybe_show_verify(&overlay, verifier.clone(), view.opened());
             }
             Err(e) => show_toast(&overlay, &e),
         }
