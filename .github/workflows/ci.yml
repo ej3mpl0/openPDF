@@ -61,11 +61,11 @@ jobs:
       - name: Install PDFium
         run: .github/scripts/install-pdfium.sh
 
-      - name: Install SoftHSM2
+      - name: Install SoftHSM2 and qpdf
         if: runner.os == 'Linux'
         run: |
           sudo apt-get update
-          sudo apt-get install -y --no-install-recommends softhsm2
+          sudo apt-get install -y --no-install-recommends softhsm2 qpdf
 
       - name: Install GTK4 and libadwaita
         if: runner.os == 'Linux'
