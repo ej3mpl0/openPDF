@@ -335,7 +335,8 @@ jobs:
           sudo apt-get update
           sudo apt-get install -y --no-install-recommends \
             libgtk-4-dev libadwaita-1-dev pkg-config librsvg2-common adwaita-icon-theme \
-            xvfb xauth dbus dbus-daemon strace fontconfig mesa-utils gdb weston
+            xvfb xauth dbus dbus-daemon strace fontconfig mesa-utils mesa-utils-bin gdb weston
+          command -v eglinfo >/dev/null || { echo "::error::eglinfo not installed"; exit 1; }
           echo "GTK version: $(pkg-config --modversion gtk4)" | tee -a "$GITHUB_STEP_SUMMARY"
 
       - name: GL renderer (glxinfo -B under the same xvfb)
@@ -375,9 +376,23 @@ jobs:
           echo "fc-cache -f: $(( ($(date +%s%N) - start) / 1000000 )) ms"
 
       # Build only; nothing launches the GUI before the measurement.
+      # line-tables-only: symbolized gdb backtraces for the crash gate (cold-start only, not release packaging).
       - name: Build workspace (release)
         if: steps.gui.outputs.skip == 'false'
+        env:
+          CARGO_PROFILE_RELEASE_DEBUG: line-tables-only
         run: cargo build --release --workspace --locked
+
+      # default-wayland: GPU as a client of the same weston sees it, right before the first launch
+      # (before drop_caches so the launch stays cold). The app itself makes no GL calls.
+      - name: GL renderer (eglinfo -B under the same weston, default-wayland only)
+        if: steps.gui.outputs.skip == 'false' && matrix.variant == 'default-wayland'
+        run: |
+          [ -S "$XDG_RUNTIME_DIR/wayland-ci" ] || { echo "::error::weston socket gone"; exit 1; }
+          env -u DISPLAY WAYLAND_DISPLAY=wayland-ci MESA_SHADER_CACHE_DISABLE=true eglinfo -B -p wayland 2>&1 | tee eglinfo.txt || true
+          gl=$(sed -n 's/^ *OpenGL\( core profile\)\? renderer: *//p' eglinfo.txt | head -1)
+          echo "GL_RENDERER(eglinfo)=${gl:-unknown}"
+          [ -n "$gl" ] && echo "gl_renderer=$(echo "$gl" | tr ' ' '_')" > cold/$TAG.gl || true
 
       - name: "~/.cache snapshot (before first launch)"
         if: steps.gui.outputs.skip == 'false'
