@@ -131,6 +131,9 @@ All --measure marks are milliseconds from one process-start Instant \
 The first-tile → startup gap is remaining visible tiles plus thumbs.
 OPENPDF_MEASURE_RSS_BREAKDOWN=1 prints smaps_rollup + top 15 mappings
 (heap, libpdfium, GTK/adw, icon theme, fontconfig, cairo) at peak RSS.
+--measure also prints fontconfig file + FcFontList count, GTK icon theme
+and search paths, XDG_*/FONTCONFIG_*/GTK_*/GSK_RENDERER, and env_overrides=
+(must be empty: measure must not set env the normal app path does not).
 OPENPDF_TILE_CACHE_BYTES overrides the Engine RGBA cache cap (default 16 MiB).";
 
 fn create_engine() -> Option<openpdf_core::Engine> {
@@ -145,10 +148,8 @@ fn main() {
     let mut args = std::env::args().skip(1);
     match args.next().as_deref() {
         Some("--measure") => {
-            // Isolate + RSS caps before Engine::new so PDFium/Pango see the
-            // tiny fontconfig and OPENPDF_TILE_CACHE_BYTES. Harmless without #50.
-            let isolate = measure::isolate_xdg();
-            measure::apply_measure_rss_caps(&isolate);
+            // Same process env as a normal run. Do not set FONTCONFIG_*/XDG_*/GTK_*.
+            measure::remember_inherited_env();
             // Engine::new is ~4 ms (bind + spawn). Font warmup continues on the
             // render thread and overlaps GTK activate. Do not wait for it here.
             let engine = create_engine();

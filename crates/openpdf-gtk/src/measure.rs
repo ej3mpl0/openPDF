@@ -1,8 +1,8 @@
 // SPDX-License-Identifier: MPL-2.0
+use std::collections::BTreeMap;
 use std::fmt::{Display, Formatter};
-use std::path::{Path, PathBuf};
-use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::OnceLock;
+use std::path::PathBuf;
+use std::sync::{Mutex, OnceLock};
 use std::time::Instant;
 
 use gtk4 as gtk;
@@ -226,6 +226,22 @@ pub struct BudgetReport {
     pub ui_all_visible_ms: u128,
     /// Thumbnail strip meets the measure gate (`MIN_THUMB_TILES`).
     pub ui_thumbs_done_ms: u128,
+    /// Host fontconfig file (FONTCONFIG_FILE or FcConfigFilename).
+    pub fontconfig_file: String,
+    /// `FcFontList` count (empty pattern, `file` objects).
+    pub fontconfig_fonts: i32,
+    pub gtk_icon_theme: String,
+    pub gtk_icon_search_path: String,
+    pub xdg_cache_home: String,
+    pub xdg_data_dirs: String,
+    pub xdg_data_home: String,
+    pub xdg_config_home: String,
+    pub fontconfig_file_env: String,
+    pub fontconfig_path_env: String,
+    pub gtk_env: String,
+    pub gsk_renderer: String,
+    /// Variables `--measure` code itself set. Must be empty.
+    pub env_overrides: Vec<String>,
     pub ok: bool,
     pub error: Option<String>,
 }
@@ -280,6 +296,19 @@ impl Display for BudgetReport {
         )?;
         writeln!(f, "limit_startup_ms={MAX_STARTUP_MS}")?;
         writeln!(f, "limit_peak_rss_bytes={MAX_RSS_BYTES}")?;
+        writeln!(f, "fontconfig_file={}", self.fontconfig_file)?;
+        writeln!(f, "fontconfig_fonts={}", self.fontconfig_fonts)?;
+        writeln!(f, "gtk_icon_theme={}", self.gtk_icon_theme)?;
+        writeln!(f, "gtk_icon_search_path={}", self.gtk_icon_search_path)?;
+        writeln!(f, "XDG_CACHE_HOME={}", self.xdg_cache_home)?;
+        writeln!(f, "XDG_DATA_DIRS={}", self.xdg_data_dirs)?;
+        writeln!(f, "XDG_DATA_HOME={}", self.xdg_data_home)?;
+        writeln!(f, "XDG_CONFIG_HOME={}", self.xdg_config_home)?;
+        writeln!(f, "FONTCONFIG_FILE={}", self.fontconfig_file_env)?;
+        writeln!(f, "FONTCONFIG_PATH={}", self.fontconfig_path_env)?;
+        write!(f, "{}", self.gtk_env)?;
+        writeln!(f, "GSK_RENDERER={}", self.gsk_renderer)?;
+        writeln!(f, "env_overrides={}", self.env_overrides.join(","))?;
         writeln!(f, "ok={}", self.ok)?;
         if let Some(err) = &self.error {
             writeln!(f, "error={err}")?;
@@ -322,6 +351,14 @@ impl BudgetReport {
                 format!(
                     "ui_first_tile_ms {} must be >0 and >= first_tile_rendered {}",
                     self.ui_first_tile_ms, self.ui_first_tile_rendered_ms
+                )
+            });
+        }
+        if !self.env_overrides.is_empty() {
+            error.get_or_insert_with(|| {
+                format!(
+                    "measure set env vars the app path does not: {}",
+                    self.env_overrides.join(",")
                 )
             });
         }
@@ -653,68 +690,210 @@ pub fn take_rss_breakdown() -> Option<String> {
     RSS_BREAKDOWN.get().cloned()
 }
 
-static MEASURE_RSS_CAPS: AtomicBool = AtomicBool::new(false);
+/// Env keys `--measure` must not invent. Same process env as a normal run.
+pub const MEASURE_FORBIDDEN_ENV: &[&str] = &[
+    "FONTCONFIG_FILE",
+    "FONTCONFIG_PATH",
+    "XDG_CACHE_HOME",
+    "XDG_CONFIG_HOME",
+    "XDG_DATA_HOME",
+    "XDG_DATA_DIRS",
+    "XDG_STATE_HOME",
+    "GTK_THEME",
+    "GTK_ICON_THEME_NAME",
+    "GTK_A11Y",
+    "PANGO_LANGUAGE",
+    "OPENPDF_TILE_CACHE_BYTES",
+    "GSK_RENDERER",
+];
 
-pub fn measure_rss_caps_applied() -> bool {
-    MEASURE_RSS_CAPS.load(Ordering::Relaxed)
+static INHERITED_ENV: OnceLock<BTreeMap<String, Option<String>>> = OnceLock::new();
+static MEASURE_SET_VARS: Mutex<Vec<String>> = Mutex::new(Vec::new());
+
+fn is_watched_env(key: &str) -> bool {
+    MEASURE_FORBIDDEN_ENV.contains(&key)
+        || key.starts_with("XDG_")
+        || key.starts_with("FONTCONFIG_")
+        || key.starts_with("GTK_")
 }
 
-/// DejaVu-only fontconfig so `--measure` RSS is not the host's full font set.
-const MEASURE_FONTS_CONF: &str = r#"<?xml version="1.0"?>
-<!DOCTYPE fontconfig SYSTEM "fonts.dtd">
-<fontconfig>
-  <dir>/usr/share/fonts/truetype/dejavu</dir>
-  <cachedir prefix="xdg">fontconfig</cachedir>
-  <alias>
-    <family>sans-serif</family>
-    <prefer><family>DejaVu Sans</family></prefer>
-  </alias>
-  <alias>
-    <family>serif</family>
-    <prefer><family>DejaVu Serif</family></prefer>
-  </alias>
-  <alias>
-    <family>monospace</family>
-    <prefer><family>DejaVu Sans Mono</family></prefer>
-  </alias>
-  <alias>
-    <family>Sans</family>
-    <prefer><family>DejaVu Sans</family></prefer>
-  </alias>
-</fontconfig>
-"#;
+/// Pin the process env `--measure` inherited. First call wins (from `main`).
+pub fn remember_inherited_env() {
+    let mut map = BTreeMap::new();
+    for key in MEASURE_FORBIDDEN_ENV {
+        map.insert((*key).to_string(), std::env::var(key).ok());
+    }
+    for (key, val) in std::env::vars() {
+        if is_watched_env(&key) {
+            map.insert(key, Some(val));
+        }
+    }
+    let _ = INHERITED_ENV.set(map);
+}
 
-/// Measure-only RSS caps. Call **before** `Engine::new` so PDFium/Pango see
-/// the tiny fontconfig and the 16 MiB tile-cache env.
-///
-/// Harmless without a display: only env + a fonts.conf in `isolate`.
-pub fn apply_measure_rss_caps(isolate: &Path) {
-    MEASURE_RSS_CAPS.store(true, Ordering::Relaxed);
-    let _ = std::fs::create_dir_all(isolate);
-    let fonts = isolate.join("fonts.conf");
-    if !fonts.exists() {
-        let _ = std::fs::write(&fonts, MEASURE_FONTS_CONF);
+/// Record a var set by measure code. The live `--measure` path must never call this.
+pub fn measure_set_var(key: &str, value: impl AsRef<std::ffi::OsStr>) {
+    MEASURE_SET_VARS
+        .lock()
+        .unwrap_or_else(|e| e.into_inner())
+        .push(key.to_string());
+    std::env::set_var(key, value);
+}
+
+/// Variables measure code set, plus watched keys that changed since
+/// [`remember_inherited_env`]. Must be empty for a valid `--measure` run.
+pub fn measure_env_overrides() -> Vec<String> {
+    remember_inherited_env();
+    let mut out = MEASURE_SET_VARS
+        .lock()
+        .unwrap_or_else(|e| e.into_inner())
+        .clone();
+    if let Some(start) = INHERITED_ENV.get() {
+        for key in MEASURE_FORBIDDEN_ENV {
+            let old = start.get(*key).cloned().flatten();
+            if std::env::var(key).ok() != old {
+                out.push((*key).to_string());
+            }
+        }
     }
-    std::env::set_var("FONTCONFIG_FILE", &fonts);
-    std::env::set_var("FONTCONFIG_PATH", isolate);
-    std::env::set_var("XDG_CACHE_HOME", isolate);
-    std::env::set_var("XDG_DATA_HOME", isolate);
-    if std::env::var_os("OPENPDF_TILE_CACHE_BYTES").is_none() {
-        std::env::set_var(
-            "OPENPDF_TILE_CACHE_BYTES",
-            DEFAULT_MEASURE_TILE_CACHE_BYTES.to_string(),
-        );
+    out.sort();
+    out.dedup();
+    out
+}
+
+/// `--measure` must not set FONTCONFIG_*/XDG_*/GTK icon search env.
+pub fn measure_env_is_clean() -> bool {
+    !measure_env_overrides().iter().any(|k| is_watched_env(k))
+}
+
+fn env_or_empty(key: &str) -> String {
+    std::env::var(key).unwrap_or_default()
+}
+
+fn gtk_star_env_block() -> String {
+    let mut keys: Vec<String> = std::env::vars()
+        .map(|(k, _)| k)
+        .filter(|k| k.starts_with("GTK_"))
+        .collect();
+    keys.sort();
+    let mut out = String::new();
+    for key in keys {
+        out.push_str(&format!("{key}={}\n", env_or_empty(&key)));
     }
-    if std::env::var_os("GTK_A11Y").is_none() {
-        std::env::set_var("GTK_A11Y", "none");
+    out
+}
+
+/// Snapshot fontconfig + GTK icon theme + watched env (GTK thread after init).
+pub fn collect_runtime_env() -> (
+    String,
+    i32,
+    String,
+    String,
+    String,
+    String,
+    String,
+    String,
+    String,
+    String,
+    String,
+    String,
+    Vec<String>,
+) {
+    let (theme, paths) = gtk_icon_theme_report();
+    (
+        fontconfig_config_file(),
+        fontconfig_font_list_count(),
+        theme,
+        paths,
+        env_or_empty("XDG_CACHE_HOME"),
+        env_or_empty("XDG_DATA_DIRS"),
+        env_or_empty("XDG_DATA_HOME"),
+        env_or_empty("XDG_CONFIG_HOME"),
+        env_or_empty("FONTCONFIG_FILE"),
+        env_or_empty("FONTCONFIG_PATH"),
+        gtk_star_env_block(),
+        env_or_empty("GSK_RENDERER"),
+        measure_env_overrides(),
+    )
+}
+
+fn gtk_icon_theme_report() -> (String, String) {
+    let Some(display) = gtk::gdk::Display::default() else {
+        return (String::new(), String::new());
+    };
+    let theme = gtk::IconTheme::for_display(&display);
+    let name = theme.theme_name().to_string();
+    let paths = theme
+        .search_path()
+        .into_iter()
+        .map(|p| p.display().to_string())
+        .collect::<Vec<_>>()
+        .join(":");
+    (name, paths)
+}
+
+#[repr(C)]
+struct FcFontSet {
+    nfont: i32,
+    _sfont: i32,
+    _fonts: *mut *mut std::ffi::c_void,
+}
+
+#[link(name = "fontconfig")]
+extern "C" {
+    fn FcInit() -> i32;
+    fn FcConfigFilename(name: *const std::ffi::c_char) -> *mut std::ffi::c_char;
+    fn FcStrFree(s: *mut std::ffi::c_char);
+    fn FcPatternCreate() -> *mut std::ffi::c_void;
+    fn FcPatternDestroy(p: *mut std::ffi::c_void);
+    fn FcObjectSetCreate() -> *mut std::ffi::c_void;
+    fn FcObjectSetAdd(os: *mut std::ffi::c_void, object: *const std::ffi::c_char) -> i32;
+    fn FcObjectSetDestroy(os: *mut std::ffi::c_void);
+    fn FcFontList(
+        config: *mut std::ffi::c_void,
+        p: *mut std::ffi::c_void,
+        os: *mut std::ffi::c_void,
+    ) -> *mut FcFontSet;
+    fn FcFontSetDestroy(s: *mut FcFontSet);
+}
+
+/// FONTCONFIG_FILE, else `FcConfigFilename(NULL)`.
+pub fn fontconfig_config_file() -> String {
+    if let Ok(p) = std::env::var("FONTCONFIG_FILE") {
+        if !p.is_empty() {
+            return p;
+        }
     }
-    if std::env::var_os("PANGO_LANGUAGE").is_none() {
-        std::env::set_var("PANGO_LANGUAGE", "en-US");
+    unsafe {
+        FcInit();
+        let ptr = FcConfigFilename(std::ptr::null());
+        if ptr.is_null() {
+            return String::new();
+        }
+        let s = std::ffi::CStr::from_ptr(ptr).to_string_lossy().into_owned();
+        FcStrFree(ptr);
+        s
     }
 }
 
-/// 16 MiB — matches [`openpdf_core::DEFAULT_CACHE_BYTES`].
-pub const DEFAULT_MEASURE_TILE_CACHE_BYTES: usize = 16 * 1024 * 1024;
+/// `FcFontList` count with an empty pattern (one entry per font file).
+pub fn fontconfig_font_list_count() -> i32 {
+    unsafe {
+        FcInit();
+        let pat = FcPatternCreate();
+        let os = FcObjectSetCreate();
+        let file = std::ffi::CString::new("file").expect("fc object");
+        FcObjectSetAdd(os, file.as_ptr());
+        let set = FcFontList(std::ptr::null_mut(), pat, os);
+        let n = if set.is_null() { 0 } else { (*set).nfont };
+        if !set.is_null() {
+            FcFontSetDestroy(set);
+        }
+        FcObjectSetDestroy(os);
+        FcPatternDestroy(pat);
+        n
+    }
+}
 
 fn proc_status_bytes(key: &str) -> u64 {
     let Ok(text) = std::fs::read_to_string("/proc/self/status") else {
@@ -781,18 +960,39 @@ fn parse_status_kb(status: &str, key: &str) -> u64 {
     0
 }
 
-/// Isolate settings so `--measure` does not touch `~/.config/openpdf`.
-///
-/// Also pins cache/data homes so fontconfig / icon-theme caches stay in
-/// the isolate dir (host Adwaita/font caches are the usual 15–20 MiB delta).
-pub fn isolate_xdg() -> PathBuf {
-    let dir = std::env::temp_dir().join(format!("openpdf-measure-{}", std::process::id()));
-    let _ = std::fs::create_dir_all(&dir);
-    std::env::set_var("XDG_CONFIG_HOME", &dir);
-    std::env::set_var("XDG_STATE_HOME", &dir);
-    std::env::set_var("XDG_CACHE_HOME", &dir);
-    std::env::set_var("XDG_DATA_HOME", &dir);
-    dir
+impl BudgetReport {
+    /// Fill fontconfig / GTK / XDG lines and `env_overrides` from the live process.
+    pub fn with_runtime_env(mut self) -> Self {
+        let (
+            fontconfig_file,
+            fontconfig_fonts,
+            gtk_icon_theme,
+            gtk_icon_search_path,
+            xdg_cache_home,
+            xdg_data_dirs,
+            xdg_data_home,
+            xdg_config_home,
+            fontconfig_file_env,
+            fontconfig_path_env,
+            gtk_env,
+            gsk_renderer,
+            env_overrides,
+        ) = collect_runtime_env();
+        self.fontconfig_file = fontconfig_file;
+        self.fontconfig_fonts = fontconfig_fonts;
+        self.gtk_icon_theme = gtk_icon_theme;
+        self.gtk_icon_search_path = gtk_icon_search_path;
+        self.xdg_cache_home = xdg_cache_home;
+        self.xdg_data_dirs = xdg_data_dirs;
+        self.xdg_data_home = xdg_data_home;
+        self.xdg_config_home = xdg_config_home;
+        self.fontconfig_file_env = fontconfig_file_env;
+        self.fontconfig_path_env = fontconfig_path_env;
+        self.gtk_env = gtk_env;
+        self.gsk_renderer = gsk_renderer;
+        self.env_overrides = env_overrides;
+        self
+    }
 }
 
 /// Build a real multi-page PDF by repeating `corpus/hello.pdf` (no fat fixture).
@@ -904,6 +1104,9 @@ mod tests {
         assert!(text.contains("ui_doc_load_start_ms="));
         assert!(text.contains("ui_first_tile_requested_ms="));
         assert!(text.contains("ui_first_surface_ready_ms="));
+        assert!(text.contains("env_overrides="));
+        assert!(text.contains("fontconfig_fonts="));
+        assert!(text.contains("gtk_icon_theme="));
     }
 
     #[test]
@@ -983,6 +1186,84 @@ mod tests {
         .to_string();
         assert!(report.contains("startup_ms="));
         assert!(!msg.lines().any(|l| l.starts_with("startup_ms=")));
+    }
+
+    #[test]
+    fn measure_setup_does_not_set_fontconfig_xdg_or_icon_env() {
+        remember_inherited_env();
+        let before: Vec<(&str, Option<String>)> = MEASURE_FORBIDDEN_ENV
+            .iter()
+            .map(|k| (*k, std::env::var(k).ok()))
+            .collect();
+        assert!(
+            measure_env_is_clean(),
+            "measure must not set env: {:?}",
+            measure_env_overrides()
+        );
+        assert!(measure_env_overrides().is_empty());
+        for (key, old) in before {
+            assert_eq!(
+                std::env::var(key).ok(),
+                old,
+                "measure must not change {key}"
+            );
+        }
+        for key in [
+            "FONTCONFIG_FILE",
+            "FONTCONFIG_PATH",
+            "XDG_CACHE_HOME",
+            "XDG_DATA_HOME",
+            "XDG_DATA_DIRS",
+            "XDG_CONFIG_HOME",
+        ] {
+            assert!(
+                !measure_env_overrides().iter().any(|k| k == key),
+                "{key} must stay inherited"
+            );
+        }
+    }
+
+    #[test]
+    fn env_overrides_fail_the_report_and_print() {
+        let report = BudgetReport {
+            pages: 32,
+            startup_ms: 200,
+            rss_bytes: 10 * 1024 * 1024,
+            visible_ready: 16,
+            visible_total: 16,
+            thumb_ready: 4,
+            thumb_total: 4,
+            ui_first_tile_ms: 230,
+            ui_first_tile_rendered_ms: 209,
+            env_overrides: vec!["FONTCONFIG_FILE".into(), "XDG_CACHE_HOME".into()],
+            ..Default::default()
+        }
+        .evaluate();
+        assert!(!report.ok);
+        let err = report.error.unwrap();
+        assert!(err.contains("FONTCONFIG_FILE"), "{err}");
+        assert!(err.contains("XDG_CACHE_HOME"), "{err}");
+        let text = BudgetReport {
+            env_overrides: vec!["FONTCONFIG_FILE".into()],
+            ..Default::default()
+        }
+        .to_string();
+        assert!(text.contains("env_overrides=FONTCONFIG_FILE"));
+        let clean = BudgetReport {
+            pages: 32,
+            startup_ms: 230,
+            rss_bytes: 10 * 1024 * 1024,
+            visible_ready: 16,
+            visible_total: 16,
+            thumb_ready: 4,
+            thumb_total: 4,
+            ui_first_tile_ms: 230,
+            ui_first_tile_rendered_ms: 209,
+            env_overrides: Vec::new(),
+            ..Default::default()
+        }
+        .evaluate();
+        assert!(clean.ok, "{:?}", clean.error);
     }
 
     #[test]

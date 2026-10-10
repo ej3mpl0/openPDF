@@ -751,10 +751,8 @@ fn paint_pages(cr: &cairo::Context, view: &DocumentView) {
     }
     view.shared.doc.request_tiles(&keys, Priority::Visible);
     // Adjacent previews wait until a real tile has painted so they do not
-    // compete with first-tile / startup. `--measure` skips them entirely
-    // (visible tiles + MIN_THUMB_TILES already fill the budget).
-    if crate::measure::ui_first_tile_painted_ms() > 0 && !crate::measure::measure_rss_caps_applied()
-    {
+    // compete with first-tile / startup. Same rule for `--measure` and the app.
+    if crate::measure::ui_first_tile_painted_ms() > 0 {
         let preview: Vec<TileKey> = keys.iter().map(|k| k.preview()).collect();
         view.shared.doc.request_tiles(&preview, Priority::Adjacent);
     }

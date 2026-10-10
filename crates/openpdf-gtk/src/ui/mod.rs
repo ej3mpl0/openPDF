@@ -118,12 +118,11 @@ pub fn run(
 /// Other `ui_*` marks are also milliseconds from process start.
 pub fn run_measure(pages: usize, engine: Option<Engine>) -> i32 {
     measure::mark_process_start();
+    measure::remember_inherited_env();
     if !measure::has_display() {
         eprintln!("measure: {}", measure::display_hint());
         return 1;
     }
-    let isolate = measure::isolate_xdg();
-    measure::apply_measure_rss_caps(&isolate);
     let pages = if pages == 0 {
         DEFAULT_MEASURE_PAGES
     } else {
@@ -154,7 +153,6 @@ pub fn run_measure(pages: usize, engine: Option<Engine>) -> i32 {
             measure::warmup_fontconfig_pango();
             measure::mark_pango_init();
             adw::init().ok();
-            restrict_measure_icon_theme();
             register_icons();
             ui_adw_init_ms.set(measure::process_elapsed_ms());
             load_css();
@@ -334,7 +332,9 @@ fn watch_measure(
                         ui_thumbs_done_ms: measure::ui_thumbs_done_ms(),
                         ok: false,
                         error: None,
+                        ..Default::default()
                     }
+                    .with_runtime_env()
                     .evaluate(),
                 );
                 return glib::ControlFlow::Break;
@@ -376,6 +376,7 @@ fn failed_report(pages: usize, startup_ms: u128, rss_bytes: u64, error: &str) ->
         error: Some(error.to_string()),
         ..Default::default()
     }
+    .with_runtime_env()
 }
 
 fn finish_measure(
@@ -413,29 +414,7 @@ fn install_accels(app: &adw::Application) {
     app.set_accels_for_action("win.redo", &["<Ctrl><Shift>z"]);
 }
 
-/// Keep `--measure` from walking every installed icon theme (the usual
-/// 15–20 MiB host delta vs a thin VM). Buttons may render without icons.
-fn restrict_measure_icon_theme() {
-    let Some(display) = gtk::gdk::Display::default() else {
-        return;
-    };
-    let theme = gtk::IconTheme::for_display(&display);
-    if let Ok(dir) = std::env::var("XDG_DATA_HOME") {
-        let icons = std::path::PathBuf::from(dir).join("icons");
-        let _ = std::fs::create_dir_all(icons.join("hicolor"));
-        theme.set_search_path(&[icons.as_path()]);
-    }
-}
-
 fn register_icons() {
-    // `--measure` skips the bundled GResource so peak RSS stays comparable
-    // across boxes (Adwaita + every theme walk is the usual 15–20 MiB delta).
-    if gtk::gio::Application::default()
-        .and_then(|app| app.application_id())
-        .is_some_and(|id| id == crate::MEASURE_APP_ID)
-    {
-        return;
-    }
     let bytes = include_bytes!(concat!(env!("OUT_DIR"), "/icons.gresource"));
     match gtk::gio::Resource::from_data(&gtk::glib::Bytes::from_static(bytes)) {
         Ok(resource) => gtk::gio::resources_register(&resource),
@@ -451,12 +430,6 @@ fn register_icons() {
 }
 
 fn load_css() {
-    if gtk::gio::Application::default()
-        .and_then(|app| app.application_id())
-        .is_some_and(|id| id == crate::MEASURE_APP_ID)
-    {
-        return;
-    }
     let provider = gtk::CssProvider::new();
     provider.load_from_string(CSS);
     if let Some(display) = gtk::gdk::Display::default() {
