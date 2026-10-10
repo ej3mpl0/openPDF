@@ -194,6 +194,18 @@ impl TextureCache {
         self.map.len()
     }
 
+    pub fn zoom_millis(&self) -> std::collections::BTreeSet<u32> {
+        self.map.keys().map(|k| k.zoom_milli).collect()
+    }
+
+    pub fn bytes_for_zooms(&self, keep: &[u32]) -> usize {
+        self.map
+            .iter()
+            .filter(|(k, _)| keep.contains(&k.zoom_milli))
+            .map(|(_, t)| texture_byte_len(t))
+            .sum()
+    }
+
     pub fn set_max_bytes(&mut self, max_bytes: usize) {
         self.max_bytes = max_bytes.max(1);
         self.evict();

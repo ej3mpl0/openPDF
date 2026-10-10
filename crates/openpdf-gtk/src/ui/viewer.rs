@@ -181,6 +181,17 @@ impl DocumentView {
         self.thumbs_area.queue_draw();
     }
 
+    fn issue_tile_request(&self, keys: &[TileKey], priority: Priority) {
+        if keys.is_empty() {
+            return;
+        }
+        crate::measure::note_tile_request_alloc(
+            self.pages_scroll.width(),
+            self.pages_scroll.height(),
+        );
+        self.shared.doc.request_tiles(keys, priority);
+    }
+
     /// Kick the top-left visible tile as soon as the document is open, without
     /// waiting for the 30 ms relayout timer or the first draw.
     pub fn request_first_tile(&self) {
@@ -194,7 +205,7 @@ impl DocumentView {
                 self.shared.tile_size.get(),
             )
         });
-        self.shared.doc.request_tiles(&[key], Priority::Visible);
+        self.issue_tile_request(&[key], Priority::Visible);
         if let Some(ready) = self.shared.doc.poll_ready() {
             ingest_arrived_texture(self, &ready);
             self.pages_area.queue_draw();
@@ -386,6 +397,27 @@ impl DocumentView {
     #[cfg(test)]
     pub(crate) fn cached_texture_count(&self) -> usize {
         self.shared.textures.borrow().len()
+    }
+
+    #[cfg(test)]
+    pub(crate) fn zoom_factor(&self) -> f64 {
+        self.shared.zoom.get()
+    }
+
+    #[cfg(test)]
+    pub(crate) fn texture_zoom_millis(&self) -> std::collections::BTreeSet<u32> {
+        self.shared.textures.borrow().zoom_millis()
+    }
+
+    #[cfg(test)]
+    pub(crate) fn texture_bytes_for_zooms(&self, keep: &[u32]) -> usize {
+        self.shared.textures.borrow().bytes_for_zooms(keep)
+    }
+
+    #[cfg(test)]
+    pub(crate) fn allocate_scrolls(&self, page_w: i32, page_h: i32, thumb_w: i32, thumb_h: i32) {
+        self.pages_scroll.allocate(page_w, page_h, -1, None);
+        self.thumbs_scroll.allocate(thumb_w, thumb_h, -1, None);
     }
 
     fn update_chrome(&self) {
@@ -837,13 +869,13 @@ fn snapshot_pages(snapshot: &gtk::Snapshot, view: &DocumentView) {
         view.shared.doc.begin_frame();
         *view.shared.last_visible.borrow_mut() = keys.clone();
     }
-    view.shared.doc.request_tiles(&keys, Priority::Visible);
+    view.issue_tile_request(&keys, Priority::Visible);
     // Adjacent previews wait until a real tile has painted so they do not
     // compete with first-tile / startup. Same rule for `--measure` and the app.
     // Never send preview (tx,ty) that fall outside the coarser zoom's grid.
     if crate::measure::ui_first_tile_painted_ms() > 0 {
         let preview = crate::tiles::in_range_preview_keys(&keys, &view.shared.doc.pages());
-        view.shared.doc.request_tiles(&preview, Priority::Adjacent);
+        view.issue_tile_request(&preview, Priority::Adjacent);
     }
 
     let textures = view.shared.textures.borrow();
@@ -910,7 +942,7 @@ fn snapshot_thumbs(snapshot: &gtk::Snapshot, view: &DocumentView) {
     );
 
     let keys = thumb_tile_keys(view);
-    view.shared.doc.request_tiles(&keys, Priority::Thumbnail);
+    view.issue_tile_request(&keys, Priority::Thumbnail);
 
     let textures = view.shared.textures.borrow();
     for page in &layout.pages {
@@ -1248,5 +1280,78 @@ mod tests {
             return;
         };
         let _ = std::fs::remove_file(&path);
+    }
+
+    /// FitWidth must not request tiles at 0×0 / 1×1. After the viewport is
+    /// real, leftover placeholder / tiny-alloc zooms must not stay in the
+    /// texture set or `ours_tiles_kb`.
+    #[test]
+    fn fitwidth_startup_only_final_zoom_thumbs_preview() {
+        let Some(()) = crate::test_gtk::on_gtk_thread(|| {
+            crate::measure::reset_tile_request_allocs();
+            crate::measure::reset_gtk_tile_buffers();
+
+            let doc = crate::backend::MockDocument::sample(4);
+            let opened = Rc::new(crate::session::Opened::Mock(crate::session::MockView::new(
+                doc,
+            )));
+            let mut settings = crate::settings::Settings::default();
+            settings.zoom_mode = crate::settings::ZoomMode::FitWidth;
+            settings.show_thumbnails = true;
+            let view = build(opened, &settings, crate::Lang::En);
+            let win = gtk::Window::new();
+            win.set_child(Some(view.widget()));
+
+            view.request_first_tile();
+            view.ingest_ready_tiles();
+
+            win.present();
+            view.allocate_scrolls(1, 1, 1, 1);
+            view.ensure_laid_out();
+            view.request_first_tile();
+            let tiny = paint::snapshot_widget(view.pages_canvas(), 1.0, 1.0);
+            let _ = tiny.to_node();
+            view.ingest_ready_tiles();
+
+            view.allocate_scrolls(1010, 658, 120, 480);
+            view.ensure_laid_out();
+            view.request_first_tile();
+            let pages = paint::snapshot_widget(view.pages_canvas(), 1010.0, 658.0);
+            let thumbs = paint::snapshot_widget(view.thumbs_canvas(), 120.0, 480.0);
+            let _ = pages.to_node();
+            let _ = thumbs.to_node();
+            view.ingest_ready_tiles();
+            crate::measure::mark_first_tile_painted();
+            let pages = paint::snapshot_widget(view.pages_canvas(), 1010.0, 658.0);
+            let _ = pages.to_node();
+            view.ingest_ready_tiles();
+
+            let allocs = crate::measure::take_tile_request_allocs();
+            assert!(
+                allocs.iter().all(|&(w, h)| w > 1 && h > 1),
+                "no tile request at alloc 0x0 or 1x1, got {allocs:?}"
+            );
+
+            let final_z = crate::tiles::quantize_zoom(view.zoom_factor());
+            let thumb_z = crate::tiles::quantize_zoom(THUMB_WIDTH / crate::PageSize::A4.width);
+            let preview_z = (final_z / 4).max(50);
+            let keep = [final_z, thumb_z, preview_z];
+            let zooms = view.texture_zoom_millis();
+            assert!(
+                zooms.iter().all(|z| keep.contains(z)),
+                "after startup zooms {zooms:?} must be subset of final+thumbs+preview {keep:?}"
+            );
+
+            let keep_kb = (view.texture_bytes_for_zooms(&keep) / 1024) as u64;
+            assert_eq!(
+                crate::measure::ours_tiles_kb(),
+                keep_kb,
+                "ours_tiles_kb must count only final zoom + thumbs + preview"
+            );
+            win.close();
+        }) else {
+            eprintln!("fitwidth startup zooms: skipped (no GTK display)");
+            return;
+        };
     }
 }

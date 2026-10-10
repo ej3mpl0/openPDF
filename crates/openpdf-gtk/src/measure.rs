@@ -749,6 +749,34 @@ static RSS_BREAKDOWN: OnceLock<String> = OnceLock::new();
 static HEAP_KB_BEFORE_DOC: OnceLock<u64> = OnceLock::new();
 static MEASURE_DOC_FILE_BYTES: OnceLock<u64> = OnceLock::new();
 static GTK_TILE_BUFFERS: Mutex<Vec<(usize, usize)>> = Mutex::new(Vec::new());
+static TILE_REQUEST_ALLOCS: Mutex<Vec<(i32, i32)>> = Mutex::new(Vec::new());
+
+/// Record the page-scroll allocation at each real `request_tiles`.
+pub fn note_tile_request_alloc(width: i32, height: i32) {
+    if let Ok(mut v) = TILE_REQUEST_ALLOCS.lock() {
+        v.push((width, height));
+    }
+}
+
+pub fn take_tile_request_allocs() -> Vec<(i32, i32)> {
+    TILE_REQUEST_ALLOCS
+        .lock()
+        .ok()
+        .map(|mut g| std::mem::take(&mut *g))
+        .unwrap_or_default()
+}
+
+pub fn reset_tile_request_allocs() {
+    if let Ok(mut v) = TILE_REQUEST_ALLOCS.lock() {
+        v.clear();
+    }
+}
+
+pub fn reset_gtk_tile_buffers() {
+    if let Ok(mut v) = GTK_TILE_BUFFERS.lock() {
+        v.clear();
+    }
+}
 
 /// `#50` only. This gtk branch has no `openpdf_core::font_warmup_ms`.
 pub fn font_warmup_ms() -> Option<u128> {
