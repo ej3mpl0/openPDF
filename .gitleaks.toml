@@ -1,0 +1,20 @@
+# gitleaks config for openPDF. Extends the default ruleset; the allowlist only
+# covers known TEST-ONLY values. Anything else gitleaks flags is a real finding.
+title = "openPDF gitleaks config"
+
+[extend]
+useDefault = true
+
+[[allowlists]]
+description = "TEST-ONLY: placeholder 'secret' used to assert FFI errors never echo passwords"
+# Test-only string, not a credential (openpdf-ffi tests, ffi branch / PR #14).
+paths = ['''^crates/openpdf-ffi/src/(error|lib)\.rs$''']
+regexes = ['''ffi-secret-NEVER-ECHO-9f3a''']
+condition = "AND"
+
+[[allowlists]]
+description = "TEST-ONLY: throwaway SoftHSM2 PINs for the temp token created by openpdf-sign tests"
+# Test-only PINs (1234 / 12345678) for a SoftHSM token created and destroyed by the tests.
+paths = ['''^crates/openpdf-sign/src/tests\.rs$''']
+regexes = ['''"1234"''', '''"12345678"''']
+condition = "AND"
