@@ -329,8 +329,8 @@ fn optimize_cmd(m: &ArgMatches) -> Result<()> {
 fn protect_cmd(m: &ArgMatches) -> Result<()> {
     let doc = crate::password::open(path_arg(m, "file"))?;
     // Stdin: line 1 user password, optional line 2 owner password.
-    let user = read_password(&tr("User password: "), 0)?;
-    let owner = read_optional_password(&tr("Owner password (empty = same as user): "), 1)?;
+    let user = read_password(&tr("User password: "))?;
+    let owner = read_optional_password(&tr("Owner password (empty = same as user): "))?;
     let mut opts = ProtectOptions::new(
         user.as_str(),
         owner.as_ref().map(|o| o.as_str()).unwrap_or(""),

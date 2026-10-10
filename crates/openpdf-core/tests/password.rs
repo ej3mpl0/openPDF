@@ -1,7 +1,8 @@
 //! Opening, rendering and unprotecting password-protected PDFs.
 
 use openpdf_core::{
-    protect, tile_grid, unprotect, Document, Engine, Error, ProtectOptions, TileKey, TILE_SIZE,
+    crop_pages, extract, merge, optimize, parse_page_ranges, protect, tile_grid, unprotect,
+    CropBox, Document, Engine, Error, OptimizeOptions, ProtectOptions, TileKey, TILE_SIZE,
 };
 use zeroize::Zeroizing;
 
@@ -98,4 +99,60 @@ fn engine_renders_protected_pdf_opened_with_password() {
     let mut edited = doc.clone();
     edited.rotate_page(0, 90).unwrap();
     engine.refresh(&edited).unwrap();
+}
+
+fn assert_locked(name: &str, bytes: Vec<u8>) {
+    assert!(
+        bytes.windows(8).any(|w| w == b"/Encrypt"),
+        "{name}: output has no /Encrypt"
+    );
+    assert!(
+        matches!(
+            Document::from_bytes(bytes.clone(), None),
+            Err(Error::PasswordRequired)
+        ),
+        "{name}: opened without a password"
+    );
+    let doc = Document::from_bytes_with_password(bytes, None, pw("user-secret"))
+        .unwrap_or_else(|e| panic!("{name}: {e:?}"));
+    assert!(doc.is_encrypted(), "{name}");
+}
+
+#[test]
+fn derived_documents_stay_encrypted() {
+    let bytes = std::fs::read(corpus("two_page.pdf")).unwrap();
+    let plain = Document::from_bytes(bytes, None).unwrap();
+    let opts = ProtectOptions::new("user-secret", "owner-secret").unwrap();
+    let locked = protect(&plain, &opts).unwrap().to_bytes().unwrap();
+    let doc = Document::from_bytes_with_password(locked, None, pw("user-secret")).unwrap();
+
+    let optimized = optimize(&doc, &OptimizeOptions::default()).unwrap();
+    assert_locked("optimize", optimized.to_bytes().unwrap());
+
+    let all = parse_page_ranges("1-2", doc.page_count()).unwrap();
+    let crop = CropBox {
+        llx: 10.0,
+        lly: 10.0,
+        urx: 200.0,
+        ury: 200.0,
+    };
+    assert_locked(
+        "crop",
+        crop_pages(&doc, &all, crop).unwrap().to_bytes().unwrap(),
+    );
+
+    let one = parse_page_ranges("2", doc.page_count()).unwrap();
+    assert_locked(
+        "extract one range",
+        extract(&doc, &one).unwrap().to_bytes().unwrap(),
+    );
+    // Two ranges go through merge, which builds a brand-new document.
+    let two = parse_page_ranges("1,2", doc.page_count()).unwrap();
+    let extracted = extract(&doc, &two).unwrap();
+    assert_eq!(extracted.page_count(), 2);
+    assert_locked("extract two ranges", extracted.to_bytes().unwrap());
+    assert_locked(
+        "merge",
+        merge(&[doc.clone(), plain]).unwrap().to_bytes().unwrap(),
+    );
 }

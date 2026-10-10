@@ -180,6 +180,14 @@ impl Document {
         Self::from_lopdf_with(inner, None, self.password.clone())
     }
 
+    /// [`Document::derive`] for a freshly built lopdf document (e.g. merge
+    /// output) that carries no encryption state of its own: it is encrypted
+    /// with this document's key and reopened with this document's password.
+    pub(crate) fn derive_encrypted(&self, mut inner: LopdfDocument) -> Result<Self> {
+        inner.encryption_state = self.inner.encryption_state.clone();
+        self.derive(inner)
+    }
+
     pub(crate) fn from_lopdf_with(
         inner: LopdfDocument,
         path: Option<PathBuf>,

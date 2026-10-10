@@ -180,7 +180,9 @@ fn cli() -> Command {
 
 fn main() {
     init_i18n();
-    if let Err(e) = run() {
+    let result = run();
+    password::clear();
+    if let Err(e) = result {
         eprintln!(
             "{}",
             tr_args("openpdf: {error}", &[("error", &format!("{e:#}"))])

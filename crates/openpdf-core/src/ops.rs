@@ -160,7 +160,13 @@ pub fn merge(docs: &[Document]) -> Result<Document> {
     // new file while no longer matching any ByteRange.
     strip_signatures(&mut out);
 
-    Document::from_lopdf(out, None)
+    // If any input was opened with a password, the merged file is encrypted
+    // with the first such input's key and password instead of going out in
+    // plaintext.
+    match docs.iter().find(|d| d.password().get().is_some()) {
+        Some(src) => src.derive_encrypted(out),
+        None => Document::from_lopdf(out, None),
+    }
 }
 
 pub fn merge_paths<P: AsRef<Path>>(paths: &[P]) -> Result<Document> {
