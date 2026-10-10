@@ -33,8 +33,14 @@ enum WorkerCmd {
     Bind {
         engine: EngineId,
         id: DocumentId,
-        bytes: Vec<u8>,
+        bytes: Arc<Vec<u8>>,
         reply: Sender<Result<()>>,
+    },
+    /// Test-only: address of the buffer PDFium loaded `id` from.
+    #[cfg(test)]
+    LoadedPtr {
+        id: DocumentId,
+        reply: Sender<Option<usize>>,
     },
     Unbind {
         engine: EngineId,
@@ -127,21 +133,41 @@ fn start_worker(bundled: Option<&Path>) -> Result<WorkerHandle> {
     })
 }
 
-struct BoundDoc {
-    // SAFETY: created from `pdfium` on this thread and dropped before `pdfium`.
-    doc: PdfDocument<'static>,
+self_cell::self_cell!(
+    /// A PDFium document reading the shared bytes in place (no copy).
+    ///
+    /// Owner: the same `Arc<Vec<u8>>` as `Document::original_bytes()` (or a
+    /// fresh rewrite for dirty documents). Dependent: the PDFium document
+    /// borrowing that buffer. `self_cell` keeps the owner alive and drops the
+    /// dependent first.
+    struct BoundDoc {
+        owner: Arc<Vec<u8>>,
+
+        #[not_covariant]
+        dependent: BoundPdf,
+    }
+);
+
+type BoundPdf<'a> = PdfDocument<'a>;
+
+impl BoundDoc {
+    fn with<R>(&self, f: impl FnOnce(&PdfDocument<'_>) -> R) -> R {
+        self.with_dependent(|_, doc| f(doc))
+    }
 }
 
-fn load_bound(pdfium: &Pdfium, bytes: Vec<u8>) -> Result<BoundDoc> {
-    let doc = pdfium
-        .load_pdf_from_byte_vec(bytes, None)
-        .map_err(|e| Error::pdfium(e.to_string()))?;
-    // See BoundDoc.
-    let doc = unsafe { std::mem::transmute::<PdfDocument<'_>, PdfDocument<'static>>(doc) };
-    Ok(BoundDoc { doc })
+fn load_bound(pdfium: &'static Pdfium, bytes: Arc<Vec<u8>>) -> Result<BoundDoc> {
+    BoundDoc::try_new(bytes, |bytes| {
+        pdfium
+            .load_pdf_from_byte_slice(bytes.as_slice(), None)
+            .map_err(|e| Error::pdfium(e.to_string()))
+    })
 }
 
 fn worker_loop(pdfium: Pdfium, cmd_rx: Receiver<WorkerCmd>, cache: Arc<Mutex<TileCache>>) {
+    // The worker lives for the whole process (global OnceLock), so PDFium is
+    // leaked to get a 'static borrow for the documents; no lifetime casts.
+    let pdfium: &'static Pdfium = Box::leak(Box::new(pdfium));
     let mut docs: HashMap<DocumentId, BoundDoc> = HashMap::new();
     let mut engines: HashMap<EngineId, EngineSlot> = HashMap::new();
     let mut order: Vec<EngineId> = Vec::new();
@@ -149,7 +175,7 @@ fn worker_loop(pdfium: Pdfium, cmd_rx: Receiver<WorkerCmd>, cache: Arc<Mutex<Til
 
     loop {
         while let Ok(cmd) = cmd_rx.try_recv() {
-            if !handle_cmd(&pdfium, cmd, &mut docs, &mut engines, &cache) {
+            if !handle_cmd(pdfium, cmd, &mut docs, &mut engines, &cache) {
                 return;
             }
         }
@@ -189,25 +215,28 @@ fn worker_loop(pdfium: Pdfium, cmd_rx: Receiver<WorkerCmd>, cache: Arc<Mutex<Til
                 continue;
             }
             let result = match docs.get(&key.doc) {
-                Some(bound) => pdfium_bind::render_tile(
-                    &bound.doc,
-                    key.page,
-                    key.zoom(),
-                    key.x,
-                    key.y,
-                    super::TILE_SIZE,
-                )
-                .map(|(w, h, rgba)| Tile {
-                    key,
-                    width: w,
-                    height: h,
-                    rgba,
-                }),
+                Some(bound) => bound
+                    .with(|doc| {
+                        pdfium_bind::render_tile(
+                            doc,
+                            key.page,
+                            key.zoom(),
+                            key.x,
+                            key.y,
+                            super::TILE_SIZE,
+                        )
+                    })
+                    .map(|(w, h, rgba)| Tile {
+                        key,
+                        width: w,
+                        height: h,
+                        rgba,
+                    }),
                 None => Err(Error::invalid(InvalidKind::DocumentNotBound)),
             };
             // Commands that arrived while rendering (cancel, new frame) apply first.
             while let Ok(cmd) = cmd_rx.try_recv() {
-                if !handle_cmd(&pdfium, cmd, &mut docs, &mut engines, &cache) {
+                if !handle_cmd(pdfium, cmd, &mut docs, &mut engines, &cache) {
                     return;
                 }
             }
@@ -236,7 +265,7 @@ fn worker_loop(pdfium: Pdfium, cmd_rx: Receiver<WorkerCmd>, cache: Arc<Mutex<Til
 
         match cmd_rx.recv_timeout(Duration::from_millis(50)) {
             Ok(cmd) => {
-                if !handle_cmd(&pdfium, cmd, &mut docs, &mut engines, &cache) {
+                if !handle_cmd(pdfium, cmd, &mut docs, &mut engines, &cache) {
                     return;
                 }
             }
@@ -263,13 +292,17 @@ fn release_doc(
 }
 
 fn handle_cmd(
-    pdfium: &Pdfium,
+    pdfium: &'static Pdfium,
     cmd: WorkerCmd,
     docs: &mut HashMap<DocumentId, BoundDoc>,
     engines: &mut HashMap<EngineId, EngineSlot>,
     cache: &Arc<Mutex<TileCache>>,
 ) -> bool {
     match cmd {
+        #[cfg(test)]
+        WorkerCmd::LoadedPtr { id, reply } => {
+            let _ = reply.send(docs.get(&id).map(|b| b.borrow_owner().as_ptr() as usize));
+        }
         WorkerCmd::Bind {
             engine,
             id,
@@ -345,7 +378,7 @@ fn handle_cmd(
         }
         WorkerCmd::Text { id, page, reply } => {
             let result = match docs.get(&id) {
-                Some(b) => pdfium_bind::page_text(&b.doc, page),
+                Some(b) => b.with(|doc| pdfium_bind::page_text(doc, page)),
                 None => Err(Error::invalid(InvalidKind::DocumentNotBound)),
             };
             let _ = reply.send(result);
@@ -358,11 +391,12 @@ fn handle_cmd(
         } => {
             let result = match docs.get(&id) {
                 Some(b) => {
-                    pdfium_bind::render_page(&b.doc, page, zoom).map(|(w, h, rgba)| Raster {
-                        width: w,
-                        height: h,
-                        rgba,
-                    })
+                    b.with(|doc| pdfium_bind::render_page(doc, page, zoom))
+                        .map(|(w, h, rgba)| Raster {
+                            width: w,
+                            height: h,
+                            rgba,
+                        })
                 }
                 None => Err(Error::invalid(InvalidKind::DocumentNotBound)),
             };
@@ -374,20 +408,23 @@ fn handle_cmd(
                 return true;
             }
             let result = match docs.get(&key.doc) {
-                Some(b) => pdfium_bind::render_tile(
-                    &b.doc,
-                    key.page,
-                    key.zoom(),
-                    key.x,
-                    key.y,
-                    super::TILE_SIZE,
-                )
-                .map(|(w, h, rgba)| Tile {
-                    key,
-                    width: w,
-                    height: h,
-                    rgba,
-                }),
+                Some(b) => b
+                    .with(|doc| {
+                        pdfium_bind::render_tile(
+                            doc,
+                            key.page,
+                            key.zoom(),
+                            key.x,
+                            key.y,
+                            super::TILE_SIZE,
+                        )
+                    })
+                    .map(|(w, h, rgba)| Tile {
+                        key,
+                        width: w,
+                        height: h,
+                        rgba,
+                    }),
                 None => Err(Error::invalid(InvalidKind::DocumentNotBound)),
             };
             if let Ok(ref tile) = result {
@@ -399,7 +436,7 @@ fn handle_cmd(
         }
         WorkerCmd::Search { id, query, reply } => {
             let result = match docs.get(&id) {
-                Some(b) => search_doc(&b.doc, &query),
+                Some(b) => b.with(|doc| search_doc(doc, &query)),
                 None => Err(Error::invalid(InvalidKind::DocumentNotBound)),
             };
             let _ = reply.send(result);
@@ -508,9 +545,9 @@ impl Engine {
 
     pub fn bind(&self, doc: &Document) -> Result<()> {
         let bytes = if doc.is_dirty() {
-            doc.to_bytes()?
+            Arc::new(doc.to_bytes()?)
         } else {
-            doc.original_slice().to_vec()
+            doc.original_bytes()
         };
         self.bind_bytes(doc.id(), bytes)
     }
@@ -519,7 +556,7 @@ impl Engine {
         self.bind(doc)
     }
 
-    fn bind_bytes(&self, id: DocumentId, bytes: Vec<u8>) -> Result<()> {
+    fn bind_bytes(&self, id: DocumentId, bytes: Arc<Vec<u8>>) -> Result<()> {
         let (tx, rx) = mpsc::channel();
         self.send(WorkerCmd::Bind {
             engine: self.inner.id,
@@ -816,5 +853,34 @@ mod drop_tests {
         assert!(witness
             .render_tile_blocking(TileKey::new(doc.id(), 0, 1.0, 0, 0))
             .is_ok());
+    }
+}
+
+#[cfg(test)]
+mod bind_tests {
+    use super::*;
+
+    #[test]
+    fn pdfium_reads_the_documents_own_buffer() {
+        let engine = match Engine::new() {
+            Ok(e) => e,
+            Err(err) => {
+                assert!(std::env::var("CI").is_err(), "PDFium required in CI: {err}");
+                return;
+            }
+        };
+        let path = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../corpus/hello.pdf");
+        let doc = engine.open(&path).unwrap();
+        let (tx, rx) = mpsc::channel();
+        engine
+            .send(WorkerCmd::LoadedPtr {
+                id: doc.id(),
+                reply: tx,
+            })
+            .unwrap();
+        let loaded = rx.recv().unwrap().expect("document not bound");
+        assert_eq!(loaded, doc.original_ptr() as usize);
+        // Still renders from the shared buffer.
+        assert!(engine.render_page(doc.id(), 0, 1.0).is_ok());
     }
 }
