@@ -698,10 +698,6 @@ msgstr "PDF;Lector;Visor;"
 msgid "--measure opens the real libadwaita window (needs a display or xvfb-run), loads a multi-page PDF, waits until every visible page tile and every visible thumbnail has been painted, then prints startup time and peak RSS and exits non-zero if over the documented limits."
 msgstr "--measure abre la ventana real de libadwaita (hace falta una pantalla o xvfb-run), carga un PDF de varias páginas, espera a que se pinten todas las teselas visibles y las miniaturas visibles, imprime el tiempo de arranque y el RSS de pico y sale distinto de cero si se superan los límites."
 
-
-msgid "Enter PIN for token \"{token}\\"
-msgstr "Introduzca el PIN del token \"{token}\\"
-
 msgid "Enter PIN"
 msgstr "Introducir PIN"
 
