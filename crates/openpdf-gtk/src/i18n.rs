@@ -17,7 +17,7 @@ use std::sync::{Mutex, OnceLock};
 use openpdf_core::i18n::Catalog;
 use openpdf_core::{
     describe_signer_unavailable, detect_locale, init_i18n, set_locale, tr, tr_args, Error,
-    InvalidKind, SignedOp,
+    InvalidKind, SignedOp, TimestampErrorKind,
 };
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -120,8 +120,78 @@ pub fn format_core_error(err: &Error) -> String {
         Error::SignerUnavailable { reason } => describe_signer_unavailable(reason),
         Error::PinCancelled => tr("PIN entry was cancelled"),
         Error::SignCancelled => tr("Signing was cancelled"),
+        Error::Timestamp(kind) => format_timestamp_error(kind),
         _ => err.to_locale_string(),
     }
+}
+
+fn format_timestamp_error(kind: &TimestampErrorKind) -> String {
+    let detail = match kind {
+        TimestampErrorKind::Network { detail } => tr_args(
+            "could not reach the timestamp server: {detail}",
+            &[("detail", &timestamp_network_host(detail))],
+        ),
+        other => other.to_locale_string(),
+    };
+    tr_args("timestamp: {detail}", &[("detail", &detail)])
+}
+
+/// Host (and port, if present) from a TSA `Network` detail. Never returns
+/// URL userinfo — credentials in `https://user:pass@host/...` or a bare
+/// `user:pass@host` must not reach the toast.
+fn timestamp_network_host(detail: &str) -> String {
+    if let Some(host) = first_http_url_host(detail) {
+        return host;
+    }
+    if let Some(host) = host_after_userinfo(detail) {
+        return host;
+    }
+    detail.to_string()
+}
+
+fn first_http_url_host(s: &str) -> Option<String> {
+    for scheme in ["https://", "http://"] {
+        let mut rest = s;
+        while let Some(idx) = rest.find(scheme) {
+            if let Some(host) = host_of_http_url(&rest[idx..]) {
+                return Some(host);
+            }
+            rest = &rest[idx + scheme.len()..];
+        }
+    }
+    None
+}
+
+fn host_of_http_url(url: &str) -> Option<String> {
+    let rest = url
+        .strip_prefix("https://")
+        .or_else(|| url.strip_prefix("http://"))?;
+    let authority = rest.split(['/', '?', '#', ' ', '\t', '\n', '\r']).next()?;
+    if authority.is_empty() {
+        return None;
+    }
+    let hostport = match authority.rfind('@') {
+        Some(i) => &authority[i + 1..],
+        None => authority,
+    };
+    if hostport.is_empty() {
+        return None;
+    }
+    Some(hostport.to_string())
+}
+
+fn host_after_userinfo(s: &str) -> Option<String> {
+    let at = s.find('@')?;
+    let before = &s[..at];
+    if !before.contains(':') {
+        return None;
+    }
+    let after = &s[at + 1..];
+    let host = after.split(['/', '?', '#', ' ', '\t', '\n', '\r']).next()?;
+    if host.is_empty() {
+        return None;
+    }
+    Some(host.to_string())
 }
 
 fn format_invalid_kind(kind: &InvalidKind) -> String {
@@ -256,5 +326,58 @@ mod tests {
             "Signing was cancelled"
         );
         assert!(Error::SignCancelled.is_silent_cancel());
+    }
+
+    #[test]
+    fn timestamp_network_shows_only_host() {
+        let _g = openpdf_core::test_support::locale_test_guard();
+        set_locale("en");
+        let user = "alice";
+        let secret = "ffi-secret-NEVER-ECHO-9f3a"; // test-only placeholder, not a real secret (allowlisted in .gitleaks.toml, #27)
+        let cases = [
+            format!("https://{user}:{secret}@tsa.example.com/rfc3161"),
+            format!("http://{user}:{secret}@tsa.example.com:8080/tsa"),
+            format!("https://{user}:{secret}@tsa.example.com/rfc3161: Connection failed"),
+            format!("{user}:{secret}@tsa.example.com/rfc3161"),
+        ];
+        for detail in cases {
+            let err = Error::Timestamp(TimestampErrorKind::Network {
+                detail: detail.clone(),
+            });
+            let msg = format_core_error(&err);
+            assert!(
+                !msg.contains(user),
+                "Network toast leaked userinfo user in {msg:?} from {detail}"
+            );
+            assert!(
+                !msg.contains(secret),
+                "Network toast leaked URL credentials in {msg:?} from {detail}"
+            );
+            assert!(
+                !msg.contains("://"),
+                "Network toast must show the host, not the URL: {msg:?}"
+            );
+            assert!(
+                msg.contains("tsa.example.com"),
+                "Network toast must show the host: {msg:?}"
+            );
+            assert!(
+                msg.contains("could not reach the timestamp server"),
+                "unexpected message: {msg}"
+            );
+        }
+
+        let plain = format_core_error(&Error::Timestamp(TimestampErrorKind::Network {
+            detail: "connection refused".into(),
+        }));
+        assert!(plain.contains("connection refused"), "{plain}");
+        assert!(!plain.contains("://"), "{plain}");
+
+        let missing = format_core_error(&Error::Timestamp(TimestampErrorKind::UrlMissing));
+        assert!(
+            missing.contains("timestamp"),
+            "structured Timestamp must be formatted, got {missing}"
+        );
+        assert!(!missing.contains("://"), "{missing}");
     }
 }

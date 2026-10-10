@@ -41,10 +41,81 @@ pub enum Error {
     SignLevelUnsupported {
         level: crate::signer::PadesLevel,
     },
+    /// PAdES B-T: the RFC 3161 timestamp could not be obtained or did not
+    /// validate. The signature is never downgraded to B-B.
+    Timestamp(TimestampErrorKind),
     /// The PDF already has a signature; `op` would invalidate it.
     Signed {
         op: SignedOp,
     },
+}
+
+/// Why a PAdES B-T timestamp was refused. Match this instead of parsing [`Display`].
+#[derive(Clone, Debug, PartialEq, Eq)]
+#[non_exhaustive]
+pub enum TimestampErrorKind {
+    /// B-T was requested but no TSA URL is configured (there is no default).
+    UrlMissing,
+    /// The TSA URL is not an `http://` or `https://` URL.
+    BadUrl,
+    /// The TSA could not be reached (DNS, TLS, timeout, ...).
+    Network { detail: String },
+    /// The TSA answered with a non-success HTTP status.
+    Http { status: u16 },
+    /// The TSA answered, but did not grant the timestamp (PKIStatus).
+    Rejected { status: u8 },
+    /// The response or token is not valid RFC 3161 DER.
+    Malformed,
+    /// The token's nonce differs from the one we sent.
+    NonceMismatch,
+    /// The token's messageImprint is not the hash of our signature value.
+    ImprintMismatch,
+    /// The token's CMS signature does not verify.
+    BadSignature,
+    /// The ESS signing-certificate attribute does not bind the TSA certificate.
+    SigningCertMismatch,
+    /// The TSA certificate does not chain to a trusted root, is not valid at
+    /// the timestamp time, or lacks the timeStamping key purpose.
+    UntrustedCert,
+}
+
+impl TimestampErrorKind {
+    pub fn to_locale_string(&self) -> String {
+        match self {
+            TimestampErrorKind::UrlMissing => {
+                tr("PAdES-B-T needs a timestamp server (TSA) URL; none is configured")
+            }
+            TimestampErrorKind::BadUrl => {
+                tr("the timestamp server URL must start with http:// or https://")
+            }
+            TimestampErrorKind::Network { detail } => tr_args(
+                "could not reach the timestamp server: {detail}",
+                &[("detail", detail)],
+            ),
+            TimestampErrorKind::Http { status } => tr_args(
+                "the timestamp server answered HTTP {status}",
+                &[("status", &status.to_string())],
+            ),
+            TimestampErrorKind::Rejected { status } => tr_args(
+                "the timestamp server refused the request (status {status})",
+                &[("status", &status.to_string())],
+            ),
+            TimestampErrorKind::Malformed => tr("the timestamp server sent a malformed response"),
+            TimestampErrorKind::NonceMismatch => {
+                tr("the timestamp does not answer our request (nonce mismatch)")
+            }
+            TimestampErrorKind::ImprintMismatch => {
+                tr("the timestamp does not cover this signature (hash mismatch)")
+            }
+            TimestampErrorKind::BadSignature => tr("the timestamp signature is not valid"),
+            TimestampErrorKind::SigningCertMismatch => {
+                tr("the timestamp is not bound to the TSA certificate (ESS signing-certificate)")
+            }
+            TimestampErrorKind::UntrustedCert => {
+                tr("the timestamp server certificate is not trusted")
+            }
+        }
+    }
 }
 
 /// Why [`Error::SignerUnavailable`] fired. Match this; do not parse [`Display`].
@@ -148,6 +219,10 @@ impl Error {
             Error::SignLevelUnsupported { level } => tr_args(
                 "{level} signatures are not supported yet",
                 &[("level", level.label())],
+            ),
+            Error::Timestamp(kind) => tr_args(
+                "timestamp: {detail}",
+                &[("detail", &kind.to_locale_string())],
             ),
             Error::Sign(m) => tr_args("sign: {detail}", &[("detail", &tr(m))]),
             Error::SignerUnavailable { reason } => describe_signer_unavailable(reason),
