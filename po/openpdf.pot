@@ -729,3 +729,15 @@ msgstr ""
 
 msgid "Could not load the PKCS#11 module"
 msgstr ""
+
+msgid "Signing…"
+msgstr ""
+
+msgid "Signing failed"
+msgstr ""
+
+msgid "Verification failed"
+msgstr ""
+
+msgid "PIN must be requested off the GTK thread"
+msgstr ""

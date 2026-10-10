@@ -9,8 +9,10 @@
 
 use std::cell::Cell;
 use std::rc::Rc;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::mpsc::{self, Sender};
-use std::sync::Mutex;
+use std::sync::{Arc, Mutex};
+use std::time::{Duration, Instant};
 
 use adw::prelude::*;
 use gtk4 as gtk;
@@ -50,28 +52,42 @@ impl PinProvider for GtkPinProvider {
 }
 
 fn request_pin_blocking(prompt: &str, warning: Option<&str>) -> Result<Zeroizing<String>> {
-    if !gtk::is_initialized() {
+    if !gtk::is_initialized() || gtk::gdk::Display::default().is_none() {
         return Err(Error::PinRequired);
     }
-    let (tx, rx) = mpsc::channel();
-    let prompt = prompt.to_string();
-    let launch = {
-        let tx = tx.clone();
-        let warning = warning.map(str::to_string);
-        move || present_pin_dialog(&prompt, warning.as_deref(), tx)
-    };
     let ctx = gtk::glib::MainContext::default();
+    // Signing runs on a worker. Nested `iteration` on the GTK thread would
+    // freeze the UI; refuse instead of re-entering the main loop.
     if ctx.is_owner() {
-        launch();
-        loop {
-            if let Ok(result) = rx.try_recv() {
-                return result;
-            }
-            ctx.iteration(true);
-        }
+        return Err(Error::Sign(
+            "PIN must be requested off the GTK thread".into(),
+        ));
     }
-    ctx.invoke(launch);
-    rx.recv().unwrap_or_else(|_| Err(Error::PinCancelled))
+    let (tx, rx) = mpsc::channel();
+    let shown = Arc::new(AtomicBool::new(false));
+    let flag = shown.clone();
+    let prompt = prompt.to_string();
+    let warning = warning.map(str::to_string);
+    ctx.invoke(move || {
+        flag.store(true, Ordering::SeqCst);
+        present_pin_dialog(&prompt, warning.as_deref(), tx);
+    });
+    // Wait until the GTK thread actually runs the invoke. Unit tests and
+    // shutdown have no loop, so do not `recv` forever.
+    let deadline = Instant::now() + Duration::from_millis(250);
+    while Instant::now() < deadline {
+        if shown.load(Ordering::SeqCst) {
+            return rx.recv().unwrap_or_else(|_| Err(Error::PinCancelled));
+        }
+        if let Ok(result) = rx.try_recv() {
+            return result;
+        }
+        std::thread::sleep(Duration::from_millis(5));
+    }
+    if shown.load(Ordering::SeqCst) {
+        return rx.recv().unwrap_or_else(|_| Err(Error::PinCancelled));
+    }
+    Err(Error::PinRequired)
 }
 
 fn take_pin(entry: &gtk::PasswordEntry) -> Zeroizing<String> {
@@ -89,11 +105,7 @@ fn submit_pin(send: &Rc<impl Fn(Result<Zeroizing<String>>)>, entry: &gtk::Passwo
     }
 }
 
-fn present_pin_dialog(
-    prompt: &str,
-    warning: Option<&str>,
-    tx: Sender<Result<Zeroizing<String>>>,
-) {
+fn present_pin_dialog(prompt: &str, warning: Option<&str>, tx: Sender<Result<Zeroizing<String>>>) {
     let sent = Rc::new(Cell::new(false));
     let send = Rc::new(move |value: Result<Zeroizing<String>>| {
         if !sent.replace(true) {
@@ -216,5 +228,44 @@ mod tests {
         let pin = take_pin(&entry);
         assert_eq!(pin.as_str(), "s3cret");
         assert_eq!(entry.text().as_str(), "");
+    }
+
+    #[test]
+    fn fake_signer_requests_pin_from_a_worker_thread() {
+        use openpdf_core::{SignRequest, Signer};
+        use std::time::Duration;
+
+        struct Fake(GtkPinProvider);
+        impl Signer for Fake {
+            fn list_certificates(&self) -> Result<Vec<openpdf_core::CertificateInfo>> {
+                Ok(Vec::new())
+            }
+            fn sign(&self, _pdf: &[u8], _request: &SignRequest) -> Result<Vec<u8>> {
+                let pin = self.0.request_pin("test-token")?;
+                Ok(pin.as_str().as_bytes().to_vec())
+            }
+            fn verify(&self, _pdf: &[u8]) -> Result<Vec<openpdf_core::SignatureInfo>> {
+                Ok(Vec::new())
+            }
+        }
+
+        let (tx, rx) = mpsc::channel();
+        std::thread::spawn(move || {
+            let result = Fake(GtkPinProvider).sign(
+                b"%PDF",
+                &SignRequest {
+                    cert_id: "test".into(),
+                    ..Default::default()
+                },
+            );
+            let _ = tx.send(result);
+        });
+        let result = rx
+            .recv_timeout(Duration::from_secs(2))
+            .expect("PinProvider on a worker must not deadlock");
+        assert!(
+            matches!(result, Err(Error::Sign(_)) | Err(Error::PinRequired)),
+            "worker PIN without a GTK loop must fail fast, got {result:?}"
+        );
     }
 }
