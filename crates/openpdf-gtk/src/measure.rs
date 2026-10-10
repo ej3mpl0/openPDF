@@ -821,12 +821,12 @@ const GL_RENDERER: u32 = 0x1F01;
 
 #[link(name = "epoxy")]
 extern "C" {
-    fn glGetString(name: u32) -> *const std::ffi::c_uchar;
+    fn epoxy_glGetString(name: u32) -> *const std::ffi::c_uchar;
 }
 
 fn gl_renderer_string() -> Option<String> {
     unsafe {
-        let ptr = glGetString(GL_RENDERER);
+        let ptr = epoxy_glGetString(GL_RENDERER);
         if ptr.is_null() {
             return None;
         }
