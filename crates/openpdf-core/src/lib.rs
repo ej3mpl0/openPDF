@@ -50,7 +50,8 @@ pub use render::{
     Tile, TileCache, TileEvent, TileKey, TileRequest, DEFAULT_CACHE_BYTES, TILE_SIZE,
 };
 pub use signer::{
-    describe_certificate, format_verify_result, format_verify_results, pin_prompt_text,
-    usage_label, CertificateInfo, CertificateUsage, CertificateValidity, SignRequest,
-    SignatureInfo, Signer, Verifier, VisibleAppearance,
+    certificate_common_name, describe_certificate, describe_certificate_detail,
+    format_verify_result, format_verify_results, pin_prompt_text, usage_label, CertificateInfo,
+    CertificateUsage, CertificateValidity, SignRequest, SignatureInfo, Signer, Verifier,
+    VisibleAppearance,
 };
