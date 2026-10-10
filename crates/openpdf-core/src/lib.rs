@@ -39,7 +39,7 @@ pub mod test_support;
 pub use command::{Command, History};
 pub use compare::{compare_pdfs, CompareReport, PageDiff};
 pub use convert::{blank_document, images_to_pdf, pdf_to_rasters, raster_to_png};
-pub use document::{Document, DocumentId, PageInfo};
+pub use document::{DocMemory, Document, DocumentId, PageInfo};
 pub use error::{Error, InvalidKind, Result, SignedOp};
 pub use i18n::{
     available_locales, current_locale, detect_locale, init as init_i18n, set_locale, tr, tr_args,

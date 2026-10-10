@@ -24,6 +24,7 @@ fn help_documents_origin_and_core_keys() {
         "first_ready_x",
         "first_ready_y",
         "visible_tiles_ms",
+        "ours_doc_kb",
     ] {
         assert!(s.contains(key), "help missing {key}: {s}");
     }

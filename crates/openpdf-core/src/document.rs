@@ -330,6 +330,20 @@ impl Document {
         }
     }
 
+    /// Cheap memory accounting for this document: O(objects), no stream
+    /// clone or decode. The only allocation is the explicit walk stack (a
+    /// small `Vec`, a few KiB, capped); see [`DocMemory`].
+    pub fn memory_usage(&self) -> DocMemory {
+        let objects = &self.inner.objects;
+        let est = objects.len() * (BTREE_ENTRY_OVERHEAD + std::mem::size_of::<ObjectId>())
+            + objects_heap(objects.values());
+        DocMemory {
+            file_bytes: self.original.len() as u64,
+            object_tree_estimate: est as u64,
+            object_count: self.inner.objects.len() as u64,
+        }
+    }
+
     pub(crate) fn original_bytes(&self) -> &[u8] {
         &self.original
     }
@@ -511,5 +525,172 @@ mod tests {
         assert_eq!(doc.page_count(), 2);
         doc.move_page(0, 2).unwrap();
         assert_eq!(doc.page_count(), 2);
+    }
+}
+
+/// Memory used by an open [`Document`], in bytes. Returned by
+/// [`Document::memory_usage`].
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[non_exhaustive]
+pub struct DocMemory {
+    /// Length of the original file buffer the document keeps. Counted once
+    /// here. Note: on this branch `Engine::bind` hands PDFium its own copy of
+    /// these bytes, so while bound the process holds them twice; that copy is
+    /// PDFium's and is not included.
+    pub file_bytes: u64,
+    /// **Lower bound** on the lopdf object tree's heap. Counts, using `len()`
+    /// only (never `capacity()`): each object's inline size, name/string and
+    /// (still encoded) stream content lengths, a minimal per-entry cost for the
+    /// top-level `BTreeMap` and for each `Dictionary` (an `IndexMap`), and the
+    /// inline key `Vec`. Spare capacity, allocator headers/slack, B-tree node
+    /// padding and hash-table load-factor slack are not counted, so the real
+    /// heap is at least this, usually more.
+    pub object_tree_estimate: u64,
+    /// Number of indirect objects in the tree.
+    pub object_count: u64,
+}
+
+impl DocMemory {
+    /// Builds a value (e.g. for a UI or tests); fields stay public to read.
+    pub fn new(file_bytes: u64, object_tree_estimate: u64, object_count: u64) -> Self {
+        Self {
+            file_bytes,
+            object_tree_estimate,
+            object_count,
+        }
+    }
+
+    /// `file_bytes + object_tree_estimate`.
+    pub fn total(&self) -> u64 {
+        self.file_bytes + self.object_tree_estimate
+    }
+}
+
+/// Minimal per-entry cost in `Document::objects` (`BTreeMap<ObjectId, Object>`)
+/// beyond key and value: an amortised share of node bookkeeping (parent
+/// pointer, lengths, child edges). Assumption, not measured; kept low.
+const BTREE_ENTRY_OVERHEAD: usize = 16;
+
+/// Minimal per-entry cost of a lopdf `Dictionary` (`IndexMap<Vec<u8>, Object>`)
+/// beyond the key bytes and the `Object`: the entries `Vec` stores a cached
+/// hash (`usize`) and the key `Vec` header next to the value, and the hash
+/// index stores one `usize` slot plus one control byte. Load-factor slack in
+/// the index and spare `Vec` capacity are not counted (lower bound).
+const INDEXMAP_ENTRY_OVERHEAD: usize = std::mem::size_of::<usize>()
+    + std::mem::size_of::<Vec<u8>>()
+    + std::mem::size_of::<usize>()
+    + 1;
+
+/// Lower-bound heap of a set of top-level objects, walked iteratively with an
+/// explicit stack (no recursion, so arbitrarily deep nesting cannot overflow
+/// the thread stack). `Object::Reference`s are counted as leaves and never
+/// followed, so cycles through indirect objects are impossible. The only
+/// allocation is the stack `Vec`, which grows with the widest pending level.
+fn objects_heap<'a>(roots: impl Iterator<Item = &'a Object>) -> usize {
+    let mut total = 0usize;
+    let mut stack: Vec<&Object> = Vec::new();
+    for root in roots {
+        stack.push(root);
+        while let Some(obj) = stack.pop() {
+            total += std::mem::size_of::<Object>();
+            let dict = match obj {
+                Object::Name(n) => {
+                    total += n.len();
+                    None
+                }
+                Object::String(s, _) => {
+                    total += s.len();
+                    None
+                }
+                Object::Array(a) => {
+                    stack.extend(a.iter());
+                    None
+                }
+                Object::Dictionary(d) => Some(d),
+                Object::Stream(st) => {
+                    total += st.content.len();
+                    Some(&st.dict)
+                }
+                _ => None,
+            };
+            if let Some(d) = dict {
+                for (k, v) in d.iter() {
+                    total += INDEXMAP_ENTRY_OVERHEAD + k.len();
+                    stack.push(v);
+                }
+            }
+        }
+    }
+    total
+}
+
+#[cfg(test)]
+mod memory_tests {
+    use super::*;
+    use crate::test_support::corpus;
+
+    #[test]
+    fn corpus_memory_is_sane() {
+        for name in ["hello.pdf", "two_page.pdf", "outline.pdf"] {
+            let bytes = std::fs::read(corpus(name)).unwrap();
+            let len = bytes.len() as u64;
+            let doc = Document::from_bytes(bytes, None).unwrap();
+            let m = doc.memory_usage();
+            assert_eq!(m.file_bytes, len, "{name}");
+            let streams: u64 = doc
+                .inner
+                .objects
+                .values()
+                .filter_map(|o| o.as_stream().ok())
+                .map(|s| s.content.len() as u64)
+                .sum();
+            assert!(m.object_tree_estimate >= streams, "{name}: {m:?}");
+            assert!(m.object_count > 0);
+            // Object tree is never tiny, and not wildly larger than the file.
+            assert!(
+                m.object_tree_estimate >= m.object_count * 16,
+                "{name}: {m:?}"
+            );
+            assert!(
+                m.object_tree_estimate <= len * 50 + 64 * 1024,
+                "{name}: {m:?}"
+            );
+        }
+    }
+
+    /// Builds `depth` nested arrays or dicts without recursion.
+    fn deep(depth: usize, dicts: bool) -> Object {
+        let mut o = Object::Null;
+        for _ in 0..depth {
+            o = if dicts {
+                let mut d = Dictionary::new();
+                d.set("K", o);
+                Object::Dictionary(d)
+            } else {
+                Object::Array(vec![o])
+            };
+        }
+        o
+    }
+
+    #[test]
+    fn deep_nesting_does_not_overflow_small_stack() {
+        for dicts in [false, true] {
+            let base = crate::blank_document(1).unwrap();
+            let mut inner = base.inner.clone();
+            inner.add_object(deep(100_000, dicts));
+            let doc = Document::from_lopdf_inner(inner, Vec::new(), None).unwrap();
+            let m = std::thread::scope(|sc| {
+                std::thread::Builder::new()
+                    .stack_size(256 * 1024)
+                    .spawn_scoped(sc, || doc.memory_usage())
+                    .unwrap()
+                    .join()
+                    .expect("memory_usage overflowed a 256 KiB stack")
+            });
+            assert!(m.object_tree_estimate >= 100_000 * std::mem::size_of::<Object>() as u64);
+            // lopdf's Drop is recursive; leak instead of overflowing the test thread.
+            std::mem::forget(doc);
+        }
     }
 }
