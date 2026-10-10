@@ -852,7 +852,7 @@ fn rgba_to_cairo_argb(rgba: &[u8], width: u32, height: u32) -> Option<(Vec<u8>, 
     Some((data, stride))
 }
 
-fn paint_rgba(
+pub(crate) fn paint_rgba(
     cr: &cairo::Context,
     x: f64,
     y: f64,
@@ -894,5 +894,84 @@ fn run_search(view: &DocumentView, query: &str) {
             }
         }
         Err(_) => view.page_label.set_text(t(view.lang, "No matches")),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use openpdf_core::Engine;
+
+    /// UI placement only: draw each tile through `paint_rgba` at
+    /// `tx * tile_size`, `ty * tile_size` and compare to one full-page
+    /// `paint_rgba`. Core `tile_rect` / `tile_grid` / `quantize_zoom` are
+    /// not used or changed here.
+    #[test]
+    fn cairo_tile_placement_matches_full_render_at_147_percent() {
+        let Ok(engine) = Engine::new() else {
+            eprintln!("cairo placement: Engine::new skipped (no PDFium)");
+            return;
+        };
+        let path = crate::measure::write_measure_pdf(2).expect("measure PDF");
+        let session = crate::session::Session::open(&engine, &path).expect("open measure PDF");
+        let id = session.doc_id();
+        let zoom = 1.47f32;
+        let full = engine
+            .render_page(id, 0, zoom)
+            .expect("full page render at 147%");
+        let tile = DEFAULT_TILE_SIZE;
+        let (cols, rows) = crate::tiles::tile_grid(full.width, full.height, tile);
+        assert!(
+            cols >= 2 && rows >= 2,
+            "147% page must span several tiles, got {cols}x{rows}"
+        );
+
+        let w = full.width as i32;
+        let h = full.height as i32;
+        let full_surf =
+            cairo::ImageSurface::create(cairo::Format::ARgb32, w, h).expect("full cairo surface");
+        {
+            let cr = cairo::Context::new(&full_surf).unwrap();
+            paint_rgba(&cr, 0.0, 0.0, full.width, full.height, &full.rgba, false);
+        }
+
+        let tile_surf =
+            cairo::ImageSurface::create(cairo::Format::ARgb32, w, h).expect("tile cairo surface");
+        {
+            let cr = cairo::Context::new(&tile_surf).unwrap();
+            cr.set_source_rgb(1.0, 1.0, 1.0);
+            let _ = cr.paint();
+            for ty in 0..rows {
+                for tx in 0..cols {
+                    let key = openpdf_core::TileKey::new(id, 0, zoom, tx, ty);
+                    let rendered = engine.render_tile_blocking(key).expect("tile at 147%");
+                    // Same formula as paint_pages: page origin + tx/ty * tile_size.
+                    let x = f64::from(tx * tile);
+                    let y = f64::from(ty * tile);
+                    paint_rgba(
+                        &cr,
+                        x,
+                        y,
+                        rendered.width,
+                        rendered.height,
+                        &rendered.rgba,
+                        false,
+                    );
+                }
+            }
+        }
+
+        let _ = std::fs::remove_file(&path);
+        full_surf.flush();
+        tile_surf.flush();
+        let full_bytes = full_surf.take_data().expect("full cairo data").to_vec();
+        let tile_bytes = tile_surf.take_data().expect("tile cairo data").to_vec();
+        let mismatch = crate::tiles::pixel_mismatch_ratio(&full_bytes, &tile_bytes, 12);
+        assert!(
+            mismatch < 0.01,
+            "cairo tile placement at 147% diverges from full render ({:.2}% pixels, max Δ {})",
+            mismatch * 100.0,
+            crate::tiles::max_channel_delta(&full_bytes, &tile_bytes)
+        );
     }
 }
