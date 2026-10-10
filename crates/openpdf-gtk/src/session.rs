@@ -71,6 +71,52 @@ impl Session {
         doc.is_signed() || doc.is_read_only()
     }
 
+    pub fn is_signed(&self) -> bool {
+        self.doc.borrow().is_signed()
+    }
+
+    pub fn is_encrypted(&self) -> bool {
+        self.doc.borrow().is_encrypted()
+    }
+
+    /// Run a core tool that returns a replacement document, then rebind the engine.
+    pub fn apply_tool(
+        &self,
+        f: impl FnOnce(&Document) -> openpdf_core::Result<Document>,
+    ) -> Result<(), BackendError> {
+        let old_id = self.doc.borrow().id();
+        let new = {
+            let doc = self.doc.borrow();
+            f(&doc).map_err(core_err)?
+        };
+        self.engine.bind(&new).map_err(core_err)?;
+        let _ = self.engine.close(old_id);
+        *self.doc.borrow_mut() = new;
+        Ok(())
+    }
+
+    pub fn with_document<T>(
+        &self,
+        f: impl FnOnce(&Document) -> openpdf_core::Result<T>,
+    ) -> Result<T, BackendError> {
+        let doc = self.doc.borrow();
+        f(&doc).map_err(core_err)
+    }
+
+    pub fn save(&self) -> Result<(), BackendError> {
+        let Some(path) = &self.path else {
+            return Err(BackendError::Invalid(openpdf_core::tr(
+                "Placeholder has no PDF bytes.",
+            )));
+        };
+        self.save_to(path)
+    }
+
+    pub fn save_to(&self, path: &Path) -> Result<(), BackendError> {
+        let bytes = self.doc.borrow().to_bytes().map_err(core_err)?;
+        std::fs::write(path, bytes).map_err(BackendError::Io)
+    }
+
     pub fn is_dirty(&self) -> bool {
         self.doc.borrow().is_dirty()
     }
@@ -357,6 +403,53 @@ impl Opened {
         match self {
             Self::Core(s) => s.is_locked(),
             Self::Mock(s) => s.is_locked(),
+        }
+    }
+
+    pub fn is_signed(&self) -> bool {
+        match self {
+            Self::Core(s) => s.is_signed(),
+            Self::Mock(s) => s.is_locked(),
+        }
+    }
+
+    pub fn is_encrypted(&self) -> bool {
+        match self {
+            Self::Core(s) => s.is_encrypted(),
+            Self::Mock(_) => false,
+        }
+    }
+
+    pub fn apply_tool(
+        &self,
+        f: impl FnOnce(&Document) -> openpdf_core::Result<Document>,
+    ) -> Result<(), BackendError> {
+        match self {
+            Self::Core(s) => s.apply_tool(f),
+            Self::Mock(_) => Err(BackendError::Invalid(openpdf_core::tr(
+                "Page edits need a real document.",
+            ))),
+        }
+    }
+
+    pub fn with_document<T>(
+        &self,
+        f: impl FnOnce(&Document) -> openpdf_core::Result<T>,
+    ) -> Result<T, BackendError> {
+        match self {
+            Self::Core(s) => s.with_document(f),
+            Self::Mock(_) => Err(BackendError::Invalid(openpdf_core::tr(
+                "Page edits need a real document.",
+            ))),
+        }
+    }
+
+    pub fn save(&self) -> Result<(), BackendError> {
+        match self {
+            Self::Core(s) => s.save(),
+            Self::Mock(_) => Err(BackendError::Invalid(openpdf_core::tr(
+                "Placeholder has no PDF bytes.",
+            ))),
         }
     }
 

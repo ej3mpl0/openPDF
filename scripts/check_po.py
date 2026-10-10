@@ -28,6 +28,9 @@ META_RE = re.compile(
 META_P_RE = re.compile(r"<p>\s*([^<]+?)\s*</p>", re.I | re.S)
 
 
+VALID_ESCAPES = {"n": "\n", "t": "\t", "r": "\r", '"': '"', "\\": "\\"}
+
+
 def unescape(s: str) -> str:
     out = []
     it = iter(s)
@@ -36,31 +39,74 @@ def unescape(s: str) -> str:
             out.append(c)
             continue
         n = next(it, "")
-        out.append({"n": "\n", "t": "\t", "r": "\r", '"': '"', "\\": "\\"}.get(n, "\\" + n))
+        out.append(VALID_ESCAPES.get(n, "\\" + n))
     return "".join(out)
 
 
+def escape_errors(quoted_inner: str, *, path: Path, lineno: int) -> list[str]:
+    """Flag dangling backslashes and unknown escape sequences in a po string."""
+    errors: list[str] = []
+    i = 0
+    while i < len(quoted_inner):
+        if quoted_inner[i] != "\\":
+            i += 1
+            continue
+        if i + 1 >= len(quoted_inner):
+            errors.append(f"{path}:{lineno}: dangling backslash in quoted string")
+            break
+        nxt = quoted_inner[i + 1]
+        if nxt not in VALID_ESCAPES:
+            errors.append(
+                f"{path}:{lineno}: invalid escape \\{nxt} in quoted string"
+            )
+        i += 2
+    return errors
+
+
 def parse_po(path: Path) -> dict[str, str]:
+    entries, errors = parse_po_checked(path)
+    if errors:
+        raise ValueError("\n".join(errors))
+    return entries
+
+
+def parse_po_checked(path: Path) -> tuple[dict[str, str], list[str]]:
     entries: dict[str, str] = {}
+    first_line: dict[str, int] = {}
+    errors: list[str] = []
     msgid = ""
     msgstr = ""
     field = None
+    msgid_line = 0
 
     def flush() -> None:
-        nonlocal msgid, msgstr, field
+        nonlocal msgid, msgstr, field, msgid_line
         if msgid:
+            if msgid.endswith("\\"):
+                errors.append(
+                    f"{path}:{msgid_line}: msgid ends with a backslash "
+                    f"(broken escape) {msgid!r}"
+                )
+            if msgid in entries:
+                errors.append(
+                    f"{path}:{msgid_line}: duplicate msgid {msgid!r} "
+                    f"(first at line {first_line[msgid]})"
+                )
+            else:
+                first_line[msgid] = msgid_line
             entries[msgid] = msgstr
         msgid = ""
         msgstr = ""
         field = None
+        msgid_line = 0
 
-    def take_quoted(line: str) -> str:
+    def take_quoted(line: str, lineno: int) -> str:
         raw = line.strip()
-        if raw.startswith('"') and raw.endswith('"') and len(raw) >= 2:
-            return unescape(raw[1:-1])
-        return unescape(raw.strip('"'))
+        inner = raw[1:-1] if raw.startswith('"') and raw.endswith('"') and len(raw) >= 2 else raw.strip('"')
+        errors.extend(escape_errors(inner, path=path, lineno=lineno))
+        return unescape(inner)
 
-    for raw in path.read_text(encoding="utf-8").splitlines():
+    for lineno, raw in enumerate(path.read_text(encoding="utf-8").splitlines(), 1):
         line = raw.strip()
         if not line or line.startswith("#"):
             flush()
@@ -68,21 +114,22 @@ def parse_po(path: Path) -> dict[str, str]:
         if line.startswith("msgid "):
             flush()
             field = "id"
-            msgid = take_quoted(line[6:])
+            msgid_line = lineno
+            msgid = take_quoted(line[6:], lineno)
         elif line.startswith("msgstr "):
             field = "str"
-            msgstr = take_quoted(line[7:])
+            msgstr = take_quoted(line[7:], lineno)
         elif line.startswith("msgctxt "):
             flush()
         elif line.startswith('"'):
-            chunk = take_quoted(line)
+            chunk = take_quoted(line, lineno)
             if field == "id":
                 msgid += chunk
             elif field == "str":
                 msgstr += chunk
     flush()
     entries.pop("", None)
-    return entries
+    return entries, errors
 
 
 def rust_msgids(text: str) -> set[str]:
@@ -177,8 +224,11 @@ def extract_from(path: Path) -> set[str]:
 
 
 def main() -> int:
-    pot = parse_po(POT)
-    es = parse_po(ES)
+    pot, pot_errs = parse_po_checked(POT)
+    es, es_errs = parse_po_checked(ES)
+    errors: list[str] = []
+    errors.extend(pot_errs)
+    errors.extend(es_errs)
     source: dict[str, list[str]] = {}
     missing_files = []
     for path in listed_files():
@@ -188,7 +238,6 @@ def main() -> int:
         for msgid in extract_from(path):
             source.setdefault(msgid, []).append(str(path.relative_to(ROOT)))
 
-    errors: list[str] = []
     if missing_files:
         errors.append("POTFILES.in lists missing files:\n  " + "\n  ".join(missing_files))
 

@@ -26,7 +26,9 @@ jobs:
           sudo apt-get update
           sudo apt-get install -y softhsm2
       - name: Check po catalogs
-        run: python3 scripts/check_po.py
+        run: |
+          python3 scripts/test_check_po.py
+          python3 scripts/check_po.py
       - run: cargo build --workspace --release
         env:
           OPENPDF_PDFIUM: /usr/local/lib/libpdfium.so

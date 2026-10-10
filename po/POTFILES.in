@@ -19,6 +19,7 @@ crates/openpdf-gtk/src/ui/about.rs
 crates/openpdf-gtk/src/ui/home.rs
 crates/openpdf-gtk/src/ui/preferences.rs
 crates/openpdf-gtk/src/ui/sign.rs
+crates/openpdf-gtk/src/ui/tools.rs
 crates/openpdf-gtk/src/ui/viewer.rs
 crates/openpdf-gtk/src/ui/window.rs
 crates/openpdf-app/src/main.rs

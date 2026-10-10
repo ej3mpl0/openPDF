@@ -11,6 +11,15 @@ use crate::i18n::t;
 use crate::settings::Settings;
 use crate::Lang;
 
+use super::tools::Tool;
+
+pub enum HomeAction {
+    ViewSample,
+    Sign,
+    Comment,
+    Tool(Tool),
+}
+
 pub struct HomePage {
     pub root: gtk::Widget,
 }
@@ -20,7 +29,7 @@ pub fn build(
     on_open: impl Fn() + 'static,
     on_sample: impl Fn() + 'static,
     on_recent: impl Fn(PathBuf) + 'static,
-    on_pending: impl Fn(&str) + 'static,
+    on_action: impl Fn(HomeAction) + 'static,
 ) -> HomePage {
     let lang = settings.borrow().lang();
     let outer = gtk::Box::new(gtk::Orientation::Vertical, 0);
@@ -72,7 +81,7 @@ pub fn build(
     col.append(&hero);
 
     col.append(&recent_group(lang, &settings.borrow(), on_recent));
-    col.append(&tools_group(lang, on_pending));
+    col.append(&tools_group(lang, on_action));
 
     clamp.set_child(Some(&col));
     scroll.set_child(Some(&clamp));
@@ -116,35 +125,62 @@ fn recent_group(
     group
 }
 
-fn tools_group(lang: Lang, on_pending: impl Fn(&str) + 'static) -> adw::PreferencesGroup {
+fn tools_group(lang: Lang, on_action: impl Fn(HomeAction) + 'static) -> adw::PreferencesGroup {
     let group = adw::PreferencesGroup::new();
     group.set_title(t(lang, "Tools"));
-    let on_pending = Rc::new(on_pending);
+    let on_action = Rc::new(on_action);
 
-    let tools = [
-        (t(lang, "View"), None),
-        (t(lang, "Comment"), Some("Waiting on openpdf-core")),
-        (
-            t(lang, "Fill and sign"),
-            Some("Signing goes through openpdf-core’s Signer trait (openpdf-sign). This UI never links that crate."),
-        ),
-        (t(lang, "Organize pages"), Some("Waiting on openpdf-core")),
-        (t(lang, "Protect"), Some("Waiting on openpdf-core")),
-        (t(lang, "Edit"), Some("Waiting on openpdf-core")),
-    ];
-    for (title, pending) in tools {
-        let row = adw::ActionRow::new();
-        row.set_title(title);
-        row.set_activatable(true);
-        row.add_suffix(&gtk::Image::from_icon_name("go-next-symbolic"));
-        let cb = on_pending.clone();
-        if let Some(key) = pending {
-            row.set_subtitle(t(lang, "Waiting on openpdf-core"));
-            row.connect_activated(move |_| cb(t(lang, key)));
-        } else {
-            row.connect_activated(move |_| cb(t(lang, "Open sample document")));
-        }
-        group.add(&row);
+    add_action_row(&group, t(lang, "View"), None, {
+        let cb = on_action.clone();
+        move || cb(HomeAction::ViewSample)
+    });
+    add_action_row(
+        &group,
+        t(lang, "Comment"),
+        Some(t(lang, "Waiting on openpdf-core")),
+        {
+            let cb = on_action.clone();
+            move || cb(HomeAction::Comment)
+        },
+    );
+    add_action_row(&group, t(lang, "Fill and sign"), None, {
+        let cb = on_action.clone();
+        move || cb(HomeAction::Sign)
+    });
+    for tool in [
+        Tool::Insert,
+        Tool::Extract,
+        Tool::Crop,
+        Tool::Optimize,
+        Tool::Protect,
+        Tool::Unprotect,
+        Tool::Sanitize,
+        Tool::Watermark,
+        Tool::PageNumbers,
+        Tool::FromImages,
+        Tool::ToImages,
+    ] {
+        add_action_row(&group, tool.title(lang), None, {
+            let cb = on_action.clone();
+            move || cb(HomeAction::Tool(tool))
+        });
     }
     group
+}
+
+fn add_action_row(
+    group: &adw::PreferencesGroup,
+    title: &str,
+    subtitle: Option<&str>,
+    on_activate: impl Fn() + 'static,
+) {
+    let row = adw::ActionRow::new();
+    row.set_title(title);
+    if let Some(subtitle) = subtitle {
+        row.set_subtitle(subtitle);
+    }
+    row.set_activatable(true);
+    row.add_suffix(&gtk::Image::from_icon_name("go-next-symbolic"));
+    row.connect_activated(move |_| on_activate());
+    group.add(&row);
 }

@@ -656,3 +656,21 @@ msgstr ""
 
 msgid "PIN entry was cancelled"
 msgstr ""
+
+msgid "--measure opens the real libadwaita window (needs a display or xvfb-run), loads a multi-page PDF, waits for visible tiles and thumbnails, then prints startup time and peak RSS and exits non-zero if over the documented limits."
+msgstr ""
+
+msgid "Signing cancelled"
+msgstr ""
+
+msgid "Apply"
+msgstr ""
+
+msgid "Document updated."
+msgstr ""
+
+msgid "Open a PDF before using this tool."
+msgstr ""
+
+msgid "Choose a source PDF."
+msgstr ""

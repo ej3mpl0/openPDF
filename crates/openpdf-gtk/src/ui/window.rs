@@ -17,10 +17,11 @@ use libadwaita as adw;
 use openpdf_core::{Engine, Signer, Verifier};
 
 use super::about;
-use super::home;
+use super::home::{self, HomeAction};
 use super::preferences;
 use super::show_toast;
 use super::sign as sign_ui;
+use super::tools::{self, Tool};
 use super::viewer::{self, DocumentView};
 
 #[derive(Clone)]
@@ -203,22 +204,14 @@ impl OpenPdfWindow {
             },
             {
                 let ctx = ctx.clone();
-                move |msg| {
-                    if msg == t(ctx.settings.borrow().lang(), "Open sample document")
-                        || msg == t(crate::Lang::En, "Open sample document")
-                    {
-                        open_sample(&ctx);
-                    } else if msg.contains("Signer")
-                        || msg
-                            == t(
-                                ctx.settings.borrow().lang(),
-                                "Signing goes through openpdf-core’s Signer trait (openpdf-sign). This UI never links that crate.",
-                            )
-                    {
-                        start_sign(&ctx);
-                    } else {
-                        show_toast(&ctx.toast, msg);
-                    }
+                move |action| match action {
+                    HomeAction::ViewSample => open_sample(&ctx),
+                    HomeAction::Sign => start_sign(&ctx),
+                    HomeAction::Comment => show_toast(
+                        &ctx.toast,
+                        t(ctx.settings.borrow().lang(), "Waiting on openpdf-core"),
+                    ),
+                    HomeAction::Tool(tool) => start_tool(&ctx, tool),
                 }
             },
         );
@@ -246,10 +239,48 @@ fn app_menu(lang: crate::Lang) -> gio::Menu {
     let menu = gio::Menu::new();
     menu.append(Some(t(lang, "Open…")), Some("app.open"));
     menu.append(Some(t(lang, "Sign with certificate…")), Some("app.sign"));
+    let tools = gio::Menu::new();
+    for (tool, target) in tool_menu_items() {
+        tools.append(Some(tool.title(lang)), Some(target));
+    }
+    menu.append_submenu(Some(t(lang, "Tools")), &tools);
     menu.append(Some(t(lang, "Preferences")), Some("app.preferences"));
     menu.append(Some(t(lang, "About openPDF")), Some("app.about"));
     menu.append(Some(t(lang, "Quit")), Some("app.quit"));
     menu
+}
+
+fn tool_menu_items() -> &'static [(Tool, &'static str)] {
+    &[
+        (Tool::Insert, "app.tool::insert"),
+        (Tool::Extract, "app.tool::extract"),
+        (Tool::Crop, "app.tool::crop"),
+        (Tool::Optimize, "app.tool::optimize"),
+        (Tool::Protect, "app.tool::protect"),
+        (Tool::Unprotect, "app.tool::unprotect"),
+        (Tool::Sanitize, "app.tool::sanitize"),
+        (Tool::Watermark, "app.tool::watermark"),
+        (Tool::PageNumbers, "app.tool::number"),
+        (Tool::FromImages, "app.tool::from-images"),
+        (Tool::ToImages, "app.tool::to-images"),
+    ]
+}
+
+fn tool_from_id(id: &str) -> Option<Tool> {
+    Some(match id {
+        "insert" => Tool::Insert,
+        "extract" => Tool::Extract,
+        "crop" => Tool::Crop,
+        "optimize" => Tool::Optimize,
+        "protect" => Tool::Protect,
+        "unprotect" => Tool::Unprotect,
+        "sanitize" => Tool::Sanitize,
+        "watermark" => Tool::Watermark,
+        "number" => Tool::PageNumbers,
+        "from-images" => Tool::FromImages,
+        "to-images" => Tool::ToImages,
+        _ => return None,
+    })
 }
 
 fn install_actions(app: &adw::Application, ctx: &Ctx) {
@@ -266,6 +297,20 @@ fn install_actions(app: &adw::Application, ctx: &Ctx) {
         move |_, _| start_sign(&ctx)
     });
     app.add_action(&sign);
+
+    let tool = gio::SimpleAction::new("tool", Some(glib::VariantTy::STRING));
+    tool.connect_activate({
+        let ctx = ctx.clone();
+        move |_, param| {
+            let Some(id) = param.and_then(|p| p.str().map(str::to_string)) else {
+                return;
+            };
+            if let Some(tool) = tool_from_id(&id) {
+                start_tool(&ctx, tool);
+            }
+        }
+    });
+    app.add_action(&tool);
 
     let prefs = gio::SimpleAction::new("preferences", None);
     prefs.connect_activate({
@@ -451,6 +496,18 @@ fn maybe_show_verify(overlay: &adw::ToastOverlay, verifier: Arc<dyn Verifier>, o
             Err(std::sync::mpsc::TryRecvError::Disconnected) => glib::ControlFlow::Break,
         }
     });
+}
+
+fn start_tool(ctx: &Ctx, tool: Tool) {
+    let lang = ctx.settings.borrow().lang();
+    tools::present(
+        &ctx.window,
+        &ctx.toast,
+        lang,
+        ctx.current.borrow().clone(),
+        ensure_engine(ctx),
+        tool,
+    );
 }
 
 fn start_sign(ctx: &Ctx) {
