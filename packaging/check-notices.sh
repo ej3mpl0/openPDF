@@ -23,8 +23,10 @@ case "$kind" in
     id="${3:-$APP_ID}"
     ref="$(ostree --repo="$pkg" refs | grep -E "^app/${id}/" | head -n1)"
     [[ -n "$ref" ]] || die "no app/${id}/ ref in repo"
-    size="$(ostree --repo="$pkg" ls "$ref" "/files/$NOTICES_REL" | awk '{print $4}')" \
+    # Capture ostree's own output first so its failure, not awk's, raises the message.
+    entry="$(ostree --repo="$pkg" ls "$ref" "/files/$NOTICES_REL")" \
       || die "/app/$NOTICES_REL missing in $ref"
+    size="$(awk '{print $4}' <<<"$entry")"
     [[ "${size:-0}" -gt 0 ]] || die "/app/$NOTICES_REL empty"
     ok "/app/$NOTICES_REL ($ref, $size bytes)" ;;
   zip)

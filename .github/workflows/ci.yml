@@ -155,9 +155,6 @@ jobs:
           path: ci-times/${{ matrix.os }}.txt
           if-no-files-found: error
 
-  # MSRV = Rust shipped in org.freedesktop.Sdk.Extension.rust-stable//26.08,
-  # which the GNOME 51 Flatpak builds with. Keep in sync with Cargo.toml
-  # [workspace.package] rust-version.
   licenses:
     name: Licenses (cargo-deny)
     runs-on: ubuntu-latest
@@ -181,6 +178,9 @@ jobs:
       - name: cargo deny check (licenses, advisories, bans, sources)
         run: cargo deny --locked check
 
+  # MSRV = Rust shipped in org.freedesktop.Sdk.Extension.rust-stable//26.08,
+  # which the GNOME 51 Flatpak builds with. Keep in sync with Cargo.toml
+  # [workspace.package] rust-version.
   msrv:
     name: MSRV (Flatpak SDK Rust)
     runs-on: ubuntu-latest
