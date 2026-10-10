@@ -93,6 +93,11 @@ jobs:
         if: runner.os == 'Linux'
         run: cargo test --release -p openpdf-gtk
 
+      # Release-mode core tests (e.g. Bind-without-register Err path). Kept
+      # before Measure GUI so that step's known red cannot hide a failure.
+      - name: Test core (release, locked)
+        run: cargo test --release --locked -p openpdf-core
+
       - name: Measure core / CLI
         run: python3 .github/scripts/run-measure.py --kind core
         env:
