@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: MPL-2.0
 //! libadwaita dialogs for core organize / optimize / protect / convert tools.
 
 use std::cell::RefCell;
