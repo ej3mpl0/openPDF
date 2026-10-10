@@ -683,3 +683,6 @@ msgstr ""
 
 msgid "Open a PDF before verifying signatures."
 msgstr ""
+
+msgid "Cannot verify: original file bytes are unavailable."
+msgstr ""

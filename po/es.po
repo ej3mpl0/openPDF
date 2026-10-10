@@ -689,3 +689,6 @@ msgstr "Firmas…"
 
 msgid "Open a PDF before verifying signatures."
 msgstr "Abre un PDF antes de verificar las firmas."
+
+msgid "Cannot verify: original file bytes are unavailable."
+msgstr "No se puede verificar: no hay bytes originales del archivo."

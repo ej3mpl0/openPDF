@@ -448,7 +448,7 @@ fn maybe_show_verify(
     lang: crate::Lang,
     present_empty: bool,
 ) {
-    let bytes = match opened.bytes_for_verify() {
+    let bytes = match opened.original_bytes() {
         Ok(bytes) => bytes,
         Err(e) => {
             show_toast(overlay, &e.to_string());

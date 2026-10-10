@@ -1,8 +1,9 @@
 // SPDX-License-Identifier: MPL-2.0
 //! Per-signature verification dialog. Row text is core `format_verify_result`.
 //!
-//! Bytes come from [`crate::Opened::bytes_for_verify`], never `to_bytes()` —
-//! a signed document's full rewrite is `Signed(Rewrite)`.
+//! Bytes come from [`crate::Opened::original_bytes`], never `to_bytes()` —
+//! a signed document's full rewrite is `Signed(Rewrite)`. Prepared for
+//! `Document::original_bytes()` once that is `pub` on #25.
 
 use adw::prelude::*;
 use gtk4 as gtk;
