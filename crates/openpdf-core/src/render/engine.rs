@@ -25,7 +25,9 @@ static NEXT_ENGINE_ID: AtomicU64 = AtomicU64::new(1);
 struct EngineSlot {
     queue: RenderQueue,
     events: Sender<TileEvent>,
-    /// Documents this engine bound; released on `Unregister`.
+    /// Documents this engine bound; released on `Unregister` unless another
+    /// live engine also bound them. Every entry in the worker's `docs` map is
+    /// owned by at least one slot (Bind refuses unregistered engines).
     docs: HashSet<DocumentId>,
 }
 
@@ -276,15 +278,25 @@ fn handle_cmd(
             bytes,
             reply,
         } => {
-            let result = load_bound(pdfium, bytes).map(|bound| {
-                docs.insert(id, bound);
-                if let Some(slot) = engines.get_mut(&engine) {
+            // Register is sent before `Engine::register` returns, and
+            // Unregister only after the last clone is dropped, so every Bind
+            // comes from a registered engine (the command channel keeps that
+            // order across threads). A document bound without an owning slot
+            // would never be released on Unregister, so never keep one.
+            debug_assert!(
+                engines.contains_key(&engine),
+                "Bind from unregistered engine {engine}"
+            );
+            let result = match engines.get_mut(&engine) {
+                Some(slot) => load_bound(pdfium, bytes).map(|bound| {
+                    docs.insert(id, bound);
                     slot.docs.insert(id);
-                }
-                if let Ok(mut c) = cache.lock() {
-                    c.invalidate_doc(id);
-                }
-            });
+                    if let Ok(mut c) = cache.lock() {
+                        c.invalidate_doc(id);
+                    }
+                }),
+                None => Err(Error::pdfium("render engine is not registered")),
+            };
             let _ = reply.send(result);
         }
         WorkerCmd::Unbind { engine, id } => {
