@@ -243,11 +243,13 @@ fn handle_cmd(
             reply,
         } => {
             let result = match docs.get(&id) {
-                Some(b) => pdfium_bind::render_page(&b.doc, page, zoom).map(|(w, h, rgba)| Raster {
-                    width: w,
-                    height: h,
-                    rgba,
-                }),
+                Some(b) => {
+                    pdfium_bind::render_page(&b.doc, page, zoom).map(|(w, h, rgba)| Raster {
+                        width: w,
+                        height: h,
+                        rgba,
+                    })
+                }
                 None => Err(Error::invalid(InvalidKind::DocumentNotBound)),
             };
             let _ = reply.send(result);

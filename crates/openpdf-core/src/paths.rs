@@ -50,8 +50,14 @@ mod tests {
         let _g = ENV_LOCK.lock().unwrap();
         env::set_var("XDG_CONFIG_HOME", "/tmp/openpdf-test-config");
         env::set_var("XDG_STATE_HOME", "/tmp/openpdf-test-state");
-        assert_eq!(settings_dir(), PathBuf::from("/tmp/openpdf-test-config/openpdf"));
-        assert_eq!(recovery_dir(), PathBuf::from("/tmp/openpdf-test-state/openpdf"));
+        assert_eq!(
+            settings_dir(),
+            PathBuf::from("/tmp/openpdf-test-config/openpdf")
+        );
+        assert_eq!(
+            recovery_dir(),
+            PathBuf::from("/tmp/openpdf-test-state/openpdf")
+        );
         env::remove_var("XDG_CONFIG_HOME");
         env::remove_var("XDG_STATE_HOME");
         let settings = settings_dir();
