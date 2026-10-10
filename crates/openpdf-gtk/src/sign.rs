@@ -61,6 +61,39 @@ pub fn sign_request_for(cert_id: impl Into<String>) -> SignRequest {
     }
 }
 
+/// How a per-signature row should be painted. Derived only from core fields.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum VerifySeverity {
+    Invalid,
+    Ok,
+    Unknown,
+}
+
+/// Icon + colour for one [`SignatureInfo`].
+pub fn verify_severity(info: &SignatureInfo) -> VerifySeverity {
+    match info.valid {
+        Some(false) => VerifySeverity::Invalid,
+        Some(true) => VerifySeverity::Ok,
+        None => VerifySeverity::Unknown,
+    }
+}
+
+pub fn verify_icon(severity: VerifySeverity) -> &'static str {
+    match severity {
+        VerifySeverity::Invalid => "dialog-error-symbolic",
+        VerifySeverity::Ok => "emblem-ok-symbolic",
+        VerifySeverity::Unknown => "dialog-question-symbolic",
+    }
+}
+
+pub fn verify_css_class(severity: VerifySeverity) -> &'static str {
+    match severity {
+        VerifySeverity::Invalid => "verify-invalid",
+        VerifySeverity::Ok => "verify-ok",
+        VerifySeverity::Unknown => "dim-label",
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -123,6 +156,12 @@ mod tests {
                 "Signer: Ana; Reason: agree; Location: Madrid; Valid"
             );
             assert_eq!(format_verify_results(&[]), "No signatures found");
+            assert_eq!(verify_severity(&info), VerifySeverity::Ok);
+            let bad = SignatureInfo {
+                valid: Some(false),
+                ..SignatureInfo::default()
+            };
+            assert_eq!(verify_severity(&bad), VerifySeverity::Invalid);
         });
     }
 }

@@ -680,3 +680,12 @@ msgstr "El PIN debe pedirse fuera del hilo de GTK"
 
 msgid "Saved signed PDF to {path}"
 msgstr "PDF firmado guardado en {path}"
+
+msgid "Signatures"
+msgstr "Firmas"
+
+msgid "Signatures…"
+msgstr "Firmas…"
+
+msgid "Open a PDF before verifying signatures."
+msgstr "Abre un PDF antes de verificar las firmas."

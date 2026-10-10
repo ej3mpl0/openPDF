@@ -674,3 +674,12 @@ msgstr ""
 
 msgid "Saved signed PDF to {path}"
 msgstr ""
+
+msgid "Signatures"
+msgstr ""
+
+msgid "Signatures…"
+msgstr ""
+
+msgid "Open a PDF before verifying signatures."
+msgstr ""

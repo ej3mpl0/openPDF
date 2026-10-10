@@ -10,7 +10,6 @@ use crate::backend::MockDocument;
 use crate::i18n::{format_core_error, t};
 use crate::session::{sample_pdf_path, MockView, Opened, Session};
 use crate::settings::{self, Settings};
-use crate::sign::format_verify_results;
 use adw::prelude::*;
 use gtk::gio;
 use gtk::glib::{self, clone};
@@ -23,6 +22,7 @@ use super::home;
 use super::preferences;
 use super::show_toast;
 use super::sign as sign_ui;
+use super::verify as verify_ui;
 use super::viewer::{self, DocumentView};
 
 #[derive(Clone)]
@@ -248,6 +248,7 @@ fn app_menu(lang: crate::Lang) -> gio::Menu {
     let menu = gio::Menu::new();
     menu.append(Some(t(lang, "Open…")), Some("app.open"));
     menu.append(Some(t(lang, "Sign with certificate…")), Some("app.sign"));
+    menu.append(Some(t(lang, "Signatures…")), Some("app.verify"));
     menu.append(Some(t(lang, "Preferences")), Some("app.preferences"));
     menu.append(Some(t(lang, "About openPDF")), Some("app.about"));
     menu.append(Some(t(lang, "Quit")), Some("app.quit"));
@@ -268,6 +269,13 @@ fn install_actions(app: &adw::Application, ctx: &Ctx) {
         move |_, _| start_sign(&ctx)
     });
     app.add_action(&sign);
+
+    let verify = gio::SimpleAction::new("verify", None);
+    verify.connect_activate({
+        let ctx = ctx.clone();
+        move |_, _| start_verify(&ctx)
+    });
+    app.add_action(&verify);
 
     let prefs = gio::SimpleAction::new("preferences", None);
     prefs.connect_activate({
@@ -413,7 +421,14 @@ fn add_opened(ctx: &Ctx, opened: Opened) {
                 "Signed document — read-only. Rotate, delete and reorder are disabled.",
             ),
         );
-        maybe_show_verify(&ctx.toast, ctx.verifier.clone(), view.opened(), lang);
+        maybe_show_verify(
+            &ctx.window,
+            &ctx.toast,
+            ctx.verifier.clone(),
+            view.opened(),
+            lang,
+            false,
+        );
     } else if placeholder {
         show_toast(
             &ctx.toast,
@@ -426,10 +441,12 @@ fn add_opened(ctx: &Ctx, opened: Opened) {
 }
 
 fn maybe_show_verify(
+    parent: &adw::ApplicationWindow,
     overlay: &adw::ToastOverlay,
     verifier: Arc<dyn Verifier>,
     opened: &Opened,
     lang: crate::Lang,
+    present_empty: bool,
 ) {
     let bytes = match opened.bytes_for_verify() {
         Ok(bytes) => bytes,
@@ -439,14 +456,15 @@ fn maybe_show_verify(
         }
     };
     let overlay = overlay.clone();
+    let parent = parent.clone();
     let (tx, rx) = std::sync::mpsc::channel();
     std::thread::spawn(move || {
         let _ = tx.send(verifier.verify(&bytes));
     });
     glib::timeout_add_local(std::time::Duration::from_millis(16), move || {
         match rx.try_recv() {
-            Ok(Ok(infos)) if !infos.is_empty() => {
-                show_toast(&overlay, &format_verify_results(&infos));
+            Ok(Ok(infos)) if !infos.is_empty() || present_empty => {
+                verify_ui::present(&parent, lang, &infos);
                 glib::ControlFlow::Break
             }
             Ok(Ok(_)) => glib::ControlFlow::Break,
@@ -461,6 +479,25 @@ fn maybe_show_verify(
             }
         }
     });
+}
+
+fn start_verify(ctx: &Ctx) {
+    let lang = ctx.settings.borrow().lang();
+    let Some(view) = ctx.current.borrow().clone() else {
+        show_toast(
+            &ctx.toast,
+            t(lang, "Open a PDF before verifying signatures."),
+        );
+        return;
+    };
+    maybe_show_verify(
+        &ctx.window,
+        &ctx.toast,
+        ctx.verifier.clone(),
+        view.opened(),
+        lang,
+        true,
+    );
 }
 
 fn start_sign(ctx: &Ctx) {
@@ -572,6 +609,7 @@ fn sign_on_worker(
 
     let overlay = overlay.clone();
     let tab_view = tab_view.clone();
+    let parent = parent.clone();
     glib::timeout_add_local(std::time::Duration::from_millis(16), move || {
         match rx.try_recv() {
             Ok(Ok(Ok(signed))) => {
@@ -602,7 +640,14 @@ fn sign_on_worker(
                                 "Signed document — read-only. Rotate, delete and reorder are disabled.",
                             ),
                         );
-                        maybe_show_verify(&overlay, verifier.clone(), view.opened(), lang);
+                        maybe_show_verify(
+                            &parent,
+                            &overlay,
+                            verifier.clone(),
+                            view.opened(),
+                            lang,
+                            false,
+                        );
                     }
                     Err(e) => show_toast(&overlay, &e.to_string()),
                 }
