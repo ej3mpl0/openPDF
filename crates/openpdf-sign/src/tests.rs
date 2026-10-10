@@ -986,11 +986,13 @@ fn unusable_reason_none_for_fresh_rsa() {
     assert_eq!(unusable_reason(&cert), None);
 }
 
+type SignFn = Box<dyn Fn(&[u8]) -> Vec<u8> + Send + Sync>;
+
 struct MockEcdsaBackend {
     id: String,
     der: Vec<u8>,
     kind: KeyKind,
-    sign: Box<dyn Fn(&[u8]) -> Vec<u8> + Send + Sync>,
+    sign: SignFn,
 }
 
 impl KeyBackend for MockEcdsaBackend {
@@ -1321,9 +1323,9 @@ fn softhsm_ecdsa_p256_sign_and_verify() {
 }
 
 #[cfg_attr(not(any(windows, target_os = "macos")), allow(dead_code))]
-fn native_test_cert<'a>(
-    certs: &'a [openpdf_core::CertificateInfo],
-) -> Option<&'a openpdf_core::CertificateInfo> {
+fn native_test_cert(
+    certs: &[openpdf_core::CertificateInfo],
+) -> Option<&openpdf_core::CertificateInfo> {
     certs
         .iter()
         .find(|c| c.unusable.is_none() && c.subject.contains("OpenPDF Test Signer"))

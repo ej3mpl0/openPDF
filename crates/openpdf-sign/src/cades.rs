@@ -60,7 +60,8 @@ pub(crate) fn sign_detached(
         econtent: None,
     };
 
-    let kind = key_kind(&cert).ok_or_else(|| Error::Sign(tr("unsupported public key algorithm")))?;
+    let kind =
+        key_kind(&cert).ok_or_else(|| Error::Sign(tr("unsupported public key algorithm")))?;
     let signed_attrs = signed_attributes(cert_der, digest.as_slice())?;
     let tbs = signed_attrs.to_der().map_err(cms_err)?;
     let signature = sign(&tbs)?;
@@ -156,7 +157,7 @@ pub(crate) fn ecdsa_p1363_to_der(raw: &[u8], field_len: usize) -> Result<Vec<u8>
 }
 
 fn split_p1363(raw: &[u8], field_len: usize) -> Result<(&[u8], &[u8])> {
-    if field_len == 0 || raw.len() < 2 * field_len || raw.len() % 2 != 0 {
+    if field_len == 0 || raw.len() < 2 * field_len || !raw.len().is_multiple_of(2) {
         return Err(Error::Sign(tr("ECDSA signature is truncated")));
     }
     let mid = raw.len() / 2;
@@ -263,8 +264,14 @@ fn verify_inner(cms_der: &[u8], message: &[u8]) -> Option<CmsCheck> {
     Some(CmsCheck { valid, signer })
 }
 
-fn verify_signature(sig_oid: const_oid::ObjectIdentifier, spki_der: &[u8], tbs: &[u8], sig: &[u8]) -> bool {
-    if sig_oid == const_oid::db::rfc5912::SHA_256_WITH_RSA_ENCRYPTION || sig_oid == ID_RSA_ENCRYPTION
+fn verify_signature(
+    sig_oid: const_oid::ObjectIdentifier,
+    spki_der: &[u8],
+    tbs: &[u8],
+    sig: &[u8],
+) -> bool {
+    if sig_oid == const_oid::db::rfc5912::SHA_256_WITH_RSA_ENCRYPTION
+        || sig_oid == ID_RSA_ENCRYPTION
     {
         return verify_rsa_sha256(spki_der, tbs, sig);
     }

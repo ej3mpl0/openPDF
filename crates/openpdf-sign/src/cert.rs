@@ -48,9 +48,7 @@ impl EcdsaHash {
 
 pub(crate) fn key_kind(cert: &Certificate) -> Option<KeyKind> {
     let oid = cert.tbs_certificate.subject_public_key_info.algorithm.oid;
-    if oid == ID_RSA_ENCRYPTION
-        || oid == const_oid::db::rfc5912::SHA_256_WITH_RSA_ENCRYPTION
-    {
+    if oid == ID_RSA_ENCRYPTION || oid == const_oid::db::rfc5912::SHA_256_WITH_RSA_ENCRYPTION {
         return Some(KeyKind::Rsa);
     }
     if oid != ID_EC_PUBLIC_KEY {
@@ -89,10 +87,6 @@ pub(crate) fn key_usage(cert: &Certificate) -> Vec<CertificateUsage> {
         }
         if ku.digital_signature() && !ku.non_repudiation() {
             usage.push(CertificateUsage::Authentication);
-        } else if ku.digital_signature() && ku.non_repudiation() {
-            if !usage.contains(&CertificateUsage::Signing) {
-                usage.push(CertificateUsage::Signing);
-            }
         }
         if ku.key_encipherment() || ku.data_encipherment() {
             usage.push(CertificateUsage::Encryption);
@@ -159,8 +153,7 @@ pub(crate) fn unusable_reason(cert: &Certificate) -> Option<CertUnusable> {
         .as_secs();
     if now < not_before {
         return Some(CertUnusable::NotYetValid {
-            not_before: time_rfc3339(&cert.tbs_certificate.validity.not_before)
-                .unwrap_or_default(),
+            not_before: time_rfc3339(&cert.tbs_certificate.validity.not_before).unwrap_or_default(),
         });
     }
     if now > not_after {
@@ -225,10 +218,7 @@ pub(crate) fn info_from_cert(cert: &Certificate, _der: &[u8], id: String) -> Cer
 }
 
 #[allow(dead_code)] // used by Windows / macOS native backends
-pub(crate) fn listed_from_der(
-    prefix: &str,
-    der: Vec<u8>,
-) -> Option<crate::backend::ListedCert> {
+pub(crate) fn listed_from_der(prefix: &str, der: Vec<u8>) -> Option<crate::backend::ListedCert> {
     let cert = Certificate::from_der(&der).ok()?;
     let id = cert_sha256_id(prefix, &der);
     let info = info_from_cert(&cert, &der, id.clone());
