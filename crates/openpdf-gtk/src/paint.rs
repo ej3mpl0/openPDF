@@ -10,7 +10,6 @@
 
 use gtk::cairo;
 use gtk::gdk;
-use gtk::gdk::prelude::PaintableExt;
 use gtk::graphene;
 use gtk::prelude::*;
 use gtk4 as gtk;
@@ -177,20 +176,12 @@ fn rgba_to_cairo_argb(rgba: &[u8], width: u32, height: u32) -> Option<(Vec<u8>, 
     Some((data, stride))
 }
 
-/// Snapshot a widget only when the requested size is a valid cairo size.
-pub fn snapshot_widget(widget: &impl IsA<gtk::Widget>, width: f64, height: f64) -> gtk::Snapshot {
+/// Build a snapshot for a widget-sized rect without going through
+/// `GtkWidgetPaintable` (GSK ngl SIGSEGVs that path on some xvfb/llvmpipe
+/// runners). 0 / oversize is a no-op; a valid size appends one cairo node.
+pub fn snapshot_widget(_widget: &impl IsA<gtk::Widget>, width: f64, height: f64) -> gtk::Snapshot {
     let snapshot = gtk::Snapshot::new();
-    if width <= 0.0 || height <= 0.0 {
-        return snapshot;
-    }
-    if width.ceil() as i32 > MAX_CAIRO_DIM || height.ceil() as i32 > MAX_CAIRO_DIM {
-        return snapshot;
-    }
-    debug_assert!(width > 0.0 && height > 0.0);
-    if gtk::is_initialized_main_thread() {
-        let paintable = gtk::WidgetPaintable::new(Some(widget));
-        PaintableExt::snapshot(&paintable, &snapshot, width, height);
-    }
+    let _ = append_cairo(&snapshot, 0.0, 0.0, width as f32, height as f32);
     snapshot
 }
 
