@@ -72,11 +72,14 @@ jobs:
             libgtk-4-dev libadwaita-1-dev pkg-config
 
       - name: Build core, CLI, and sign
-        run: cargo build --release -p openpdf-core -p openpdf-cli -p openpdf-sign
+        if: runner.os != 'Linux'
+        run: cargo build --release --locked -p openpdf-core -p openpdf-cli -p openpdf-sign
 
-      - name: Build GTK
+      # Whole workspace on Linux so target/release/openpdf-gtk exists no
+      # matter which crate provides the binary (openpdf-app since #16).
+      - name: Build workspace
         if: runner.os == 'Linux'
-        run: cargo build --release -p openpdf-gtk
+        run: cargo build --release --workspace --locked
 
       - name: Test core and CLI
         run: cargo test --release -p openpdf-core -p openpdf-cli

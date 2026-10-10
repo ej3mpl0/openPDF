@@ -180,7 +180,7 @@ def main(argv: list[str] | None = None) -> int:
     binary = find_binary(kind)
     if not binary.is_file() or not os.access(binary, os.X_OK):
         return fail(f"{kind} binary not found at {binary}; build it first "
-                    f"(cargo build --release -p {'openpdf-gtk' if kind == 'gui' else 'openpdf-cli'})")
+                    f"(cargo build --release {'--workspace --locked' if kind == 'gui' else '-p openpdf-cli'})")
 
     print(f"measure: kind={kind} running {binary} runs={args.runs}")
     print(f"measure: limits median startup<={startup_limit} ms, max peak RSS<={ram_mib} MiB")
