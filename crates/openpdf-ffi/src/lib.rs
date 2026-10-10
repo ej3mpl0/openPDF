@@ -193,7 +193,7 @@ mod tests {
 
     #[test]
     fn password_errors_do_not_echo_secrets() {
-        let secret = "ffi-secret-NEVER-ECHO-9f3a";
+        let secret = "ffi-secret-NEVER-ECHO-9f3a"; // test-only placeholder, not a real secret (allowlisted in .gitleaks.toml, #27)
         let doc = PdfDocument::open(corpus_path("hello.pdf")).unwrap();
 
         let err = match doc.unprotect(secret.to_string()) {

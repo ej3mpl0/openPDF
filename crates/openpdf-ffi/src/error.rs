@@ -164,7 +164,7 @@ mod tests {
 
     #[test]
     fn password_errors_do_not_echo_secret() {
-        let secret = "ffi-secret-NEVER-ECHO-9f3a";
+        let secret = "ffi-secret-NEVER-ECHO-9f3a"; // test-only placeholder, not a real secret (allowlisted in .gitleaks.toml, #27)
         let err = FfiError::from_core_hiding(Error::invalid(InvalidKind::WrongPassword), &[secret]);
         let text = err.to_string();
         assert!(!text.contains(secret), "error echoed secret");
