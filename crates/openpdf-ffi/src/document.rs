@@ -110,6 +110,9 @@ impl PdfDocument {
     }
 
     /// Render one cache tile via [`Engine::render_tile_blocking`].
+    ///
+    /// Bind happens only on open / [`Self::refresh`]. Re-binding here would
+    /// invalidate the tile cache on every call.
     pub fn render_tile(
         &self,
         page: u32,
@@ -117,27 +120,24 @@ impl PdfDocument {
         tx: u32,
         ty: u32,
     ) -> Result<RasterTile, FfiError> {
-        let doc = self.lock()?;
         let engine = self.require_engine()?;
-        engine.bind(&doc)?;
-        let key = TileKey::new(doc.id(), page, zoom, tx, ty);
+        let id = self.lock()?.id();
+        let key = TileKey::new(id, page, zoom, tx, ty);
         let tile = engine.render_tile_blocking(key)?;
         Ok(RasterTile::from_tile(tile))
     }
 
     pub fn page_text(&self, page: u32) -> Result<String, FfiError> {
-        let doc = self.lock()?;
         let engine = self.require_engine()?;
-        engine.bind(&doc)?;
-        Ok(engine.page_text(doc.id(), page)?)
+        let id = self.lock()?.id();
+        Ok(engine.page_text(id, page)?)
     }
 
     pub fn search(&self, query: String) -> Result<Vec<SearchHit>, FfiError> {
-        let doc = self.lock()?;
         let engine = self.require_engine()?;
-        engine.bind(&doc)?;
+        let id = self.lock()?.id();
         Ok(engine
-            .search(doc.id(), &query)?
+            .search(id, &query)?
             .into_iter()
             .map(SearchHit::from)
             .collect())
@@ -394,6 +394,16 @@ impl PdfDocument {
         self.engine
             .as_ref()
             .ok_or_else(FfiError::engine_unavailable)
+    }
+
+    #[cfg(test)]
+    pub(crate) fn test_engine(&self) -> Option<&Engine> {
+        self.engine.as_ref()
+    }
+
+    #[cfg(test)]
+    pub(crate) fn document_id(&self) -> Result<openpdf_core::DocumentId, FfiError> {
+        Ok(self.lock()?.id())
     }
 
     fn refresh(&self, doc: &Document) -> Result<(), FfiError> {

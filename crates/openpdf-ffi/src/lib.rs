@@ -370,6 +370,63 @@ mod tests {
         );
     }
 
+    fn measure_sixteen_tiles(label: &str) {
+        require_pdfium_in_ci();
+        if !engine_available() {
+            eprintln!("measure_sixteen_tiles[{label}]: skipped (no PDFium)");
+            return;
+        }
+        let doc = PdfDocument::open(corpus_path("hello.pdf")).unwrap();
+        let engine = doc.test_engine().expect("engine after open");
+        let keys: Vec<(u32, u32)> = (0..4)
+            .flat_map(|ty| (0..4).map(move |tx| (tx, ty)))
+            .collect();
+        assert_eq!(keys.len(), 16);
+
+        let t0 = std::time::Instant::now();
+        for &(tx, ty) in &keys {
+            let tile = doc.render_tile(0, 2.0, tx, ty).expect("tile");
+            assert_eq!(tile.rgba.len(), (tile.width * tile.height * 4) as usize);
+        }
+        let first_pass = t0.elapsed();
+
+        let mut hits_after_first = 0usize;
+        for &(tx, ty) in &keys {
+            let key = openpdf_core::TileKey::new(doc.document_id().unwrap(), 0, 2.0, tx, ty);
+            if engine.cache_get(&key).is_some() {
+                hits_after_first += 1;
+            }
+        }
+
+        let t1 = std::time::Instant::now();
+        for &(tx, ty) in &keys {
+            let _ = doc.render_tile(0, 2.0, tx, ty).expect("cached tile");
+        }
+        let second_pass = t1.elapsed();
+
+        let mut hits_after_second = 0usize;
+        for &(tx, ty) in &keys {
+            let key = openpdf_core::TileKey::new(doc.document_id().unwrap(), 0, 2.0, tx, ty);
+            if engine.cache_get(&key).is_some() {
+                hits_after_second += 1;
+            }
+        }
+
+        eprintln!(
+            "measure_sixteen_tiles[{label}]: first_pass={first_pass:?} second_pass={second_pass:?} cache_hits_after_first={hits_after_first} cache_hits_after_second={hits_after_second}"
+        );
+        assert_eq!(
+            hits_after_first, 16,
+            "bind-on-render invalidates the tile cache; expected 16 hits after first pass"
+        );
+        assert_eq!(hits_after_second, 16);
+    }
+
+    #[test]
+    fn measure_sixteen_tiles_and_cache_hits() {
+        measure_sixteen_tiles("bind-on-open-only");
+    }
+
     #[test]
     fn annotation_add_undo_restores_signer_hash_then_sign_succeeds() {
         let doc = PdfDocument::open(corpus_path("hello.pdf")).unwrap();
