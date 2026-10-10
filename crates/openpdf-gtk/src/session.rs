@@ -983,6 +983,14 @@ impl PaintTile {
             PaintPixels::Mock(t) => PixelOwner::Mock(Arc::clone(t)),
         }
     }
+
+    /// `Arc` identity + RGBA length so engine + GTK textures can be counted once.
+    pub(crate) fn buffer_id(&self) -> (usize, usize) {
+        match &self.pixels {
+            PaintPixels::Core(t) => (Arc::as_ptr(t) as usize, t.byte_len()),
+            PaintPixels::Mock(t) => (Arc::as_ptr(t) as usize, t.pixels.len()),
+        }
+    }
 }
 
 /// `AsRef<[u8]>` over the core/mock tile so `Bytes::from_owned` copies no pixels.

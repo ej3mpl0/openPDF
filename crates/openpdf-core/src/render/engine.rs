@@ -539,6 +539,17 @@ impl Engine {
             .unwrap_or(0)
     }
 
+    /// Unique tile buffers in the process-wide cache (`Arc` pointer + byte length).
+    ///
+    /// Does not start the worker; empty if `Engine::new` has not run.
+    pub fn tile_cache_buffer_idents() -> Vec<(usize, usize)> {
+        WORKER
+            .get()
+            .and_then(|r| r.as_ref().ok())
+            .and_then(|h| h.cache.lock().ok().map(|c| c.buffer_idents()))
+            .unwrap_or_default()
+    }
+
     /// `render_tile` rasters on this engine (cache hits excluded).
     pub fn render_tile_calls(&self) -> u64 {
         self.worker.render_tile_calls.load(Ordering::Relaxed)

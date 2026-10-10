@@ -1001,10 +1001,12 @@ fn ingest_arrived_texture_shared(shared: &Shared, key: &TileKey) {
     let Some(tile) = shared.doc.paint_tile(key) else {
         return;
     };
+    let (ptr, bytes) = tile.buffer_id();
     let Some(tex) = paint::memory_texture_from_owned(tile.width, tile.height, tile.pixel_owner())
     else {
         return;
     };
+    crate::measure::register_tile_buffer(ptr, bytes);
     let tex: gdk::Texture = tex.upcast();
     shared.textures.borrow_mut().insert(*key, tex);
 }

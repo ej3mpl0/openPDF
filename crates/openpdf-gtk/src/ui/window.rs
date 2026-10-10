@@ -408,6 +408,7 @@ fn ensure_engine(ctx: &Ctx) -> Option<Engine> {
 }
 
 fn open_path_inner(ctx: &Ctx, path: &Path) {
+    crate::measure::capture_heap_before_doc();
     crate::measure::mark_doc_load_start();
     let path_buf = path.to_path_buf();
     let Some(engine) = ensure_engine(ctx) else {

@@ -244,6 +244,23 @@ pub struct BudgetReport {
     pub scale: i32,
     /// Variables `--measure` code itself set. Must be empty.
     pub env_overrides: Vec<String>,
+    /// smaps `[heap]`+anon RSS right before document bind (after window present).
+    pub heap_kb_before_doc: u64,
+    /// Same buckets at peak / finish.
+    pub heap_kb_after_doc: u64,
+    /// Unique tile-buffer bytes (engine cache ∪ GTK textures, one `Arc` each).
+    pub ours_tiles_kb: u64,
+    /// `libpdfium.so` mapping RSS only — not malloc heap.
+    pub ours_pdfium_kb: u64,
+    /// Opened file length. Lopdf-tree estimate comes later (Jian / core helper).
+    pub ours_doc_kb: u64,
+    /// `(after-before) - tiles - doc`. PDFium malloc/fonts stay in the gap.
+    pub heap_growth_unexplained_kb: i64,
+    /// Unique tiles + PDFium *mapping*.
+    pub rss_class_ours_kb: u64,
+    /// `#50` `font_warmup_ms()`, or `none` on this branch.
+    pub font_warmup_ms: String,
+    pub heap_kb_before_doc_note: String,
     pub ok: bool,
     pub error: Option<String>,
 }
@@ -260,6 +277,24 @@ impl Display for BudgetReport {
             f,
             "peak_rss_mb={:.1}",
             self.rss_bytes as f64 / (1024.0 * 1024.0)
+        )?;
+        writeln!(f, "heap_kb_before_doc={}", self.heap_kb_before_doc)?;
+        writeln!(f, "heap_kb_after_doc={}", self.heap_kb_after_doc)?;
+        writeln!(f, "ours_tiles_kb={}", self.ours_tiles_kb)?;
+        writeln!(f, "ours_pdfium_kb={}", self.ours_pdfium_kb)?;
+        writeln!(f, "ours_pdfium_kind=mapping")?;
+        writeln!(f, "ours_doc_kb={}", self.ours_doc_kb)?;
+        writeln!(
+            f,
+            "heap_growth_unexplained_kb={}",
+            self.heap_growth_unexplained_kb
+        )?;
+        writeln!(f, "rss_class_ours_kb={}", self.rss_class_ours_kb)?;
+        writeln!(f, "font_warmup_ms={}", self.font_warmup_ms)?;
+        writeln!(
+            f,
+            "heap_kb_before_doc_note={}",
+            self.heap_kb_before_doc_note
         )?;
         writeln!(
             f,
@@ -676,6 +711,23 @@ pub fn format_rss_breakdown_from_parts_full(
     let textures_kb = (texture_bytes / 1024) as u64;
     out.push_str(&format!("rss_class_tiles_kb={tiles_kb}\n"));
     out.push_str(&format!("rss_class_textures_kb={textures_kb}\n"));
+    let heap = heap_accounting_from_smaps(smaps);
+    out.push_str(&format!("heap_kb_before_doc={}\n", heap.heap_kb_before_doc));
+    out.push_str(&format!("heap_kb_after_doc={}\n", heap.heap_kb_after_doc));
+    out.push_str(&format!("ours_tiles_kb={}\n", heap.ours_tiles_kb));
+    out.push_str(&format!("ours_pdfium_kb={}\n", heap.ours_pdfium_kb));
+    out.push_str(&format!("ours_pdfium_kind=mapping\n"));
+    out.push_str(&format!("ours_doc_kb={}\n", heap.ours_doc_kb));
+    out.push_str(&format!(
+        "heap_growth_unexplained_kb={}\n",
+        heap.heap_growth_unexplained_kb
+    ));
+    out.push_str(&format!("rss_class_ours_kb={}\n", heap.rss_class_ours_kb));
+    out.push_str(&format!("font_warmup_ms={}\n", heap.font_warmup_ms));
+    out.push_str(&format!(
+        "heap_kb_before_doc_note={}\n",
+        heap.heap_kb_before_doc_note
+    ));
     for (i, m) in top_smaps_mappings(&maps, 15).into_iter().enumerate() {
         let path = if m.pathname.is_empty() {
             "[anon]".to_string()
@@ -694,6 +746,138 @@ pub fn format_rss_breakdown_from_parts_full(
 }
 
 static RSS_BREAKDOWN: OnceLock<String> = OnceLock::new();
+static HEAP_KB_BEFORE_DOC: OnceLock<u64> = OnceLock::new();
+static MEASURE_DOC_FILE_BYTES: OnceLock<u64> = OnceLock::new();
+static GTK_TILE_BUFFERS: Mutex<Vec<(usize, usize)>> = Mutex::new(Vec::new());
+
+/// `#50` only. This gtk branch has no `openpdf_core::font_warmup_ms`.
+pub fn font_warmup_ms() -> Option<u128> {
+    None
+}
+
+/// smaps RSS for `[heap]` + anonymous mappings (PDFium malloc lands here).
+pub fn heap_anon_kb_from_smaps(smaps: &str) -> u64 {
+    class_rss_kb(&parse_smaps(smaps))
+        .into_iter()
+        .find(|(c, _)| *c == RssClass::Heap)
+        .map(|(_, kb)| kb)
+        .unwrap_or(0)
+}
+
+/// `libpdfium.so` mapping RSS. Not heap — label `ours_pdfium_kind=mapping`.
+pub fn pdfium_mapping_kb_from_smaps(smaps: &str) -> u64 {
+    class_rss_kb(&parse_smaps(smaps))
+        .into_iter()
+        .find(|(c, _)| *c == RssClass::Pdfium)
+        .map(|(_, kb)| kb)
+        .unwrap_or(0)
+}
+
+/// Record a tile buffer (`Arc` pointer) held by a GTK `MemoryTexture`.
+pub fn register_tile_buffer(ptr: usize, bytes: usize) {
+    if let Ok(mut v) = GTK_TILE_BUFFERS.lock() {
+        if !v.iter().any(|(p, _)| *p == ptr) {
+            v.push((ptr, bytes));
+        }
+    }
+}
+
+/// Unique tile bytes: engine cache ∪ GTK textures, each `Arc` once.
+pub fn unique_tile_bytes(engine: &[(usize, usize)], gtk: &[(usize, usize)]) -> usize {
+    let mut seen: BTreeMap<usize, usize> = BTreeMap::new();
+    for &(ptr, bytes) in engine.iter().chain(gtk.iter()) {
+        seen.entry(ptr).or_insert(bytes);
+    }
+    seen.values().copied().sum()
+}
+
+pub fn ours_tiles_kb() -> u64 {
+    let engine = openpdf_core::Engine::tile_cache_buffer_idents();
+    let gtk = GTK_TILE_BUFFERS
+        .lock()
+        .ok()
+        .map(|g| g.clone())
+        .unwrap_or_default();
+    (unique_tile_bytes(&engine, &gtk) / 1024) as u64
+}
+
+/// After window present, before bind. `#50` would wait until `font_warmup_ms()` is `Some`.
+pub fn capture_heap_before_doc() {
+    if font_warmup_ms().is_none() {
+        // This branch: no #50 gate. Snapshot anyway so the gap is visible.
+    }
+    let _ = HEAP_KB_BEFORE_DOC.set(heap_anon_kb_from_smaps(&read_proc("/proc/self/smaps")));
+}
+
+pub fn current_heap_accounting() -> HeapAccounting {
+    heap_accounting_from_smaps(&read_proc("/proc/self/smaps"))
+}
+
+pub fn heap_kb_before_doc() -> u64 {
+    HEAP_KB_BEFORE_DOC.get().copied().unwrap_or(0)
+}
+
+pub fn remember_measure_doc_bytes(bytes: u64) {
+    let _ = MEASURE_DOC_FILE_BYTES.set(bytes);
+}
+
+pub fn ours_doc_kb() -> u64 {
+    MEASURE_DOC_FILE_BYTES.get().copied().unwrap_or(0) / 1024
+}
+
+pub fn heap_accounting_from_smaps(smaps: &str) -> HeapAccounting {
+    let before = heap_kb_before_doc();
+    let after = heap_anon_kb_from_smaps(smaps);
+    let tiles = ours_tiles_kb();
+    let pdfium = pdfium_mapping_kb_from_smaps(smaps);
+    let doc = ours_doc_kb();
+    let unexplained = after as i64 - before as i64 - tiles as i64 - doc as i64;
+    HeapAccounting {
+        heap_kb_before_doc: before,
+        heap_kb_after_doc: after,
+        ours_tiles_kb: tiles,
+        ours_pdfium_kb: pdfium,
+        ours_doc_kb: doc,
+        heap_growth_unexplained_kb: unexplained,
+        rss_class_ours_kb: tiles.saturating_add(pdfium),
+        font_warmup_ms: font_warmup_ms()
+            .map(|ms| ms.to_string())
+            .unwrap_or_else(|| "none".into()),
+        heap_kb_before_doc_note: if font_warmup_ms().is_some() {
+            "after font_warmup_ms, before bind".into()
+        } else {
+            "no #50 font_warmup_ms(); after window present, before bind".into()
+        },
+    }
+}
+
+#[derive(Debug, Clone, Default)]
+pub struct HeapAccounting {
+    pub heap_kb_before_doc: u64,
+    pub heap_kb_after_doc: u64,
+    pub ours_tiles_kb: u64,
+    pub ours_pdfium_kb: u64,
+    pub ours_doc_kb: u64,
+    pub heap_growth_unexplained_kb: i64,
+    pub rss_class_ours_kb: u64,
+    pub font_warmup_ms: String,
+    pub heap_kb_before_doc_note: String,
+}
+
+impl BudgetReport {
+    pub fn with_heap_accounting(mut self, a: HeapAccounting) -> Self {
+        self.heap_kb_before_doc = a.heap_kb_before_doc;
+        self.heap_kb_after_doc = a.heap_kb_after_doc;
+        self.ours_tiles_kb = a.ours_tiles_kb;
+        self.ours_pdfium_kb = a.ours_pdfium_kb;
+        self.ours_doc_kb = a.ours_doc_kb;
+        self.heap_growth_unexplained_kb = a.heap_growth_unexplained_kb;
+        self.rss_class_ours_kb = a.rss_class_ours_kb;
+        self.font_warmup_ms = a.font_warmup_ms;
+        self.heap_kb_before_doc_note = a.heap_kb_before_doc_note;
+        self
+    }
+}
 
 /// Capture the peak-time smaps dump once (first call wins).
 pub fn capture_rss_breakdown_if_enabled() {
@@ -1082,6 +1266,9 @@ pub fn write_measure_pdf(pages: usize) -> Result<PathBuf, String> {
             .unwrap_or(0)
     ));
     merged.save(&dest).map_err(|e| e.to_string())?;
+    if let Ok(meta) = std::fs::metadata(&dest) {
+        remember_measure_doc_bytes(meta.len());
+    }
     Ok(dest)
 }
 
@@ -1468,5 +1655,65 @@ Pss:                  32 kB
         let top = top_smaps_mappings(&maps, 15);
         assert_eq!(top[0].pathname, "/usr/local/lib/libpdfium.so");
         assert_eq!(top.len(), 4);
+        assert!(text.contains("ours_pdfium_kb=2048"));
+        assert!(text.contains("ours_pdfium_kind=mapping"));
+        assert!(text.contains("heap_kb_after_doc=512"));
+        assert!(text.contains("heap_growth_unexplained_kb=512"));
+        assert!(text.contains("rss_class_ours_kb=2048"));
+        assert!(text.contains("font_warmup_ms=none"));
+        assert!(text.contains("no #50 font_warmup_ms()"));
+    }
+
+    #[test]
+    fn unique_tiles_count_shared_arc_once() {
+        let buf = std::sync::Arc::new(vec![0u8; 8192]);
+        let ptr = std::sync::Arc::as_ptr(&buf) as usize;
+        let engine = vec![(ptr, 8192)];
+        let gtk = vec![(ptr, 8192)];
+        assert_eq!(unique_tile_bytes(&engine, &gtk), 8192);
+        assert_eq!(unique_tile_bytes(&engine, &[(ptr + 1, 4096)]), 8192 + 4096);
+    }
+
+    #[test]
+    fn heap_unexplained_is_growth_minus_tiles_minus_doc() {
+        let before = 1000u64;
+        let after = 5000u64;
+        let tiles = 2000u64;
+        let doc = 100u64;
+        let unexplained = after as i64 - before as i64 - tiles as i64 - doc as i64;
+        assert_eq!(unexplained, 1900);
+        // Do not subtract PDFium mapping — malloc'd fonts stay in the gap.
+        let pdfium_mapping = 2200u64;
+        assert_ne!(
+            unexplained,
+            after as i64 - before as i64 - tiles as i64 - doc as i64 - pdfium_mapping as i64
+        );
+    }
+
+    #[test]
+    fn display_prints_heap_accounting() {
+        let text = BudgetReport {
+            heap_kb_before_doc: 10,
+            heap_kb_after_doc: 40,
+            ours_tiles_kb: 7,
+            ours_pdfium_kb: 2,
+            ours_doc_kb: 3,
+            heap_growth_unexplained_kb: 20,
+            rss_class_ours_kb: 9,
+            font_warmup_ms: "none".into(),
+            heap_kb_before_doc_note: "no #50 font_warmup_ms(); after window present, before bind"
+                .into(),
+            ..Default::default()
+        }
+        .to_string();
+        assert!(text.contains("heap_kb_before_doc=10"));
+        assert!(text.contains("heap_kb_after_doc=40"));
+        assert!(text.contains("ours_tiles_kb=7"));
+        assert!(text.contains("ours_pdfium_kb=2"));
+        assert!(text.contains("ours_pdfium_kind=mapping"));
+        assert!(text.contains("ours_doc_kb=3"));
+        assert!(text.contains("heap_growth_unexplained_kb=20"));
+        assert!(text.contains("rss_class_ours_kb=9"));
+        assert!(text.contains("font_warmup_ms=none"));
     }
 }

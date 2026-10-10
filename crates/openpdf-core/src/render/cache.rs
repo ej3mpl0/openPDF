@@ -27,6 +27,14 @@ impl TileCache {
         self.used
     }
 
+    /// `(Arc ptr, RGBA bytes)` for each cached tile. Same pointer is one buffer.
+    pub fn buffer_idents(&self) -> Vec<(usize, usize)> {
+        self.map
+            .values()
+            .map(|t| (Arc::as_ptr(t) as usize, t.byte_len()))
+            .collect()
+    }
+
     pub fn len(&self) -> usize {
         self.map.len()
     }

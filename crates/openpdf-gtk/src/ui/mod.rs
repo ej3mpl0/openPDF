@@ -338,6 +338,7 @@ fn watch_measure(
                     }
                     .with_runtime_env()
                     .with_window_graphics(win.widget())
+                    .with_heap_accounting(measure::current_heap_accounting())
                     .evaluate(),
                 );
                 return glib::ControlFlow::Break;
