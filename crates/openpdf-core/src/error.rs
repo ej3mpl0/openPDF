@@ -33,6 +33,13 @@ pub enum Error {
     /// Unit variant — no payload. The token was not touched. UIs treat
     /// this as a silent cancel. The CLI prints a neutral status, not an error.
     PinCancelled,
+    /// PAdES B-T: the RFC 3161 timestamp could not be obtained or did not
+    /// validate. The signature is never downgraded to B-B.
+    Timestamp(TimestampErrorKind),
+    /// The caller cancelled the operation (CancelToken). Not a failure: the
+    /// UI should treat it as a no-op. Nothing was written. Distinct from
+    /// [`Error::PinCancelled`].
+    Cancelled,
     /// The PDF already has a signature; `op` would invalidate it.
     Signed {
         op: SignedOp,
@@ -47,6 +54,74 @@ pub enum SignerUnavailableReason {
     ModuleNotFound,
     /// A module path was found but loading it failed.
     LoadFailed,
+}
+
+/// Why a PAdES B-T timestamp was refused. Match this instead of parsing [`Display`].
+#[derive(Clone, Debug, PartialEq, Eq)]
+#[non_exhaustive]
+pub enum TimestampErrorKind {
+    /// B-T was requested but no TSA URL is configured (there is no default).
+    UrlMissing,
+    /// The TSA URL is not an `http://` or `https://` URL.
+    BadUrl,
+    /// The TSA could not be reached (DNS, TLS, timeout, ...).
+    Network { detail: String },
+    /// The TSA answered with a non-success HTTP status.
+    Http { status: u16 },
+    /// The TSA answered, but did not grant the timestamp (PKIStatus).
+    Rejected { status: u8 },
+    /// The response or token is not valid RFC 3161 DER.
+    Malformed,
+    /// The token's nonce differs from the one we sent.
+    NonceMismatch,
+    /// The token's messageImprint is not the hash of our signature value.
+    ImprintMismatch,
+    /// The token's CMS signature does not verify.
+    BadSignature,
+    /// The ESS signing-certificate attribute does not bind the TSA certificate.
+    SigningCertMismatch,
+    /// The TSA certificate does not chain to a trusted root, is not valid at
+    /// the timestamp time, or lacks the timeStamping key purpose.
+    UntrustedCert,
+}
+
+impl TimestampErrorKind {
+    pub fn to_locale_string(&self) -> String {
+        match self {
+            TimestampErrorKind::UrlMissing => {
+                tr("PAdES-B-T needs a timestamp server (TSA) URL; none is configured")
+            }
+            TimestampErrorKind::BadUrl => {
+                tr("the timestamp server URL must start with http:// or https://")
+            }
+            TimestampErrorKind::Network { detail } => tr_args(
+                "could not reach the timestamp server: {detail}",
+                &[("detail", detail)],
+            ),
+            TimestampErrorKind::Http { status } => tr_args(
+                "the timestamp server answered HTTP {status}",
+                &[("status", &status.to_string())],
+            ),
+            TimestampErrorKind::Rejected { status } => tr_args(
+                "the timestamp server refused the request (status {status})",
+                &[("status", &status.to_string())],
+            ),
+            TimestampErrorKind::Malformed => tr("the timestamp server sent a malformed response"),
+            TimestampErrorKind::NonceMismatch => {
+                tr("the timestamp does not answer our request (nonce mismatch)")
+            }
+            TimestampErrorKind::ImprintMismatch => {
+                tr("the timestamp does not cover this signature (hash mismatch)")
+            }
+            TimestampErrorKind::BadSignature => tr("the timestamp signature is not valid"),
+            TimestampErrorKind::SigningCertMismatch => {
+                tr("the timestamp is not bound to the TSA certificate (ESS signing-certificate)")
+            }
+            TimestampErrorKind::UntrustedCert => {
+                tr("the timestamp server certificate is not trusted")
+            }
+        }
+    }
 }
 
 /// User-facing invalid-input cases. Match this instead of parsing [`Display`].
@@ -103,6 +178,11 @@ impl fmt::Display for Error {
 }
 
 impl Error {
+    /// `true` for [`Error::Cancelled`]: the user aborted, do not show an error.
+    pub fn is_cancelled(&self) -> bool {
+        matches!(self, Error::Cancelled)
+    }
+
     /// Localized message for the active catalog. The UI may ignore this and
     /// match the variant instead.
     pub fn to_locale_string(&self) -> String {
@@ -123,6 +203,11 @@ impl Error {
             Error::Sign(m) => tr_args("sign: {detail}", &[("detail", &tr(m))]),
             Error::SignerUnavailable { reason } => describe_signer_unavailable(reason),
             Error::PinCancelled => tr("PIN entry was cancelled"),
+            Error::Timestamp(kind) => tr_args(
+                "timestamp: {detail}",
+                &[("detail", &kind.to_locale_string())],
+            ),
+            Error::Cancelled => tr("operation cancelled"),
             Error::Signed { op } => tr_args(
                 "document is signed; {op} would invalidate the signature (incremental save only)",
                 &[("op", &tr(op.msgid()))],
@@ -285,6 +370,25 @@ mod tests {
             tr("PIN entry was cancelled")
         );
         assert_ne!(Error::PinCancelled.to_string(), "PIN entry was cancelled");
+        set_locale("en");
+    }
+
+    #[test]
+    fn timestamp_and_cancelled_are_structured() {
+        let _g = crate::test_support::locale_test_guard();
+        set_locale("en");
+        let ts = Error::Timestamp(TimestampErrorKind::UrlMissing);
+        assert!(matches!(
+            ts,
+            Error::Timestamp(TimestampErrorKind::UrlMissing)
+        ));
+        assert!(!matches!(ts, Error::Sign(_)));
+        assert!(!ts.is_cancelled());
+        let cancel = Error::Cancelled;
+        assert!(matches!(cancel, Error::Cancelled));
+        assert!(cancel.is_cancelled());
+        assert!(!matches!(cancel, Error::PinCancelled));
+        assert_eq!(cancel.to_string(), "operation cancelled");
         set_locale("en");
     }
 }

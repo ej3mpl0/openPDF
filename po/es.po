@@ -438,3 +438,42 @@ msgstr "Firma cancelada"
 
 msgid "document changed during signing"
 msgstr "el documento cambió durante la firma"
+
+msgid "operation cancelled"
+msgstr "operación cancelada"
+
+msgid "timestamp: {detail}"
+msgstr "sello de tiempo: {detail}"
+
+msgid "PAdES-B-T needs a timestamp server (TSA) URL; none is configured"
+msgstr "PAdES-B-T necesita la URL de un servidor de sellos de tiempo (TSA) y no hay ninguna configurada"
+
+msgid "the timestamp server URL must start with http:// or https://"
+msgstr "la URL del servidor de sellos de tiempo debe empezar por http:// o https://"
+
+msgid "could not reach the timestamp server: {detail}"
+msgstr "no se pudo conectar con el servidor de sellos de tiempo: {detail}"
+
+msgid "the timestamp server answered HTTP {status}"
+msgstr "el servidor de sellos de tiempo respondió HTTP {status}"
+
+msgid "the timestamp server refused the request (status {status})"
+msgstr "el servidor de sellos de tiempo rechazó la petición (estado {status})"
+
+msgid "the timestamp server sent a malformed response"
+msgstr "el servidor de sellos de tiempo envió una respuesta mal formada"
+
+msgid "the timestamp does not answer our request (nonce mismatch)"
+msgstr "el sello de tiempo no responde a nuestra petición (el nonce no coincide)"
+
+msgid "the timestamp does not cover this signature (hash mismatch)"
+msgstr "el sello de tiempo no cubre esta firma (el hash no coincide)"
+
+msgid "the timestamp signature is not valid"
+msgstr "la firma del sello de tiempo no es válida"
+
+msgid "the timestamp is not bound to the TSA certificate (ESS signing-certificate)"
+msgstr "el sello de tiempo no está vinculado al certificado de la TSA (ESS signing-certificate)"
+
+msgid "the timestamp server certificate is not trusted"
+msgstr "el certificado del servidor de sellos de tiempo no es de confianza"
