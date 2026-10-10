@@ -721,3 +721,5 @@ msgstr ""
 msgid "Unlock"
 msgstr ""
 
+msgid "PIN entry was cancelled"
+msgstr ""

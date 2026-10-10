@@ -1,6 +1,10 @@
 //! GTK PIN dialog. Implements [`openpdf_core::PinProvider`] and returns
 //! [`SecretPin`]. Prompt text comes from [`openpdf_core::pin_prompt_text`].
 //! This crate never imports `openpdf-sign`.
+//!
+//! The PIN is [`Zeroizing<String>`] from the GTK entry, through the channel,
+//! until [`SecretPin`]. The entry buffer is cleared immediately after read.
+//! Cancel or an empty field is [`Error::PinCancelled`] (unit, no payload).
 
 use std::cell::Cell;
 use std::rc::Rc;
@@ -13,6 +17,7 @@ use libadwaita as adw;
 use openpdf_core::{
     describe_pin_status, pin_prompt_text, tr, Error, PinProvider, Result, SecretPin, TokenPinStatus,
 };
+use zeroize::Zeroizing;
 
 /// Modal PIN dialog. Stateless so the application binary can build it
 /// before the viewer exists.
@@ -38,11 +43,12 @@ fn take_pending_pin_status() -> Option<TokenPinStatus> {
 impl PinProvider for GtkPinProvider {
     fn request_pin(&self, token_label: &str) -> Result<SecretPin> {
         let warning = take_pending_pin_status().and_then(|s| describe_pin_status(&s));
-        request_pin_blocking(&pin_prompt_text(token_label), warning.as_deref()).map(SecretPin::new)
+        request_pin_blocking(&pin_prompt_text(token_label), warning.as_deref())
+            .map(|pin| SecretPin::new(pin.as_str()))
     }
 }
 
-fn request_pin_blocking(prompt: &str, warning: Option<&str>) -> Result<String> {
+fn request_pin_blocking(prompt: &str, warning: Option<&str>) -> Result<Zeroizing<String>> {
     if !gtk::is_initialized() {
         return Err(Error::PinRequired);
     }
@@ -64,22 +70,31 @@ fn request_pin_blocking(prompt: &str, warning: Option<&str>) -> Result<String> {
         }
     }
     ctx.invoke(launch);
-    rx.recv().unwrap_or(Err(Error::PinCancelled))
+    rx.recv().unwrap_or_else(|_| Err(Error::PinCancelled))
 }
 
-fn submit_pin(send: &Rc<impl Fn(Result<String>)>, entry: &gtk::PasswordEntry) {
-    let text = entry.text().to_string();
+fn take_pin(entry: &gtk::PasswordEntry) -> Zeroizing<String> {
+    let pin = Zeroizing::new(entry.text().to_string());
     entry.set_text("");
-    if text.is_empty() {
+    pin
+}
+
+fn submit_pin(send: &Rc<impl Fn(Result<Zeroizing<String>>)>, entry: &gtk::PasswordEntry) {
+    let pin = take_pin(entry);
+    if pin.is_empty() {
         send(Err(Error::PinCancelled));
     } else {
-        send(Ok(text));
+        send(Ok(pin));
     }
 }
 
-fn present_pin_dialog(prompt: &str, warning: Option<&str>, tx: Sender<Result<String>>) {
+fn present_pin_dialog(
+    prompt: &str,
+    warning: Option<&str>,
+    tx: Sender<Result<Zeroizing<String>>>,
+) {
     let sent = Rc::new(Cell::new(false));
-    let send = Rc::new(move |value: Result<String>| {
+    let send = Rc::new(move |value: Result<Zeroizing<String>>| {
         if !sent.replace(true) {
             let _ = tx.send(value);
         }
@@ -182,5 +197,23 @@ mod tests {
             GtkPinProvider.request_pin("test"),
             Err(Error::PinRequired)
         ));
+    }
+
+    #[test]
+    fn pin_cancelled_is_unit_variant() {
+        assert!(matches!(Error::PinCancelled, Error::PinCancelled));
+        assert!(!matches!(Error::PinCancelled, Error::Sign(_)));
+    }
+
+    #[test]
+    fn take_pin_clears_the_entry_into_zeroizing() {
+        if gtk::init().is_err() && !gtk::is_initialized() {
+            return;
+        }
+        let entry = gtk::PasswordEntry::new();
+        entry.set_text("s3cret");
+        let pin = take_pin(&entry);
+        assert_eq!(pin.as_str(), "s3cret");
+        assert_eq!(entry.text().as_str(), "");
     }
 }

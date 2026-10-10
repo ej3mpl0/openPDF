@@ -198,11 +198,20 @@ impl Session {
 
     pub fn poll(&self) -> bool {
         let mut dirty = false;
-        while self.engine.try_recv().is_some() {
-            crate::measure::mark_first_tile_rendered();
+        while self.poll_one() {
             dirty = true;
         }
         dirty
+    }
+
+    /// Take at most one finished tile so the UI can `queue_draw` per arrival.
+    pub fn poll_one(&self) -> bool {
+        if self.engine.try_recv().is_some() {
+            crate::measure::mark_first_tile_rendered();
+            true
+        } else {
+            false
+        }
     }
 
     pub fn page_text(&self, page: u32) -> Result<String, BackendError> {
@@ -386,6 +395,13 @@ impl Opened {
     pub fn poll(&self) -> bool {
         match self {
             Self::Core(s) => s.poll(),
+            Self::Mock(_) => false,
+        }
+    }
+
+    pub fn poll_one(&self) -> bool {
+        match self {
+            Self::Core(s) => s.poll_one(),
             Self::Mock(_) => false,
         }
     }

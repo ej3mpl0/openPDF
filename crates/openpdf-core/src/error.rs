@@ -5,7 +5,11 @@ use crate::i18n::{tr, tr_args};
 
 /// Crate-wide error type. Variants are stable so the GTK UI can localize them
 /// itself; [`Display`] uses the shared gettext catalog.
+///
+/// `#[non_exhaustive]` so additive variants (`PinCancelled`, …) do not break
+/// downstream `match` expressions that include a wildcard arm.
 #[derive(Debug)]
+#[non_exhaustive]
 pub enum Error {
     Io(io::Error),
     Structure(String),
@@ -272,6 +276,25 @@ mod tests {
             describe_signer_unavailable(&SignerUnavailableReason::ModuleNotFound),
             "PKCS#11 module not available"
         );
+        set_locale("en");
+        assert!(matches!(Error::PinCancelled, Error::PinCancelled));
+    }
+
+    #[test]
+    fn pin_cancelled_is_structured_not_sign() {
+        let _g = crate::test_support::locale_test_guard();
+        set_locale("en");
+        // Unit variant: no payload. `Error::PinCancelled` (not `PinCancelled(_)`).
+        let err = Error::PinCancelled;
+        assert!(matches!(err, Error::PinCancelled));
+        assert_eq!(err.to_string(), "PIN entry was cancelled");
+        assert!(!matches!(err, Error::Sign(_)));
+        set_locale("es");
+        assert_eq!(
+            Error::PinCancelled.to_string(),
+            tr("PIN entry was cancelled")
+        );
+        assert_ne!(Error::PinCancelled.to_string(), "PIN entry was cancelled");
         set_locale("en");
     }
 }

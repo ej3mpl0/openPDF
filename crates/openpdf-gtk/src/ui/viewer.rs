@@ -166,14 +166,14 @@ impl DocumentView {
             )
         });
         self.shared.doc.request_tiles(&[key], Priority::Visible);
-        if self.shared.doc.poll() {
+        if self.shared.doc.poll_one() {
             self.pages_area.queue_draw();
         }
         let doc = self.shared.doc.clone();
         let area = self.pages_area.clone();
         let spins = Rc::new(Cell::new(0u32));
         glib::idle_add_local_full(glib::Priority::HIGH, move || {
-            if doc.poll() {
+            if doc.poll_one() {
                 area.queue_draw();
             }
             let n = spins.get() + 1;
@@ -553,18 +553,21 @@ pub fn build(doc: Rc<Opened>, settings: &Settings, lang: Lang) -> Rc<DocumentVie
     view
 }
 
-/// Drain the render queue on a HIGH idle so each arrived tile `queue_draw`s
-/// and paints on the next frame. When the queue is empty, wait 1 ms before
-/// idling again so we do not spin.
+/// One finished tile → one `queue_draw`. Yield after each arrival so GTK can
+/// paint whatever is already in the cache instead of draining the queue first.
 fn schedule_tile_pump(view: Rc<DocumentView>) {
     fn tick(view: Rc<DocumentView>) {
         glib::idle_add_local_full(
             glib::Priority::HIGH,
             clone!(@strong view => move || {
-                if view.shared.doc.poll() {
+                if view.shared.doc.poll_one() {
                     view.pages_area.queue_draw();
                     view.thumbs_area.queue_draw();
-                    glib::ControlFlow::Continue
+                    let again = view.clone();
+                    glib::timeout_add_local_once(std::time::Duration::ZERO, move || {
+                        tick(again);
+                    });
+                    glib::ControlFlow::Break
                 } else {
                     let again = view.clone();
                     glib::timeout_add_local_once(std::time::Duration::from_millis(1), move || {
@@ -678,7 +681,6 @@ fn thumb_tile_keys(view: &DocumentView) -> Vec<TileKey> {
 }
 
 fn paint_pages(cr: &cairo::Context, view: &DocumentView) {
-    let _ = view.shared.doc.poll();
     let layout = view.shared.layout.borrow();
 
     cr.set_source_rgb(0.78, 0.77, 0.75);
@@ -721,7 +723,6 @@ fn paint_pages(cr: &cairo::Context, view: &DocumentView) {
 }
 
 fn paint_thumbs(cr: &cairo::Context, view: &DocumentView) {
-    let _ = view.shared.doc.poll();
     let layout = view.shared.thumb_layout.borrow();
     let current = view.shared.current_page.get();
     cr.set_source_rgb(0.94, 0.93, 0.91);

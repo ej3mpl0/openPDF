@@ -4,7 +4,7 @@ use std::rc::Rc;
 use std::sync::Arc;
 
 use crate::backend::MockDocument;
-use crate::i18n::t;
+use crate::i18n::{format_core_error, t};
 use crate::session::{sample_pdf_path, MockView, Opened, Session};
 use crate::settings::{self, Settings};
 use crate::sign::format_verify_results;
@@ -400,7 +400,7 @@ fn add_opened(ctx: &Ctx, opened: Opened) {
                 "Signed document — read-only. Rotate, delete and reorder are disabled.",
             ),
         );
-        maybe_show_verify(&ctx.toast, ctx.signer.as_ref(), view.opened());
+        maybe_show_verify(&ctx.toast, ctx.signer.clone(), view.opened());
     } else if placeholder {
         show_toast(
             &ctx.toast,
@@ -412,15 +412,34 @@ fn add_opened(ctx: &Ctx, opened: Opened) {
     }
 }
 
-fn maybe_show_verify(overlay: &adw::ToastOverlay, signer: &dyn Signer, opened: &Opened) {
-    let Ok(bytes) = opened.to_bytes() else {
-        return;
-    };
-    if let Ok(infos) = signer.verify(&bytes) {
-        if !infos.is_empty() {
-            show_toast(overlay, &format_verify_results(&infos));
+fn maybe_show_verify(overlay: &adw::ToastOverlay, signer: Arc<dyn Signer>, opened: &Opened) {
+    let bytes = match opened.to_bytes() {
+        Ok(bytes) => bytes,
+        Err(e) => {
+            show_toast(overlay, &e.to_string());
+            return;
         }
-    }
+    };
+    let overlay = overlay.clone();
+    let (tx, rx) = std::sync::mpsc::channel();
+    std::thread::spawn(move || {
+        let _ = tx.send(signer.verify(&bytes));
+    });
+    glib::timeout_add_local(std::time::Duration::from_millis(16), move || {
+        match rx.try_recv() {
+            Ok(Ok(infos)) if !infos.is_empty() => {
+                show_toast(&overlay, &format_verify_results(&infos));
+                glib::ControlFlow::Break
+            }
+            Ok(Ok(_)) => glib::ControlFlow::Break,
+            Ok(Err(e)) => {
+                show_toast(&overlay, &format_core_error(&e));
+                glib::ControlFlow::Break
+            }
+            Err(std::sync::mpsc::TryRecvError::Empty) => glib::ControlFlow::Continue,
+            Err(std::sync::mpsc::TryRecvError::Disconnected) => glib::ControlFlow::Break,
+        }
+    });
 }
 
 fn start_sign(ctx: &Ctx) {
@@ -442,7 +461,7 @@ fn start_sign(ctx: &Ctx) {
                         "Signed document — read-only. Rotate, delete and reorder are disabled.",
                     ),
                 );
-                maybe_show_verify(&overlay, signer.as_ref(), view.opened());
+                maybe_show_verify(&overlay, signer.clone(), view.opened());
             }
             Err(e) => show_toast(&overlay, &e),
         }
