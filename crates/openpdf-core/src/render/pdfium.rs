@@ -15,9 +15,9 @@ pub fn last_convert_ms() -> f64 {
     LAST_CONVERT_NS.load(Ordering::Relaxed) as f64 / 1_000_000.0
 }
 
-fn take_rgba(bytes: Vec<u8>, w: u32, h: u32) -> Vec<u8> {
+fn take_rgba(bitmap: &PdfBitmap, w: u32, h: u32) -> Vec<u8> {
     let t = Instant::now();
-    let out = force_rgba(bytes, w, h);
+    let out = force_rgba(bitmap.as_rgba_bytes(), w, h);
     LAST_CONVERT_NS.store(t.elapsed().as_nanos() as u64, Ordering::Relaxed);
     out
 }
@@ -178,7 +178,7 @@ pub fn render_tile(
         .map_err(|e| Error::pdfium(e.to_string()))?;
     match page.render_into_bitmap_with_config(&mut bitmap, &config) {
         Ok(()) => {
-            let rgba = take_rgba(bitmap.as_rgba_bytes(), tw, th);
+            let rgba = take_rgba(&bitmap, tw, th);
             Ok((tw, th, rgba))
         }
         Err(_) => {
@@ -191,7 +191,7 @@ pub fn render_tile(
                         .render_annotations(true),
                 )
                 .map_err(|e| Error::pdfium(e.to_string()))?;
-            let raw = take_rgba(full.as_rgba_bytes(), full_w, full_h);
+            let raw = take_rgba(&full, full_w, full_h);
             Ok((tw, th, crop_rgba(&raw, full_w, full_h, x0, y0, tw, th)))
         }
     }
@@ -222,7 +222,7 @@ pub fn render_page(
         .map_err(|e| Error::pdfium(e.to_string()))?;
     let w = bitmap.width() as u32;
     let h = bitmap.height() as u32;
-    Ok((w, h, take_rgba(bitmap.as_rgba_bytes(), w, h)))
+    Ok((w, h, take_rgba(&bitmap, w, h)))
 }
 
 pub fn page_text(document: &PdfDocument<'_>, page_index: u32) -> Result<String> {

@@ -184,7 +184,7 @@ fn gui_visible_keys(doc: openpdf_core::DocumentId) -> Vec<TileKey> {
 fn measure_visible_queue(
     engine: &Engine,
     doc: openpdf_core::DocumentId,
-) -> (u32, f64, i32, i32, f64) {
+) -> (u32, f64, i32, i32, f64, f64) {
     while engine.try_recv().is_some() {}
     let _ = engine.begin_frame();
     let keys = gui_visible_keys(doc);
@@ -193,6 +193,7 @@ fn measure_visible_queue(
     let t0 = Instant::now();
     engine.request_tiles(reqs).expect("request_tiles");
     let mut first_ready_ms = -1.0;
+    let mut convert_ms = -1.0;
     let mut fx = -1;
     let mut fy = -1;
     let mut got = 0u32;
@@ -201,6 +202,7 @@ fn measure_visible_queue(
         if let Some(TileEvent::Ready(tile)) = engine.recv_timeout(Duration::from_millis(200)) {
             if first_ready_ms < 0.0 {
                 first_ready_ms = t0.elapsed().as_secs_f64() * 1000.0;
+                convert_ms = engine.last_convert_ms();
                 fx = tile.key.x as i32;
                 fy = tile.key.y as i32;
             }
@@ -209,7 +211,7 @@ fn measure_visible_queue(
     }
     let visible_tiles_ms = t0.elapsed().as_secs_f64() * 1000.0;
     debug_assert_eq!(got, n, "visible tile queue delivered {got}/{n}");
-    (n, first_ready_ms, fx, fy, visible_tiles_ms)
+    (n, first_ready_ms, fx, fy, visible_tiles_ms, convert_ms)
 }
 
 fn main() {
@@ -251,14 +253,19 @@ fn main() {
             let t_doc = Instant::now();
             engine.bind(&opened).expect("bind");
             let doc_open_ms = t_doc.elapsed().as_secs_f64() * 1000.0;
+            let (
+                visible_tiles,
+                first_ready_ms,
+                first_ready_x,
+                first_ready_y,
+                visible_tiles_ms,
+                convert_ms,
+            ) = measure_visible_queue(&engine, opened.id());
             let key = TileKey::new(opened.id(), 0, 1.0, 0, 0);
             let t2 = Instant::now();
             let tile = engine.render_tile_blocking(key).expect("tile");
             let ms = t2.elapsed().as_secs_f64() * 1000.0;
             assert!(tile.width > 0 && tile.height > 0);
-            let convert_ms = engine.last_convert_ms();
-            let (visible_tiles, first_ready_ms, first_ready_x, first_ready_y, visible_tiles_ms) =
-                measure_visible_queue(&engine, opened.id());
             (
                 ms,
                 true,
