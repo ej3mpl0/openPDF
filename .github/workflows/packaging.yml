@@ -1,0 +1,249 @@
+name: Packaging
+
+on:
+  pull_request:
+    paths:
+      - "packaging/**"
+      - ".github/workflows/packaging.yml"
+      - Cargo.lock
+      - Cargo.toml
+      - crates/**/Cargo.toml
+  workflow_dispatch:
+
+concurrency:
+  group: packaging-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+jobs:
+  cargo-sources:
+    name: cargo-sources.json
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+        with:
+          persist-credentials: false
+      - name: Check cargo-sources.json matches Cargo.lock
+        run: python3 packaging/flatpak/check-cargo-sources.py
+
+  icons:
+    name: Icon names exist in Adwaita (runtime 51)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+        with:
+          persist-credentials: false
+
+      - name: Check app icon names against pinned adwaita-icon-theme
+        shell: bash
+        run: |
+          source packaging/config.sh
+          curl -fsSL -o /tmp/adwaita.tar.xz "$ADWAITA_ICON_THEME_URL"
+          echo "$ADWAITA_ICON_THEME_SHA256  /tmp/adwaita.tar.xz" | sha256sum -c -
+          mkdir -p /tmp/adwaita && tar -xJf /tmp/adwaita.tar.xz -C /tmp/adwaita --strip-components=1
+          packaging/stage-adwaita.sh /tmp/adwaita /tmp/adwaita-staged/Adwaita
+          packaging/check-icons.sh /tmp/adwaita-staged
+
+  notices:
+    name: Third-party notices
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+        with:
+          persist-credentials: false
+
+      - name: Install Rust from rust-toolchain.toml
+        run: |
+          rustup toolchain install
+          rustup show active-toolchain
+
+      - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
+        with:
+          prefix-key: notices
+
+      - name: Install cargo-about (pinned)
+        run: .github/scripts/install-cargo-tool.sh cargo-about
+
+      - name: Generate THIRD-PARTY-NOTICES
+        run: packaging/gen-notices.sh
+
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: third-party-notices
+          path: THIRD-PARTY-NOTICES
+          if-no-files-found: error
+
+  flatpak:
+    name: Flatpak
+    needs: [cargo-sources, notices]
+    runs-on: ubuntu-latest
+    container:
+      image: ghcr.io/flathub-infra/flatpak-github-actions:gnome-51
+      options: --privileged
+    defaults:
+      run:
+        shell: bash
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+        with:
+          persist-credentials: false
+          fetch-depth: 0
+
+      - name: Import desktop metadata from gtk if needed
+        run: |
+          git config --global --add safe.directory "$GITHUB_WORKSPACE"
+          packaging/import-desktop-data.sh
+
+      - name: Download THIRD-PARTY-NOTICES
+        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
+        with:
+          name: third-party-notices
+          path: .
+
+      - name: Check GUI/CLI binary names
+        run: |
+          set -euo pipefail
+          . packaging/config.sh
+          test "$APP_BIN" = "openpdf-gtk"
+          test "$CLI_BIN" = "openpdf"
+          test "$APP_BIN" != "$CLI_BIN"
+          grep -qx "command: ${APP_BIN}" packaging/flatpak/io.github.ej3mpl0.openpdf.yml
+          grep -q "Exec=${APP_BIN} " data/io.github.ej3mpl0.openpdf.desktop
+          grep -q "CLI_BIN" packaging/appimage/build.sh
+          grep -q "CLI_CRATE" packaging/flatpak/io.github.ej3mpl0.openpdf.yml
+
+      - name: Prepare ostree repo and free space
+        run: |
+          set -euo pipefail
+          df -h
+          rm -rf /var/tmp/flatpak-cache || true
+          mkdir -p repo
+          ostree init --repo=repo --mode=archive-z2
+          ostree --repo=repo config set core.min-free-space-percent 0
+          ostree --repo=repo config set core.min-free-space-size 0MB
+
+      - name: Build Flatpak
+        uses: flatpak/flatpak-github-actions/flatpak-builder@79327416609af08178ad73b352877e51450790b3 # v6.8
+        with:
+          bundle: io.github.ej3mpl0.openpdf.flatpak
+          manifest-path: packaging/flatpak/io.github.ej3mpl0.openpdf.yml
+          repo-dir: repo
+          cache: false
+          upload-artifact: false
+
+      - name: Check notices are in the Flatpak
+        run: packaging/check-notices.sh flatpak repo
+
+      - name: Upload Flatpak
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: openpdf-flatpak
+          path: io.github.ej3mpl0.openpdf.flatpak
+          if-no-files-found: error
+
+      - name: Report Flatpak size
+        run: |
+          set -euo pipefail
+          file=io.github.ej3mpl0.openpdf.flatpak
+          bytes=$(stat -c%s "$file")
+          human=$(du -h "$file" | cut -f1)
+          echo "FLATPAK_BYTES=$bytes" >> "$GITHUB_ENV"
+          {
+            echo "## Flatpak"
+            echo
+            echo "| Bundle | Size |"
+            echo "| --- | --- |"
+            echo "| \`$file\` | ${human} (${bytes} bytes) |"
+          } >> "$GITHUB_STEP_SUMMARY"
+
+  appimage:
+    name: AppImage
+    needs: [notices]
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+        with:
+          persist-credentials: false
+          fetch-depth: 0
+
+      - name: Install Rust from rust-toolchain.toml
+        shell: bash
+        run: |
+          rustup toolchain install
+          rustup show active-toolchain
+
+      - name: Install GTK4, libadwaita, and AppImage tools
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends \
+            libgtk-4-dev libadwaita-1-dev pkg-config \
+            librsvg2-dev librsvg2-common file desktop-file-utils dpkg-dev
+
+      - name: Import desktop metadata from gtk if needed
+        run: |
+          git config --global --add safe.directory "$GITHUB_WORKSPACE"
+          packaging/import-desktop-data.sh
+
+      - name: Download THIRD-PARTY-NOTICES
+        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
+        with:
+          name: third-party-notices
+          path: .
+
+      - name: Build AppImage
+        run: packaging/appimage/build.sh
+        env:
+          APPIMAGE_EXTRACT_AND_RUN: "1"
+
+      - name: Check notices are in the AppImage
+        run: packaging/check-notices.sh appimage packaging/appimage/dist/*.AppImage
+        env:
+          APPIMAGE_EXTRACT_AND_RUN: "1"
+
+      - name: Upload AppImage
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: openpdf-appimage
+          path: packaging/appimage/dist/*.AppImage
+          if-no-files-found: error
+
+      - name: Report AppImage size
+        run: |
+          set -euo pipefail
+          file=$(ls packaging/appimage/dist/*.AppImage)
+          bytes=$(stat -c%s "$file")
+          human=$(du -h "$file" | cut -f1)
+          {
+            echo "## AppImage"
+            echo
+            echo "| Bundle | Size |"
+            echo "| --- | --- |"
+            echo "| \`$(basename "$file")\` | ${human} (${bytes} bytes) |"
+          } >> "$GITHUB_STEP_SUMMARY"
+
+  sizes:
+    name: Bundle sizes
+    needs: [flatpak, appimage]
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
+        with:
+          path: artifacts
+
+      - name: Summarize bundle sizes
+        run: |
+          set -euo pipefail
+          {
+            echo "## Bundle sizes"
+            echo
+            echo "| Artifact | Size |"
+            echo "| --- | --- |"
+            for file in artifacts/openpdf-flatpak/*.flatpak artifacts/openpdf-appimage/*.AppImage; do
+              [ -f "$file" ] || continue
+              bytes=$(stat -c%s "$file")
+              human=$(du -h "$file" | cut -f1)
+              echo "| \`$(basename "$file")\` | ${human} (${bytes} bytes) |"
+            done
+          } >> "$GITHUB_STEP_SUMMARY"
