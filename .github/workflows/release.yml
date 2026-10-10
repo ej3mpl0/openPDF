@@ -10,12 +10,29 @@ concurrency:
   cancel-in-progress: false
 
 permissions:
-  contents: write
-  id-token: write
-  attestations: write
+  contents: read
 
 jobs:
+  # Tags carry no branch; refuse to release a tag whose commit is not on main.
+  guard:
+    name: Tag is on main
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - name: Check tag commit is reachable from main
+        run: |
+          set -euo pipefail
+          git fetch --no-tags origin main
+          git merge-base --is-ancestor "$GITHUB_SHA" origin/main
+
   linux-flatpak:
+    needs: [guard]
+    permissions:
+      contents: read
+      id-token: write
+      attestations: write
     name: Linux Flatpak
     runs-on: ubuntu-latest
     container:
@@ -61,6 +78,11 @@ jobs:
           if-no-files-found: error
 
   linux-appimage:
+    needs: [guard]
+    permissions:
+      contents: read
+      id-token: write
+      attestations: write
     name: Linux AppImage
     runs-on: ubuntu-latest
     steps:
@@ -99,6 +121,11 @@ jobs:
           if-no-files-found: error
 
   windows-cli:
+    needs: [guard]
+    permissions:
+      contents: read
+      id-token: write
+      attestations: write
     name: Windows CLI
     runs-on: windows-latest
     defaults:
@@ -151,6 +178,11 @@ jobs:
           if-no-files-found: error
 
   macos-cli:
+    needs: [guard]
+    permissions:
+      contents: read
+      id-token: write
+      attestations: write
     name: macOS CLI (${{ matrix.os }})
     runs-on: ${{ matrix.os }}
     strategy:
@@ -200,8 +232,15 @@ jobs:
 
   publish:
     name: GitHub release
-    needs: [linux-flatpak, linux-appimage, windows-cli, macos-cli]
+    needs: [guard, linux-flatpak, linux-appimage, windows-cli, macos-cli]
     runs-on: ubuntu-latest
+    # Protected environment: required reviewers / tag rules and any signing
+    # secrets live here, never at repo level.
+    environment: release
+    permissions:
+      contents: write
+      id-token: write
+      attestations: write
     steps:
       - uses: actions/download-artifact@v4
         with:

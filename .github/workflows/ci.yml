@@ -1,9 +1,15 @@
 name: CI
 
-on: [push, pull_request]
+# Linux runs on every push and PR. Windows and macOS (2x / 10x billed minutes
+# on private repos) run only on push to main, or on a non-draft PR labelled
+# `ci:full`.
+on:
+  push:
+  pull_request:
+    types: [opened, synchronize, reopened, ready_for_review, labeled]
 
 concurrency:
-  group: ci-${{ github.workflow }}-${{ github.ref }}
+  group: ${{ github.workflow }}-${{ github.ref }}
   cancel-in-progress: true
 
 permissions:
@@ -18,14 +24,12 @@ jobs:
       matrix:
         # Startup budgets match run-measure.py defaults (300 core/CLI, 1500 GUI).
         # Override a single OS here without changing the script.
-        include:
-          - os: ubuntu-latest
-            measure_startup_core_ms: 300
-            measure_startup_gui_ms: 1500
-          - os: windows-latest
-            measure_startup_core_ms: 300
-          - os: macos-latest
-            measure_startup_core_ms: 300
+        include: ${{ fromJSON(
+          ((github.event_name == 'push' && github.ref == 'refs/heads/main') ||
+           (github.event_name == 'pull_request' && !github.event.pull_request.draft &&
+            contains(github.event.pull_request.labels.*.name, 'ci:full')))
+          && '[{"os":"ubuntu-latest","measure_startup_core_ms":300,"measure_startup_gui_ms":1500},{"os":"windows-latest","measure_startup_core_ms":300},{"os":"macos-latest","measure_startup_core_ms":300}]'
+          || '[{"os":"ubuntu-latest","measure_startup_core_ms":300,"measure_startup_gui_ms":1500}]') }}
     defaults:
       run:
         shell: bash
