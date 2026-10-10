@@ -369,8 +369,6 @@ fn install_accels(app: &adw::Application) {
     app.set_accels_for_action("win.redo", &["<Ctrl><Shift>z"]);
 }
 
-/// Bundle toolbar / header symbolic icons so Xvfb without a full Adwaita
-/// theme does not show the `image-missing` placeholder.
 fn register_icons() {
     let bytes = include_bytes!(concat!(env!("OUT_DIR"), "/icons.gresource"));
     match gtk::gio::Resource::from_data(&gtk::glib::Bytes::from_static(bytes)) {
