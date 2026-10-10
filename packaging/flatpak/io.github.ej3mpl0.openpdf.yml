@@ -154,6 +154,12 @@ modules:
             exit 1
           fi
         fi
+        # Generated outside the sandbox (packaging/gen-notices.sh, pinned cargo-about).
+        if [ ! -s "$NOTICES_FILE" ]; then
+          echo "$NOTICES_FILE missing: run packaging/gen-notices.sh before flatpak-builder" >&2
+          exit 1
+        fi
+        install -Dm0644 "$NOTICES_FILE" "${FLATPAK_DEST}/${NOTICES_REL}"
         install -Dm0644 "$DESKTOP_FILE" "${FLATPAK_DEST}/share/applications/${APP_ID}.desktop"
         install -Dm0644 "$METAINFO_FILE" "${FLATPAK_DEST}/share/metainfo/${APP_ID}.metainfo.xml"
         icon_src=""

@@ -1,0 +1,49 @@
+# cargo-deny 0.20.2 (pinned in .github/workflows/ci.yml, job "Licenses (cargo-deny)").
+[graph]
+all-features = false
+
+[licenses]
+# SPDX expressions are evaluated: "A OR B" passes if either side is allowed,
+# e.g. self_cell "Apache-2.0 OR GPL-2.0-only" passes via Apache-2.0.
+allow = [
+  "MIT",
+  "Apache-2.0",
+  "BSD-2-Clause",
+  "BSD-3-Clause",
+  "MPL-2.0",
+  "ISC",
+  "Unicode-3.0",
+  "Unicode-DFS-2016",
+  "Zlib",
+]
+confidence-threshold = 0.9
+# Build-time only (gtk-rs system-deps -> cfg-expr); the LLVM exception only
+# relaxes Apache-2.0. Scoped to this crate, not allowed globally.
+exceptions = [
+  { crate = "target-lexicon", allow = ["Apache-2.0 WITH LLVM-exception"] },
+]
+
+[advisories]
+version = 2
+yanked = "deny"
+# Each ignore needs an owner/issue; remove as soon as it is fixed.
+ignore = [
+  # rsa Marvin timing side channel; no patched release exists (latest rsa
+  # 0.9.10 / 0.10.0-rc still affected). openpdf-sign only uses rsa locally
+  # (software-key tests / verification), not as a network oracle.
+  { id = "RUSTSEC-2023-0071", reason = "no fix upstream; local-only use in openpdf-sign" },
+  # lopdf stack overflow on deeply nested objects; fix is lopdf >= 0.42, an
+  # API-breaking bump of openpdf-core. TRACKED: must be fixed in its own PR.
+  { id = "RUSTSEC-2026-0187", reason = "needs lopdf 0.36 -> 0.42 core upgrade, separate PR" },
+]
+
+[bans]
+multiple-versions = "warn"
+# Internal path deps count as wildcards because the crates are not marked
+# publish = false; registry wildcards are still caught by sources below.
+wildcards = "allow"
+
+[sources]
+unknown-registry = "deny"
+unknown-git = "deny"
+allow-registry = ["https://github.com/rust-lang/crates.io-index"]

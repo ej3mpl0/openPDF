@@ -9,3 +9,4 @@ packaging/flatpak/.cache/
 *.flatpak
 *.AppImage
 
+/THIRD-PARTY-NOTICES

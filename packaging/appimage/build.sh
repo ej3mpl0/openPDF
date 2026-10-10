@@ -89,6 +89,10 @@ mkdir -p "$APPDIR/usr/bin" "$APPDIR/usr/lib" "$APPDIR/usr/share/applications" \
 install -Dm0755 "$BIN_PATH" "$APPDIR/usr/bin/$APP_BIN"
 install -Dm0755 "$CLI_PATH" "$APPDIR/usr/bin/$CLI_BIN"
 install -Dm0755 "$PDFIUM_DIR/lib/libpdfium.so" "$APPDIR/usr/lib/libpdfium.so"
+# Third-party notices: CI generates them in a separate job (packaging/gen-notices.sh);
+# locally they are generated here if missing (needs pinned cargo-about).
+[[ -s "$ROOT/$NOTICES_FILE" ]] || "$ROOT/packaging/gen-notices.sh" "$ROOT/$NOTICES_FILE"
+install -Dm0644 "$ROOT/$NOTICES_FILE" "$APPDIR/usr/$NOTICES_REL"
 install -Dm0644 "$ROOT/$DESKTOP_FILE" "$APPDIR/usr/share/applications/${APP_ID}.desktop"
 install -Dm0644 "$ROOT/$METAINFO_FILE" "$APPDIR/usr/share/metainfo/${APP_ID}.metainfo.xml"
 

@@ -46,9 +46,38 @@ jobs:
           packaging/stage-adwaita.sh /tmp/adwaita /tmp/adwaita-staged/Adwaita
           packaging/check-icons.sh /tmp/adwaita-staged
 
+  notices:
+    name: Third-party notices
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+        with:
+          persist-credentials: false
+
+      - name: Install Rust from rust-toolchain.toml
+        run: |
+          rustup toolchain install
+          rustup show active-toolchain
+
+      - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
+        with:
+          prefix-key: notices
+
+      - name: Install cargo-about (pinned)
+        run: .github/scripts/install-cargo-tool.sh cargo-about
+
+      - name: Generate THIRD-PARTY-NOTICES
+        run: packaging/gen-notices.sh
+
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: third-party-notices
+          path: THIRD-PARTY-NOTICES
+          if-no-files-found: error
+
   flatpak:
     name: Flatpak
-    needs: [cargo-sources]
+    needs: [cargo-sources, notices]
     runs-on: ubuntu-latest
     container:
       image: ghcr.io/flathub-infra/flatpak-github-actions:gnome-51
@@ -66,6 +95,12 @@ jobs:
         run: |
           git config --global --add safe.directory "$GITHUB_WORKSPACE"
           packaging/import-desktop-data.sh
+
+      - name: Download THIRD-PARTY-NOTICES
+        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
+        with:
+          name: third-party-notices
+          path: .
 
       - name: Check GUI/CLI binary names
         run: |
@@ -98,6 +133,9 @@ jobs:
           cache: false
           upload-artifact: false
 
+      - name: Check notices are in the Flatpak
+        run: packaging/check-notices.sh flatpak repo
+
       - name: Upload Flatpak
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
         with:
@@ -122,6 +160,7 @@ jobs:
 
   appimage:
     name: AppImage
+    needs: [notices]
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
@@ -147,8 +186,19 @@ jobs:
           git config --global --add safe.directory "$GITHUB_WORKSPACE"
           packaging/import-desktop-data.sh
 
+      - name: Download THIRD-PARTY-NOTICES
+        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
+        with:
+          name: third-party-notices
+          path: .
+
       - name: Build AppImage
         run: packaging/appimage/build.sh
+        env:
+          APPIMAGE_EXTRACT_AND_RUN: "1"
+
+      - name: Check notices are in the AppImage
+        run: packaging/check-notices.sh appimage packaging/appimage/dist/*.AppImage
         env:
           APPIMAGE_EXTRACT_AND_RUN: "1"
 

@@ -28,8 +28,40 @@ jobs:
           # fetch-depth: 0 already brought origin/main; no credentials needed.
           git merge-base --is-ancestor "$GITHUB_SHA" origin/main
 
-  linux-flatpak:
+  notices:
+    name: Third-party notices
     needs: [guard]
+    permissions:
+      contents: read
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+        with:
+          persist-credentials: false
+
+      - name: Install Rust from rust-toolchain.toml
+        run: |
+          rustup toolchain install
+          rustup show active-toolchain
+
+      - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
+        with:
+          prefix-key: notices
+
+      - name: Install cargo-about (pinned)
+        run: .github/scripts/install-cargo-tool.sh cargo-about
+
+      - name: Generate THIRD-PARTY-NOTICES
+        run: packaging/gen-notices.sh
+
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: third-party-notices
+          path: THIRD-PARTY-NOTICES
+          if-no-files-found: error
+
+  linux-flatpak:
+    needs: [guard, notices]
     permissions:
       contents: read
       id-token: write
@@ -47,6 +79,12 @@ jobs:
         with:
           persist-credentials: false
           fetch-depth: 0
+
+      - name: Download THIRD-PARTY-NOTICES
+        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
+        with:
+          name: third-party-notices
+          path: .
 
       - name: Import desktop metadata from gtk if needed
         run: |
@@ -69,6 +107,9 @@ jobs:
           cache: false
           upload-artifact: false
 
+      - name: Check notices are in the Flatpak
+        run: packaging/check-notices.sh flatpak repo
+
       - uses: actions/attest-build-provenance@e8998f949152b193b063cb0ec769d69d929409be # v2.4.0
         with:
           subject-path: io.github.ej3mpl0.openpdf.flatpak
@@ -80,7 +121,7 @@ jobs:
           if-no-files-found: error
 
   linux-appimage:
-    needs: [guard]
+    needs: [guard, notices]
     permissions:
       contents: read
       id-token: write
@@ -112,8 +153,19 @@ jobs:
       - name: Import desktop metadata from gtk if needed
         run: packaging/import-desktop-data.sh
 
+      - name: Download THIRD-PARTY-NOTICES
+        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
+        with:
+          name: third-party-notices
+          path: .
+
       - name: Build AppImage
         run: packaging/appimage/build.sh
+        env:
+          APPIMAGE_EXTRACT_AND_RUN: "1"
+
+      - name: Check notices are in the AppImage
+        run: packaging/check-notices.sh appimage packaging/appimage/dist/*.AppImage
         env:
           APPIMAGE_EXTRACT_AND_RUN: "1"
 
@@ -128,7 +180,7 @@ jobs:
           if-no-files-found: error
 
   windows-cli:
-    needs: [guard]
+    needs: [guard, notices]
     permissions:
       contents: read
       id-token: write
@@ -157,6 +209,12 @@ jobs:
       - name: Build CLI
         run: cargo build --release -p openpdf-cli
 
+      - name: Download THIRD-PARTY-NOTICES
+        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
+        with:
+          name: third-party-notices
+          path: .
+
       - name: Pack portable zip
         run: |
           set -euo pipefail
@@ -165,6 +223,7 @@ jobs:
           mkdir -p "dist/$name"
           cp target/release/openpdf.exe "dist/$name/"
           cp "$PDFIUM_LIB" "dist/$name/pdfium.dll"
+          cp THIRD-PARTY-NOTICES "dist/$name/THIRD-PARTY-NOTICES"
           python3 - <<'PY'
           import zipfile
           from pathlib import Path
@@ -180,6 +239,10 @@ jobs:
           print(zpath)
           PY
 
+      - name: Check notices are in the zip
+        shell: bash
+        run: packaging/check-notices.sh zip dist/openpdf-*-windows-x64.zip
+
       - uses: actions/attest-build-provenance@e8998f949152b193b063cb0ec769d69d929409be # v2.4.0
         with:
           subject-path: dist/openpdf-*-windows-x64.zip
@@ -191,7 +254,7 @@ jobs:
           if-no-files-found: error
 
   macos-cli:
-    needs: [guard]
+    needs: [guard, notices]
     permissions:
       contents: read
       id-token: write
@@ -224,6 +287,12 @@ jobs:
       - name: Build CLI
         run: cargo build --release -p openpdf-cli
 
+      - name: Download THIRD-PARTY-NOTICES
+        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
+        with:
+          name: third-party-notices
+          path: .
+
       - name: Pack tar.gz
         run: |
           set -euo pipefail
@@ -237,7 +306,11 @@ jobs:
           mkdir -p "$stage"
           cp target/release/openpdf "$stage/"
           cp "$PDFIUM_LIB" "$stage/libpdfium.dylib"
+          cp THIRD-PARTY-NOTICES "$stage/THIRD-PARTY-NOTICES"
           tar -C dist -czf "${stage}.tar.gz" "$(basename "$stage")"
+
+      - name: Check notices are in the tar.gz
+        run: packaging/check-notices.sh tar dist/openpdf-*-macos-*.tar.gz
 
       - uses: actions/attest-build-provenance@e8998f949152b193b063cb0ec769d69d929409be # v2.4.0
         with:

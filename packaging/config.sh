@@ -35,3 +35,12 @@ LINUXDEPLOY_PLUGIN_GTK_SHA256="b0f4cbc684a0103a9651f0955b635eaea0096b3a66c0f5a2c
 ADWAITA_ICON_THEME_VERSION="51.0"
 ADWAITA_ICON_THEME_URL="https://download.gnome.org/sources/adwaita-icon-theme/51/adwaita-icon-theme-51.0.tar.xz"
 ADWAITA_ICON_THEME_SHA256="ba561cf3c96305a47179fa5605856ad695c9238ea07f7093aebd9ba80c4e323b"
+
+# License tooling (installed with cargo install --locked --version).
+CARGO_ABOUT_VERSION="0.9.2"
+CARGO_DENY_VERSION="0.20.2"
+# Installed path of the combined notices inside Linux packages (relative to
+# the prefix: /app in Flatpak, $APPDIR/usr in AppImage). Windows/macOS
+# archives carry it at the archive root, next to the binary.
+NOTICES_FILE="THIRD-PARTY-NOTICES"
+NOTICES_REL="share/openpdf/${NOTICES_FILE}"

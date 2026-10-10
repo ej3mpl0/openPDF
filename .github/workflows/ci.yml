@@ -158,6 +158,29 @@ jobs:
   # MSRV = Rust shipped in org.freedesktop.Sdk.Extension.rust-stable//26.08,
   # which the GNOME 51 Flatpak builds with. Keep in sync with Cargo.toml
   # [workspace.package] rust-version.
+  licenses:
+    name: Licenses (cargo-deny)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+        with:
+          persist-credentials: false
+
+      - name: Install Rust from rust-toolchain.toml
+        run: |
+          rustup toolchain install
+          rustup show active-toolchain
+
+      - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
+        with:
+          prefix-key: deny
+
+      - name: Install cargo-deny (pinned)
+        run: .github/scripts/install-cargo-tool.sh cargo-deny
+
+      - name: cargo deny check (licenses, advisories, bans, sources)
+        run: cargo deny --locked check
+
   msrv:
     name: MSRV (Flatpak SDK Rust)
     runs-on: ubuntu-latest
