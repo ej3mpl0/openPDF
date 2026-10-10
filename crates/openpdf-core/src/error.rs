@@ -40,13 +40,30 @@ pub enum Error {
 }
 
 /// Why [`Error::SignerUnavailable`] fired. Match this; do not parse [`Display`].
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+///
+/// `#[non_exhaustive]` so later reasons (pinpad, slot, …) do not break
+/// downstream `match` expressions that include a wildcard arm.
+#[derive(Clone, Debug, PartialEq, Eq)]
 #[non_exhaustive]
 pub enum SignerUnavailableReason {
     /// No PKCS#11 module on the search path / `OPENPDF_PKCS11_MODULE`.
     ModuleNotFound,
-    /// A module path was found but loading it failed.
-    LoadFailed,
+    /// A module path was found but `dlopen` / cryptoki load failed.
+    LoadFailed {
+        /// Path that failed (`OPENPDF_PKCS11_MODULE` or a searched default).
+        module: String,
+        /// System/loader error text (not localized).
+        detail: String,
+    },
+}
+
+impl SignerUnavailableReason {
+    pub fn load_failed(module: impl Into<String>, detail: impl Into<String>) -> Self {
+        Self::LoadFailed {
+            module: module.into(),
+            detail: detail.into(),
+        }
+    }
 }
 
 /// User-facing invalid-input cases. Match this instead of parsing [`Display`].
@@ -213,14 +230,17 @@ impl Error {
 pub fn describe_signer_unavailable(reason: &SignerUnavailableReason) -> String {
     match reason {
         SignerUnavailableReason::ModuleNotFound => tr("PKCS#11 module not available"),
-        SignerUnavailableReason::LoadFailed => tr("Could not load the PKCS#11 module"),
+        SignerUnavailableReason::LoadFailed { module, detail } => tr_args(
+            "Could not load the PKCS#11 module {module}: {detail}",
+            &[("module", module), ("detail", detail)],
+        ),
     }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::i18n::{set_locale, tr};
+    use crate::i18n::{set_locale, tr, tr_args};
 
     #[test]
     fn display_follows_locale() {
@@ -258,8 +278,11 @@ mod tests {
         set_locale("en");
         assert_eq!(err.to_string(), "PKCS#11 module not available");
         assert_eq!(
-            describe_signer_unavailable(&SignerUnavailableReason::LoadFailed),
-            "Could not load the PKCS#11 module"
+            describe_signer_unavailable(&SignerUnavailableReason::load_failed(
+                "/usr/lib/softhsm/libsofthsm2.so",
+                "libfoo.so: cannot open shared object file",
+            )),
+            "Could not load the PKCS#11 module /usr/lib/softhsm/libsofthsm2.so: libfoo.so: cannot open shared object file"
         );
         set_locale("es");
         assert_ne!(
@@ -285,6 +308,53 @@ mod tests {
             tr("PIN entry was cancelled")
         );
         assert_ne!(Error::PinCancelled.to_string(), "PIN entry was cancelled");
+        set_locale("en");
+    }
+
+    #[test]
+    fn load_failed_carries_module_path_and_system_detail() {
+        let _g = crate::test_support::locale_test_guard();
+        let reason = SignerUnavailableReason::load_failed(
+            "/usr/lib/softhsm/libsofthsm2.so",
+            "libfoo.so: cannot open shared object file",
+        );
+        assert!(matches!(
+            reason,
+            SignerUnavailableReason::LoadFailed {
+                ref module,
+                ref detail,
+            } if module == "/usr/lib/softhsm/libsofthsm2.so"
+                && detail == "libfoo.so: cannot open shared object file"
+        ));
+        let err = Error::signer_unavailable(reason.clone());
+        set_locale("en");
+        let en = describe_signer_unavailable(&reason);
+        assert_eq!(
+            en,
+            "Could not load the PKCS#11 module /usr/lib/softhsm/libsofthsm2.so: libfoo.so: cannot open shared object file"
+        );
+        assert_eq!(err.to_string(), en);
+        set_locale("es");
+        let es = describe_signer_unavailable(&reason);
+        assert!(
+            es.contains("/usr/lib/softhsm/libsofthsm2.so"),
+            "GTK error must keep the module path: {es}"
+        );
+        assert!(
+            es.contains("libfoo.so: cannot open shared object file"),
+            "GTK error must keep the system detail: {es}"
+        );
+        assert_eq!(
+            es,
+            tr_args(
+                "Could not load the PKCS#11 module {module}: {detail}",
+                &[
+                    ("module", "/usr/lib/softhsm/libsofthsm2.so"),
+                    ("detail", "libfoo.so: cannot open shared object file"),
+                ]
+            )
+        );
+        assert_ne!(es, en);
         set_locale("en");
     }
 }

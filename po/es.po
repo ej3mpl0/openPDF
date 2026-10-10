@@ -421,5 +421,5 @@ msgstr "Se canceló la introducción del PIN"
 msgid "PKCS#11 module not available"
 msgstr "Módulo PKCS#11 no disponible"
 
-msgid "Could not load the PKCS#11 module"
-msgstr "No se pudo cargar el módulo PKCS#11"
+msgid "Could not load the PKCS#11 module {module}: {detail}"
+msgstr "No se pudo cargar el módulo PKCS#11 {module}: {detail}"
