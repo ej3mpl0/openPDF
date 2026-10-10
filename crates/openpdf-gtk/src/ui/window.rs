@@ -16,7 +16,7 @@ use gtk::gio;
 use gtk::glib::{self, clone};
 use gtk4 as gtk;
 use libadwaita as adw;
-use openpdf_core::{Engine, Signer, Verifier};
+use openpdf_core::{tr_args, Engine, Signer, Verifier};
 
 use super::about;
 use super::home;
@@ -473,10 +473,12 @@ fn start_sign(ctx: &Ctx) {
     let verifier = ctx.verifier.clone();
     let overlay = ctx.toast.clone();
     let window = ctx.window.clone();
+    let tab_view = ctx.tab_view.clone();
     sign_ui::present_picker(&ctx.window, &ctx.toast, lang, signer.clone(), move |req| {
         sign_on_worker(
             &window,
             &overlay,
+            &tab_view,
             lang,
             view.clone(),
             signer.clone(),
@@ -492,6 +494,7 @@ fn start_sign(ctx: &Ctx) {
 fn sign_on_worker(
     parent: &adw::ApplicationWindow,
     overlay: &adw::ToastOverlay,
+    tab_view: &adw::TabView,
     lang: crate::Lang,
     view: Rc<DocumentView>,
     signer: Arc<dyn Signer>,
@@ -568,6 +571,7 @@ fn sign_on_worker(
     });
 
     let overlay = overlay.clone();
+    let tab_view = tab_view.clone();
     glib::timeout_add_local(std::time::Duration::from_millis(16), move || {
         match rx.try_recv() {
             Ok(Ok(Ok(signed))) => {
@@ -575,9 +579,22 @@ fn sign_on_worker(
                 if cancelled.load(Ordering::SeqCst) {
                     return glib::ControlFlow::Break;
                 }
-                match view.opened().apply_signed_bytes(signed) {
-                    Ok(()) => {
+                match view.opened().persist_signed(signed) {
+                    Ok(dest) => {
                         view.refresh_lock_chrome();
+                        view.ensure_laid_out();
+                        view.request_first_tile();
+                        if let Some(page) = tab_view.selected_page() {
+                            page.set_title(&view.title());
+                            page.set_tooltip(&dest.to_string_lossy());
+                        }
+                        show_toast(
+                            &overlay,
+                            &tr_args(
+                                "Saved signed PDF to {path}",
+                                &[("path", &dest.display().to_string())],
+                            ),
+                        );
                         show_toast(
                             &overlay,
                             t(
