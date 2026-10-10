@@ -39,7 +39,21 @@ def fail(msg: str) -> int:
 
 def find_binary(kind: str) -> Path:
     extra = os.environ.get("OPENPDF_MEASURE_BIN")
-    return Path(extra) if extra else RELEASE / BINARIES[kind]
+    if extra:
+        return Path(extra)
+    if kind == "core" and (RELEASE / f"openpdf-measure{EXE}").is_file():
+        return RELEASE / f"openpdf-measure{EXE}"
+    return RELEASE / BINARIES[kind]
+
+
+EXTRA_MS = re.compile(r"^([a-z][a-z0-9_]*_ms)\s*=\s*([0-9.]+)\s*$", re.M)
+
+
+def parse_marks(text: str) -> dict[str, float]:
+    """Every `<name>_ms=<n>` line except startup_ms and limit_* (e.g.
+    activate_ms, window_present_ms, first_frame_ms, first_tile_ms)."""
+    return {k: float(v) for k, v in EXTRA_MS.findall(text)
+            if k != "startup_ms" and not k.startswith("limit_")}
 
 
 def parse_metrics(text: str) -> tuple[int | None, int | None]:
@@ -57,8 +71,20 @@ def parse_metrics(text: str) -> tuple[int | None, int | None]:
     return rss, startup
 
 
+PIN: list[str] = []
+
+
+def pin_prefix(enabled: bool) -> list[str]:
+    """`taskset -c 0` on Linux when available, to cut scheduler noise."""
+    if enabled and sys.platform.startswith("linux"):
+        ts = shutil.which("taskset")
+        if ts:
+            return [ts, "-c", "0"]
+    return []
+
+
 def run_gui(binary: Path, frames: str) -> tuple[int, str]:
-    cmd = [str(binary), "--measure", frames]
+    cmd = PIN + [str(binary), "--measure", frames]
     env = os.environ.copy()
     if sys.platform.startswith("linux"):
         env.setdefault("GDK_BACKEND", "x11")
@@ -66,7 +92,7 @@ def run_gui(binary: Path, frames: str) -> tuple[int, str]:
             xvfb = shutil.which("xvfb-run")
             if not xvfb:
                 raise FileNotFoundError("xvfb-run not found and no display")
-            cmd = [xvfb, "-a", "--server-args=-screen 0 1280x800x24"] + cmd
+            cmd = [xvfb, "-a", "--server-args=-screen 0 1280x800x24"] + cmd  # taskset pins the app; xvfb-run execs it
     proc = subprocess.run(cmd, cwd=ROOT, env=env, text=True,
                           capture_output=True, check=False)
     return proc.returncode, (proc.stdout or "") + (proc.stderr or "")
@@ -96,7 +122,13 @@ def _peak_rss_windows(handle: int) -> int | None:
 
 def run_core(binary: Path) -> tuple[int, str]:
     sample = ROOT / "corpus" / "two_page.pdf"
-    cmd = [str(binary), "info", str(sample)]
+    if binary.stem == "openpdf-measure":
+        # Dedicated core measure binary prints its own marks
+        # (first_tile_ms, pdfium_load_ms, doc_open_ms, startup_ms, peak_rss_bytes).
+        proc = subprocess.run(PIN + [str(binary)], cwd=ROOT, text=True,
+                              capture_output=True, check=False)
+        return proc.returncode, (proc.stdout or "") + (proc.stderr or "")
+    cmd = PIN + [str(binary), "info", str(sample)]
     start = time.perf_counter()
     proc = subprocess.Popen(cmd, cwd=ROOT, text=True,
                             stdout=subprocess.PIPE, stderr=subprocess.STDOUT)
@@ -114,6 +146,7 @@ def run_core(binary: Path) -> tuple[int, str]:
         # ru_maxrss is KiB on Linux, bytes on macOS.
         rss = ru.ru_maxrss if sys.platform == "darwin" else ru.ru_maxrss * 1024
     out = out or ""
+    out = re.sub(r"^.*_ms\s*=.*$", "", out, flags=re.M)  # CLI output is not marks
     out += f"\nstartup_ms={ms}\n"
     if rss is not None:
         out += f"peak_rss_bytes={rss}\npeak_rss_mb={rss / 1048576:.1f}\n"
@@ -127,8 +160,14 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--frames", default=os.environ.get("OPENPDF_MEASURE_FRAMES", "32"))
     parser.add_argument("--runs", type=int, default=int(os.environ.get("OPENPDF_MEASURE_RUNS", "5")),
                         help="repeat N times; enforce median startup and max peak RSS")
+    parser.add_argument("--warmup", type=int, default=int(os.environ.get("OPENPDF_MEASURE_WARMUP", "1")),
+                        help="discarded warm-up runs before measuring")
+    parser.add_argument("--no-pin", action="store_true",
+                        default=os.environ.get("OPENPDF_MEASURE_NO_PIN") == "1",
+                        help="do not wrap runs in `taskset -c 0` on Linux")
     args = parser.parse_args(argv)
-    if args.runs < 1:
+    PIN[:] = pin_prefix(not args.no_pin)
+    if args.runs < 1 or args.warmup < 0:
         return fail("--runs must be >= 1")
     kind = args.kind
     ram_mib = int(os.environ.get("OPENPDF_MEASURE_RAM_MIB", "250"))
@@ -141,6 +180,17 @@ def main(argv: list[str] | None = None) -> int:
 
     print(f"measure: kind={kind} running {binary} runs={args.runs}")
     print(f"measure: limits median startup<={startup_limit} ms, max peak RSS<={ram_mib} MiB")
+    print(f"measure: warmup={args.warmup} pin={' '.join(PIN) or 'off'}")
+    for n in range(1, args.warmup + 1):
+        try:
+            code, output = run_gui(binary, args.frames) if kind == "gui" else run_core(binary)
+        except FileNotFoundError as e:
+            return fail(str(e))
+        if code != 0:
+            print(output)
+            return fail(f"warm-up {n}: binary exited {code}")
+        print(f"measure: warm-up {n}/{args.warmup} discarded")
+    marks: dict[str, list[float]] = {}
     startups: list[int] = []
     rsses: list[int] = []
     for n in range(1, args.runs + 1):
@@ -157,14 +207,33 @@ def main(argv: list[str] | None = None) -> int:
             return fail(f"run {n}: binary printed no startup_ms / peak_rss metrics")
         startups.append(startup)
         rsses.append(rss)
+        extra = parse_marks(output)
+        for k, v in extra.items():
+            marks.setdefault(k, []).append(v)
+        extra_s = "".join(f" {k}={v:g}" for k, v in extra.items())
         print(f"measure: run {n}/{args.runs} startup_ms={startup} peak_rss_bytes={rss} "
-              f"peak_rss_mb={rss / 1048576:.1f}")
+              f"peak_rss_mb={rss / 1048576:.1f}{extra_s}")
 
     med = statistics.median(startups)
     peak = max(rsses)
     print(f"measure: median startup_ms={med:g} (min {min(startups)}, max {max(startups)}); "
           f"max peak_rss_bytes={peak} peak_rss_mb={peak / 1048576:.1f} "
           f"(median {statistics.median(rsses) / 1048576:.1f})")
+    mark_meds = {k: statistics.median(v) for k, v in marks.items()}
+    if mark_meds:
+        print("measure: median marks " + " ".join(f"{k}={v:g}" for k, v in mark_meds.items()))
+    summary = os.environ.get("GITHUB_STEP_SUMMARY")
+    if summary:
+        # Always tagged with --kind; each invocation measures one kind, so
+        # core and gui keys (e.g. first_tile_ms vs ui_first_tile_ms) never mix.
+        label = f"[{kind}] " + os.environ.get("OPENPDF_MEASURE_LABEL", "measure")
+        with open(summary, "a", encoding="utf-8") as f:
+            f.write(f"### {label}\n\n| metric | median |\n| --- | ---: |\n")
+            f.write(f"| startup_ms | {med:g} |\n")
+            for k, v in mark_meds.items():
+                f.write(f"| {k} | {v:g} |\n")
+            f.write(f"| max peak_rss_bytes | {peak} ({peak / 1048576:.1f} MiB) |\n")
+            f.write(f"| runs / warm-up | {args.runs} / {args.warmup} |\n\n")
     bad = False
     if med > startup_limit:
         fail(f"median startup {med:g} ms exceeds {startup_limit} ms")
