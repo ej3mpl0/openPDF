@@ -543,10 +543,8 @@ mod tests {
         )
         .unwrap();
         let signed = crate::signer::append_stub_signature(&plain).unwrap();
-        let path = std::env::temp_dir().join(format!(
-            "openpdf-original-bytes-{}.pdf",
-            std::process::id()
-        ));
+        let path =
+            std::env::temp_dir().join(format!("openpdf-original-bytes-{}.pdf", std::process::id()));
         std::fs::write(&path, &signed).unwrap();
         let doc = Document::open(&path).unwrap();
         std::fs::remove_file(&path).ok();
