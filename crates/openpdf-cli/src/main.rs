@@ -245,9 +245,8 @@ pub(crate) fn path_arg(matches: &clap::ArgMatches, id: &str) -> PathBuf {
 }
 
 fn info(path: &Path) -> Result<()> {
-    let doc = Document::open(path).with_context(|| {
-        tr_args("open {path}", &[("path", &path.display().to_string())])
-    })?;
+    let doc = Document::open(path)
+        .with_context(|| tr_args("open {path}", &[("path", &path.display().to_string())]))?;
     println!(
         "{}",
         tr_args("file: {path}", &[("path", &path.display().to_string())])
@@ -316,9 +315,8 @@ fn render(path: &Path, page_1: u32, zoom: f32, output: &Path) -> Result<()> {
     let raster = engine.render_page(doc.id(), page_1 - 1, zoom)?;
     let img = ImageBuffer::<Rgba<u8>, _>::from_raw(raster.width, raster.height, raster.rgba)
         .context(tr("RGBA buffer size"))?;
-    img.save(output).with_context(|| {
-        tr_args("write {path}", &[("path", &output.display().to_string())])
-    })?;
+    img.save(output)
+        .with_context(|| tr_args("write {path}", &[("path", &output.display().to_string())]))?;
     println!(
         "{}",
         tr_args("wrote {path}", &[("path", &output.display().to_string())])

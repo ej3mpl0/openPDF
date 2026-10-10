@@ -14,10 +14,21 @@ pub struct History {
 
 #[derive(Clone, Debug)]
 pub(crate) enum Applied {
-    Rotate { index: usize, delta: i32 },
-    Delete { index: usize, slot: super::document::PageSlot },
-    Insert { index: usize },
-    Move { from: usize, to: usize },
+    Rotate {
+        index: usize,
+        delta: i32,
+    },
+    Delete {
+        index: usize,
+        slot: super::document::PageSlot,
+    },
+    Insert {
+        index: usize,
+    },
+    Move {
+        from: usize,
+        to: usize,
+    },
 }
 
 impl History {

@@ -31,10 +31,15 @@ pub enum Error {
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum InvalidKind {
     CertIdRequired,
-    RangeInverted { start: u32, end: u32 },
+    RangeInverted {
+        start: u32,
+        end: u32,
+    },
     PageNumbersOneBased,
     NoPageRanges,
-    NotAPageNumber { value: String },
+    NotAPageNumber {
+        value: String,
+    },
     DocumentNotBound,
     CropInverted,
     PasswordRequired,
@@ -43,7 +48,9 @@ pub enum InvalidKind {
     AlreadyEncrypted,
     NoInputImages,
     EmptyOverlayText,
-    UnknownPermission { value: String },
+    UnknownPermission {
+        value: String,
+    },
     OcrUnavailable,
     OcrLanguageMissing {
         language: String,

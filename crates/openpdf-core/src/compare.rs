@@ -54,7 +54,8 @@ pub fn compare_pdfs(
         let text_equal = normalize(&lt) == normalize(&rt);
         let lr = engine.render_page(left.id(), i, zoom)?;
         let rr = engine.render_page(right.id(), i, zoom)?;
-        let (changed, total, pixel_equal) = pixel_diff(&lr.rgba, &rr.rgba, lr.width, lr.height, rr.width, rr.height);
+        let (changed, total, pixel_equal) =
+            pixel_diff(&lr.rgba, &rr.rgba, lr.width, lr.height, rr.width, rr.height);
         if !text_equal || !pixel_equal {
             identical = false;
         }
@@ -78,14 +79,7 @@ fn normalize(s: &str) -> String {
     s.split_whitespace().collect::<Vec<_>>().join(" ")
 }
 
-fn pixel_diff(
-    a: &[u8],
-    b: &[u8],
-    aw: u32,
-    ah: u32,
-    bw: u32,
-    bh: u32,
-) -> (u32, u32, bool) {
+fn pixel_diff(a: &[u8], b: &[u8], aw: u32, ah: u32, bw: u32, bh: u32) -> (u32, u32, bool) {
     if aw != bw || ah != bh {
         let total = aw.max(bw) * ah.max(bh);
         return (total, total, false);

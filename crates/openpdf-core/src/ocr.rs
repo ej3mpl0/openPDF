@@ -100,7 +100,10 @@ pub fn ocr(engine: &Engine, doc: &Document, opts: &OcrOptions) -> Result<Documen
         let page_id = page_map
             .get(&(i + 1))
             .copied()
-            .ok_or(Error::PageOutOfRange { page: i, count: total })?;
+            .ok_or(Error::PageOutOfRange {
+                page: i,
+                count: total,
+            })?;
         ensure_font(&mut inner, page_id, font_id)?;
         let (pw, ph) = page_size(&inner, page_id).unwrap_or((612.0, 792.0));
         let raster = engine.render_page(doc.id(), i, zoom)?;
@@ -138,7 +141,10 @@ struct Word {
 
 enum TessEngine {
     Binary(PathBuf),
-    Library { lib: PathBuf, tessdata: Option<PathBuf> },
+    Library {
+        lib: PathBuf,
+        tessdata: Option<PathBuf>,
+    },
 }
 
 impl TessEngine {
@@ -162,7 +168,9 @@ impl TessEngine {
     fn recognize(&self, raster: &Raster, lang: &str) -> Result<Vec<Word>> {
         match self {
             TessEngine::Binary(bin) => recognize_binary(bin, raster, lang),
-            TessEngine::Library { lib, tessdata } => recognize_library(lib, tessdata.as_deref(), raster, lang),
+            TessEngine::Library { lib, tessdata } => {
+                recognize_library(lib, tessdata.as_deref(), raster, lang)
+            }
         }
     }
 }
@@ -353,7 +361,8 @@ fn recognize_binary(bin: &Path, raster: &Raster, lang: &str) -> Result<Vec<Word>
         raster.rgba.clone(),
     )
     .ok_or_else(|| Error::structure("RGBA buffer size"))?;
-    img.save(&png).map_err(|e| Error::structure(e.to_string()))?;
+    img.save(&png)
+        .map_err(|e| Error::structure(e.to_string()))?;
     let out = Command::new(bin)
         .arg(&png)
         .arg("stdout")
@@ -400,9 +409,9 @@ fn recognize_library(
         > = lib
             .get(b"TessBaseAPISetImage\0")
             .map_err(|_| Error::invalid(InvalidKind::OcrUnavailable))?;
-        let get_tsv: libloading::Symbol<unsafe extern "C" fn(*mut c_void, i32) -> *mut c_char> = lib
-            .get(b"TessBaseAPIGetTSVText\0")
-            .map_err(|_| Error::invalid(InvalidKind::OcrUnavailable))?;
+        let get_tsv: libloading::Symbol<unsafe extern "C" fn(*mut c_void, i32) -> *mut c_char> =
+            lib.get(b"TessBaseAPIGetTSVText\0")
+                .map_err(|_| Error::invalid(InvalidKind::OcrUnavailable))?;
         let end: libloading::Symbol<unsafe extern "C" fn(*mut c_void)> = lib
             .get(b"TessBaseAPIEnd\0")
             .map_err(|_| Error::invalid(InvalidKind::OcrUnavailable))?;
@@ -419,17 +428,17 @@ fn recognize_library(
         }
         let lang_c = CString::new(lang).map_err(|e| Error::structure(e.to_string()))?;
         let data_c = tessdata.and_then(|p| CString::new(p.to_string_lossy().as_bytes()).ok());
-        let datapath = data_c.as_ref().map(|c| c.as_ptr()).unwrap_or(std::ptr::null());
+        let datapath = data_c
+            .as_ref()
+            .map(|c| c.as_ptr())
+            .unwrap_or(std::ptr::null());
         let rc = init3(api, datapath, lang_c.as_ptr());
         if rc != 0 {
             end(api);
             delete(api);
             return Err(Error::invalid(InvalidKind::OcrLanguageMissing {
                 language: lang.to_string(),
-                installed: tessdata
-                    .map(scan_tessdata)
-                    .unwrap_or_default()
-                    .join(", "),
+                installed: tessdata.map(scan_tessdata).unwrap_or_default().join(", "),
                 hint: language_install_hint(lang),
             }));
         }
@@ -674,11 +683,8 @@ mod tests {
         let bytes = inner.get_page_content(id).unwrap();
         let decoded = Content::decode(&bytes).unwrap();
         assert!(
-            decoded
-                .operations
-                .iter()
-                .any(|op| op.operator == "Tr"
-                    && op.operands.first().and_then(|o| o.as_i64().ok()) == Some(3)),
+            decoded.operations.iter().any(|op| op.operator == "Tr"
+                && op.operands.first().and_then(|o| o.as_i64().ok()) == Some(3)),
             "expected invisible text rendering mode"
         );
     }

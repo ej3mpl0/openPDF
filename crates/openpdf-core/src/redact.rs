@@ -221,7 +221,14 @@ fn handle_do(
         .get_object(id)
         .ok()
         .and_then(|o| o.as_stream().ok())
-        .and_then(|s| s.dict.get(b"Subtype").ok()?.as_name().ok().map(|n| n.to_vec()));
+        .and_then(|s| {
+            s.dict
+                .get(b"Subtype")
+                .ok()?
+                .as_name()
+                .ok()
+                .map(|n| n.to_vec())
+        });
     match subtype.as_deref() {
         Some(b"Image") => {
             let (x0, y0) = apply(gfx.ctm, 0.0, 0.0);
@@ -255,7 +262,8 @@ fn handle_do(
                 (data, form_res)
             };
             if let Ok(inner) = Content::decode(&data) {
-                let filtered = filter_ops(doc, &inner.operations, &form_res, boxes, secrets, depth + 1)?;
+                let filtered =
+                    filter_ops(doc, &inner.operations, &form_res, boxes, secrets, depth + 1)?;
                 let encoded = Content {
                     operations: filtered,
                 }
@@ -299,10 +307,26 @@ fn punch_image(doc: &mut lopdf::Document, id: ObjectId, ctm: [f32; 6], boxes: &[
             apply(inv, box_.urx, box_.lly),
             apply(inv, box_.urx, box_.ury),
         ];
-        let u0 = corners.iter().map(|c| c.0).fold(f32::MAX, f32::min).clamp(0.0, 1.0);
-        let u1 = corners.iter().map(|c| c.0).fold(f32::MIN, f32::max).clamp(0.0, 1.0);
-        let v0 = corners.iter().map(|c| c.1).fold(f32::MAX, f32::min).clamp(0.0, 1.0);
-        let v1 = corners.iter().map(|c| c.1).fold(f32::MIN, f32::max).clamp(0.0, 1.0);
+        let u0 = corners
+            .iter()
+            .map(|c| c.0)
+            .fold(f32::MAX, f32::min)
+            .clamp(0.0, 1.0);
+        let u1 = corners
+            .iter()
+            .map(|c| c.0)
+            .fold(f32::MIN, f32::max)
+            .clamp(0.0, 1.0);
+        let v0 = corners
+            .iter()
+            .map(|c| c.1)
+            .fold(f32::MAX, f32::min)
+            .clamp(0.0, 1.0);
+        let v1 = corners
+            .iter()
+            .map(|c| c.1)
+            .fold(f32::MIN, f32::max)
+            .clamp(0.0, 1.0);
         let x0 = (u0 * w as f32).floor() as u32;
         let x1 = (u1 * w as f32).ceil() as u32;
         let y0 = ((1.0 - v1) * h as f32).floor() as u32;
@@ -372,12 +396,16 @@ fn write_image(doc: &mut lopdf::Document, id: ObjectId, w: u32, h: u32, rgb: Vec
         return;
     }
     if let Ok(Object::Stream(stream)) = doc.get_object_mut(id) {
-        stream.dict.set("ColorSpace", Object::Name(b"DeviceRGB".to_vec()));
+        stream
+            .dict
+            .set("ColorSpace", Object::Name(b"DeviceRGB".to_vec()));
         stream.dict.set("BitsPerComponent", 8);
         stream.dict.set("Width", w as i64);
         stream.dict.set("Height", h as i64);
         stream.set_plain_content(jpeg);
-        stream.dict.set("Filter", Object::Name(b"DCTDecode".to_vec()));
+        stream
+            .dict
+            .set("Filter", Object::Name(b"DCTDecode".to_vec()));
         stream.dict.set("Length", stream.content.len() as i64);
     }
 }
@@ -392,8 +420,12 @@ fn replace_image_with_black(doc: &mut lopdf::Document, id: ObjectId) {
         return;
     }
     if let Ok(Object::Stream(stream)) = doc.get_object_mut(id) {
-        stream.dict.set("Filter", Object::Name(b"DCTDecode".to_vec()));
-        stream.dict.set("ColorSpace", Object::Name(b"DeviceRGB".to_vec()));
+        stream
+            .dict
+            .set("Filter", Object::Name(b"DCTDecode".to_vec()));
+        stream
+            .dict
+            .set("ColorSpace", Object::Name(b"DeviceRGB".to_vec()));
         stream.dict.set("Width", 1);
         stream.dict.set("Height", 1);
         stream.dict.set("BitsPerComponent", 8);
@@ -1096,7 +1128,10 @@ mod tests {
         let bytes = append_stub_signature(&std::fs::read(corpus("hello.pdf")).unwrap()).unwrap();
         let signed = Document::from_bytes(bytes, None).unwrap();
         assert!(matches!(
-            redact(&signed, &[RedactBox::new(0, 0.0, 0.0, 100.0, 100.0).unwrap()]),
+            redact(
+                &signed,
+                &[RedactBox::new(0, 0.0, 0.0, 100.0, 100.0).unwrap()]
+            ),
             Err(Error::Signed {
                 op: SignedOp::Rewrite
             })

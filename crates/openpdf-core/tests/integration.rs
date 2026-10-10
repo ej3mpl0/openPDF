@@ -29,7 +29,10 @@ fn info_and_outline_without_pdfium() {
     assert_eq!(hello.page_count(), 1);
     let two = Document::open(corpus("two_page.pdf")).unwrap();
     assert_eq!(two.page_count(), 2);
-    let outline = Document::open(corpus("outline.pdf")).unwrap().outline().unwrap();
+    let outline = Document::open(corpus("outline.pdf"))
+        .unwrap()
+        .outline()
+        .unwrap();
     assert_eq!(outline.len(), 2);
 }
 
@@ -59,7 +62,10 @@ fn render_text_search_and_tile() {
 
     let raster = engine.render_page(doc.id(), 0, 1.0).unwrap();
     assert!(raster.width > 0 && raster.height > 0);
-    assert_eq!(raster.rgba.len(), (raster.width * raster.height * 4) as usize);
+    assert_eq!(
+        raster.rgba.len(),
+        (raster.width * raster.height * 4) as usize
+    );
     assert!(
         raster.rgba.iter().any(|b| *b < 250),
         "page render looks blank"

@@ -7,8 +7,8 @@ use openpdf_core::{
     apply_overlay, compare_pdfs, crop_pages, extract, images_to_pdf, insert_pages, ocr,
     ocr_capability, optimize, parse_page_ranges, pdf_to_rasters, protect, raster_to_png, redact,
     replace_pages, sanitize_metadata, tr, tr_args, unprotect, CropBox, Document, Engine,
-    OptimizeOptions, Overlay, OverlayKind, PageRange, PdfPermissions, ProtectOptions, RedactBox,
-    OcrOptions,
+    OcrOptions, OptimizeOptions, Overlay, OverlayKind, PageRange, PdfPermissions, ProtectOptions,
+    RedactBox,
 };
 
 use crate::{decorate, engine, path_arg};
@@ -105,11 +105,9 @@ pub fn register(cmd: Command, arguments: &'static str) -> Command {
                     .long("owner")
                     .help(tr("Owner password (defaults to user)")),
             )
-            .arg(
-                Arg::new("permit")
-                    .long("permit")
-                    .help(tr("Permissions: print,modify,copy,annotate,fill,assemble,print-high")),
-            )
+            .arg(Arg::new("permit").long("permit").help(tr(
+                "Permissions: print,modify,copy,annotate,fill,assemble,print-high",
+            )))
             .arg(output_arg()),
     ))
     .subcommand(decorate(
@@ -464,9 +462,8 @@ fn to_images_cmd(m: &ArgMatches) -> Result<()> {
     let rasters = pdf_to_rasters(&engine, &doc, zoom)?;
     if rasters.len() == 1 && looks_png(&output) {
         let png = raster_to_png(&rasters[0])?;
-        fs::write(&output, png).with_context(|| {
-            tr_args("write {path}", &[("path", &output.display().to_string())])
-        })?;
+        fs::write(&output, png)
+            .with_context(|| tr_args("write {path}", &[("path", &output.display().to_string())]))?;
         println!(
             "{}",
             tr_args("wrote {path}", &[("path", &output.display().to_string())])
@@ -474,10 +471,7 @@ fn to_images_cmd(m: &ArgMatches) -> Result<()> {
         return Ok(());
     }
     fs::create_dir_all(&output)?;
-    let stem = path
-        .file_stem()
-        .and_then(|s| s.to_str())
-        .unwrap_or("page");
+    let stem = path.file_stem().and_then(|s| s.to_str()).unwrap_or("page");
     for (i, raster) in rasters.iter().enumerate() {
         let dest = output.join(format!("{}-{}.png", stem, i + 1));
         let png = raster_to_png(raster)?;
@@ -554,8 +548,15 @@ fn parse_redact_box(spec: &str, page_count: u32) -> Result<RedactBox> {
         );
     }
     let nums: Result<Vec<f32>, _> = parts[1..].iter().map(|s| s.parse()).collect();
-    let nums = nums.map_err(|_| anyhow::anyhow!("{}", tr("redaction box must be page,llx,lly,urx,ury")))?;
-    Ok(RedactBox::new(page_1 - 1, nums[0], nums[1], nums[2], nums[3])?)
+    let nums =
+        nums.map_err(|_| anyhow::anyhow!("{}", tr("redaction box must be page,llx,lly,urx,ury")))?;
+    Ok(RedactBox::new(
+        page_1 - 1,
+        nums[0],
+        nums[1],
+        nums[2],
+        nums[3],
+    )?)
 }
 
 fn compare_cmd(m: &ArgMatches) -> Result<()> {
