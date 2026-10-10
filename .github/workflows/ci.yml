@@ -156,6 +156,12 @@ jobs:
       - name: Check MSRV matches Cargo.toml
         run: grep -qx "rust-version = \"$MSRV\"" Cargo.toml
 
+      - name: Every workspace member inherits rust-version
+        run: |
+          set -o pipefail
+          cargo metadata --no-deps --format-version 1 --locked \
+            | python3 .github/scripts/check-rust-version.py
+
       - name: Install Rust ${{ env.MSRV }}
         run: rustup toolchain install "$MSRV" --profile minimal
 
