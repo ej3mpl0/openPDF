@@ -423,3 +423,15 @@ msgstr ""
 
 msgid "Could not load the PKCS#11 module"
 msgstr ""
+
+msgid "Token PIN is locked"
+msgstr ""
+
+msgid "Last PIN attempt"
+msgstr ""
+
+msgid "Few PIN attempts remaining"
+msgstr ""
+
+msgid "Signing cancelled"
+msgstr ""

@@ -423,3 +423,15 @@ msgstr "Módulo PKCS#11 no disponible"
 
 msgid "Could not load the PKCS#11 module"
 msgstr "No se pudo cargar el módulo PKCS#11"
+
+msgid "Token PIN is locked"
+msgstr "El PIN del token está bloqueado"
+
+msgid "Last PIN attempt"
+msgstr "Último intento de PIN"
+
+msgid "Few PIN attempts remaining"
+msgstr "Quedan pocos intentos de PIN"
+
+msgid "Signing cancelled"
+msgstr "Firma cancelada"
