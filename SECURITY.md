@@ -26,6 +26,20 @@ There is **no stable release** yet. Only the latest `main` branch is
 in scope. Tagged builds, if any, are not a supported channel until a
 stable version is published.
 
+## Repository and CI hardening
+
+- Workflows from forks require maintainer approval before they run, for
+  all external contributors.
+- Releases run in the GitHub `release` environment, which only accepts
+  `v*` tags and requires approval from ej3mpl0.
+- CI policy (lands with [PR #6](https://github.com/ej3mpl0/openPDF/pull/6)):
+  third-party actions are pinned by commit SHA, workflows use
+  `permissions: contents: read` and `persist-credentials: false`, and
+  no workflow uses `pull_request_target`.
+- gitleaks scans the full history in CI with `.gitleaks.toml` (lands
+  with [PR #27](https://github.com/ej3mpl0/openPDF/pull/27)). SoftHSM
+  PINs and the FFI test marker are allowlisted as test-only values.
+
 ## Scope
 
 Security reports are welcome for defects that let an attacker read,
