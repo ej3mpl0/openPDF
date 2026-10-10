@@ -2,7 +2,8 @@
 
 use openpdf_core::{
     crop_pages, extract, merge, optimize, parse_page_ranges, protect, tile_grid, unprotect,
-    CropBox, Document, Engine, Error, OptimizeOptions, ProtectOptions, TileKey, TILE_SIZE,
+    CropBox, Document, Engine, Error, OptimizeOptions, PdfPermissions, ProtectOptions, TileKey,
+    TILE_SIZE,
 };
 use zeroize::Zeroizing;
 
@@ -101,11 +102,50 @@ fn engine_renders_protected_pdf_opened_with_password() {
     engine.refresh(&edited).unwrap();
 }
 
+/// qpdf's own verdict, when qpdf is installed: `--requires-password`
+/// exits 0 = needs a password, 2 = not encrypted, 3 = encrypted, no password.
+fn qpdf_requires_password(bytes: &[u8]) -> Option<i32> {
+    let path = std::env::temp_dir().join(format!(
+        "openpdf-qpdf-{}-{:?}.pdf",
+        std::process::id(),
+        std::thread::current().id()
+    ));
+    std::fs::write(&path, bytes).unwrap();
+    let status = std::process::Command::new("qpdf")
+        .arg("--requires-password")
+        .arg(&path)
+        .status()
+        .ok();
+    std::fs::remove_file(&path).ok();
+    status.and_then(|s| s.code())
+}
+
+/// `qpdf --show-encryption` (algorithm, R, P and permission lines), if qpdf is installed.
+fn qpdf_encryption(bytes: &[u8]) -> Option<String> {
+    let path = std::env::temp_dir().join(format!(
+        "openpdf-qpdf-show-{}-{:?}.pdf",
+        std::process::id(),
+        std::thread::current().id()
+    ));
+    std::fs::write(&path, bytes).unwrap();
+    let out = std::process::Command::new("qpdf")
+        .arg("--show-encryption")
+        .arg(&path)
+        .output()
+        .ok();
+    std::fs::remove_file(&path).ok();
+    out.map(|o| String::from_utf8_lossy(&o.stdout).into_owned())
+}
+
 fn assert_locked(name: &str, bytes: Vec<u8>) {
+    let parsed = lopdf::Document::load_mem(&bytes).unwrap();
     assert!(
-        bytes.windows(8).any(|w| w == b"/Encrypt"),
-        "{name}: output has no /Encrypt"
+        parsed.get_encrypted().is_ok() || parsed.was_encrypted(),
+        "{name}: output is not encrypted"
     );
+    if let Some(code) = qpdf_requires_password(&bytes) {
+        assert_eq!(code, 0, "{name}: qpdf says no password is required");
+    }
     assert!(
         matches!(
             Document::from_bytes(bytes.clone(), None),
@@ -155,4 +195,35 @@ fn derived_documents_stay_encrypted() {
         "merge",
         merge(&[doc.clone(), plain]).unwrap().to_bytes().unwrap(),
     );
+}
+
+#[test]
+fn owner_only_pdf_merge_and_extract_stay_encrypted_without_password() {
+    let plain = Document::open(corpus("two_page.pdf")).unwrap();
+    let mut opts = ProtectOptions::new("", "owner-secret").unwrap();
+    opts.permissions = PdfPermissions::parse_list("print").unwrap();
+    let src_bytes = protect(&plain, &opts).unwrap().to_bytes().unwrap();
+    if let Some(code) = qpdf_requires_password(&src_bytes) {
+        assert_eq!(code, 3, "source: encrypted, no user password");
+    }
+    let src_qpdf = qpdf_encryption(&src_bytes);
+    if let Some(info) = &src_qpdf {
+        assert!(info.contains("modify other: not allowed"), "{info}");
+    }
+    let src = Document::from_bytes(src_bytes, None).unwrap();
+    let two = parse_page_ranges("1,2", src.page_count()).unwrap();
+    for (name, out) in [
+        ("merge", merge(&[plain.clone(), src.clone()]).unwrap()),
+        ("extract two ranges", extract(&src, &two).unwrap()),
+    ] {
+        let bytes = out.to_bytes().unwrap();
+        if let Some(code) = qpdf_requires_password(&bytes) {
+            assert_eq!(
+                code, 3,
+                "{name}: qpdf must see encryption without user password"
+            );
+        }
+        let doc = Document::from_bytes(bytes, None).unwrap();
+        assert!(doc.is_encrypted(), "{name}: lost encryption");
+    }
 }
