@@ -5,6 +5,10 @@ edition.workspace = true
 license.workspace = true
 description = "Command-line interface for openPDF"
 
+[lib]
+name = "openpdf_cli"
+path = "src/lib.rs"
+
 [[bin]]
 name = "openpdf"
 path = "src/main.rs"
@@ -16,4 +20,5 @@ clap = { version = "4.5", features = ["derive"] }
 image = { version = "0.25", default-features = false, features = ["png"] }
 
 [dev-dependencies]
+anyhow = "1.0"
 openpdf-core = { path = "../openpdf-core", features = ["test-support"] }

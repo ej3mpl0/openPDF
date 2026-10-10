@@ -414,3 +414,9 @@ msgstr ""
 
 msgid "crop box must be llx,lly,urx,ury"
 msgstr ""
+
+msgid "PIN entry was cancelled"
+msgstr ""
+
+msgid "Signing cancelled"
+msgstr ""
