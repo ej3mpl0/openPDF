@@ -3,7 +3,9 @@ use std::rc::Rc;
 use std::sync::Arc;
 
 use crate::i18n::{format_core_error, t};
-use crate::sign::{certificate_can_sign, describe_certificate, sign_request_for};
+use crate::sign::{
+    certificate_can_sign, certificate_common_name, describe_certificate_detail, sign_request_for,
+};
 use crate::Lang;
 use adw::prelude::*;
 use gtk::glib;
@@ -133,7 +135,7 @@ fn certificate_row(
 ) -> adw::ActionRow {
     let can_sign = certificate_can_sign(&cert);
     let row = adw::ActionRow::new();
-    row.set_title(&escape(&certificate_cn(&cert.subject)));
+    row.set_title(&escape(&certificate_common_name(&cert.subject)));
     let mut subtitle = describe_certificate_local(&cert);
     if !can_sign {
         subtitle.push_str(" · ");
@@ -172,25 +174,8 @@ fn escape(s: &str) -> String {
         .replace('>', "&gt;")
 }
 
-/// Row title: holder's CN, not the raw DN. Core `describe_certificate` still
-/// owns the subtitle; we only peel `CN=` here until Jian extends the helper.
-pub(crate) fn certificate_cn(subject: &str) -> String {
-    for part in subject.split([',', '/']) {
-        let part = part.trim();
-        let rest = part
-            .strip_prefix("CN=")
-            .or_else(|| part.strip_prefix("cn="))
-            .or_else(|| part.strip_prefix("CN ="));
-        if let Some(cn) = rest {
-            let cn = cn.trim();
-            if !cn.is_empty() {
-                return cn.to_string();
-            }
-        }
-    }
-    subject.trim().to_string()
-}
-
+/// RFC 3339 / ISO-8601 from the token → the user's locale and local time.
+/// Core keeps the raw strings (UniFFI); glib owns `%x %X`.
 fn format_cert_time(raw: &str) -> String {
     let raw = raw.trim();
     if let Ok(dt) = gtk::glib::DateTime::from_iso8601(raw, None) {
@@ -211,7 +196,7 @@ fn describe_certificate_local(cert: &CertificateInfo) -> String {
     if let Some(b) = info.validity.not_after.as_mut() {
         *b = format_cert_time(b);
     }
-    describe_certificate(&info)
+    describe_certificate_detail(&info)
 }
 
 #[cfg(test)]
@@ -219,12 +204,20 @@ mod tests {
     use super::*;
 
     #[test]
-    fn certificate_cn_takes_the_common_name() {
+    fn picker_title_is_the_common_name() {
         assert_eq!(
-            certificate_cn("O=AC DNIE,CN=María García (FIRMA),C=ES"),
+            certificate_common_name("O=AC DNIE,CN=María García (FIRMA),C=ES"),
             "María García (FIRMA)"
         );
-        assert_eq!(certificate_cn("CN=CITIZEN (SIGNING)"), "CITIZEN (SIGNING)");
-        assert_eq!(certificate_cn("no-cn-here"), "no-cn-here");
+    }
+
+    #[test]
+    fn format_cert_time_drops_rfc3339_z() {
+        let formatted = format_cert_time("2020-01-01T00:00:00Z");
+        assert!(
+            !formatted.contains('Z'),
+            "locale/local time must not keep the RFC3339 Z: {formatted}"
+        );
+        assert_ne!(formatted, "2020-01-01T00:00:00Z");
     }
 }
