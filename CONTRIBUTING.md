@@ -38,7 +38,8 @@ CLI only:
 cargo build -p openpdf-cli --release
 ```
 
-`render` / `text` tests need `libpdfium.so` (see README). PKCS#11 sign+verify
+`render` / `text` tests need the platform PDFium library
+(`libpdfium.so` / `pdfium.dll` / `libpdfium.dylib`; see README). PKCS#11 sign+verify
 tests need SoftHSM2 (`libsofthsm2.so`); CI installs `softhsm2` and sets
 `OPENPDF_PDFIUM` and `CI=true`.
 

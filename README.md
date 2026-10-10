@@ -1,7 +1,10 @@
 # openPDF
 
-Native PDF tools for Linux, written in Rust. Rendering uses PDFium
-(`pdfium-render`), loaded at runtime. MuPDF is not used.
+Native PDF tools for Linux, Windows, and macOS, written in Rust.
+Rendering uses PDFium (`pdfium-render`), loaded at runtime. MuPDF is
+not used. Core and CLI paths are portable on
+[PR #10](https://github.com/ej3mpl0/openPDF/pull/10). The GTK UI is
+Linux-only.
 
 **Binaries:** `openpdf` is the headless CLI (crate `openpdf-cli`, no GTK).
 `openpdf-gtk` is the Linux GUI (package `openpdf-app`, GTK4/libadwaita).
@@ -120,7 +123,8 @@ The binary is written to `target/release/openpdf`.
 
 `info`, `merge`, `split`, organize / optimize / protect / overlay, `ocr`
 (after Tesseract is found), `redact`, and `sanitize` use `lopdf`. `render`,
-`text`, `to-images`, `ocr`, and `compare` also need `libpdfium.so` (see
+`text`, `to-images`, `ocr`, and `compare` also need the platform PDFium
+library (`libpdfium.so` / `pdfium.dll` / `libpdfium.dylib`; see
 [Loading PDFium](#loading-pdfium)). The GUI needs GTK4, libadwaita, and
 PDFium.
 
@@ -337,16 +341,31 @@ openpdf to-images document.pdf --zoom 1.0 -o pages/
 
 ### `openpdf ocr`
 
-Add an invisible searchable text layer with Tesseract. Tesseract is
-**optional** and never linked: if it is missing, every other command still
-works. Lookup order (`resolve_engine`):
+Add an invisible searchable text layer. Recognition is `OcrEngine`.
+Tesseract is the **Linux** default (`TesseractOcr` / `resolve_engine`).
+It is **optional** and never linked: if it is missing, every other
+command still works. Windows and macOS default to `UnavailableOcr`
+until a platform crate supplies Windows.Media.Ocr or Vision.
 
-1. `OPENPDF_TESSERACT` (binary or `libtesseract` path).
-2. Executable `tesseract` (`/usr/bin`, `/usr/local/bin`, `/app/bin`, then
-   `PATH`).
-3. `libtesseract` via dlopen (`libtesseract.so.5` / `.so.4` / `.so`),
-   including under `/app/extensions` (Flatpak), `/usr/lib`, and
-   `/usr/lib/x86_64-linux-gnu`.
+Tesseract lookup (`tesseract_search_paths`) uses **absolute paths
+only**: no current directory, no bare `tesseract` / `tesseract.exe`,
+no relative `PATH` entries.
+
+1. `OPENPDF_TESSERACT` if it is an absolute path (binary or library).
+2. Fixed bin candidates: Linux `/usr/bin/tesseract`,
+   `/usr/local/bin/tesseract`, `/app/bin/tesseract`; macOS
+   `/opt/homebrew/bin/tesseract`, `/usr/local/bin/tesseract`; Windows
+   `%PROGRAMFILES%\Tesseract-OCR\tesseract.exe`,
+   `%PROGRAMFILES(X86)%\Tesseract-OCR\tesseract.exe`,
+   `%LOCALAPPDATA%\Programs\Tesseract-OCR\tesseract.exe`.
+3. Linux: `tesseract` on `PATH`, but only directories that are
+   absolute (`which_absolute`).
+4. Library roots + names: Linux `/app/extensions`,
+   `/usr/lib/x86_64-linux-gnu`, `/usr/lib`, `/usr/local/lib`
+   (`libtesseract.so.5` / `.so.4` / `.so`); macOS `/opt/homebrew/lib`,
+   `/usr/local/lib` (`libtesseract.dylib` / `.5.dylib` / `.4.dylib`);
+   Windows `%PROGRAMFILES%\Tesseract-OCR` (`libtesseract-5.dll`,
+   `libtesseract-4.dll`, `tesseract54.dll`, `tesseract.dll`).
 
 `--lang` defaults to `eng`. `--list-langs` prints installed languages and
 exits. `--pages` is optional. Needs PDFium to rasterize.
@@ -410,15 +429,41 @@ xvfb-run -a ./target/release/openpdf-gtk --measure 32
 
 ## Loading PDFium
 
-`libpdfium` is resolved in this order (`bind_pdfium` / `Engine::new`):
+Library name (`pdfium_library_name`):
 
-1. `OPENPDF_PDFIUM` environment variable (path to the `.so` or to a directory).
-2. `libpdfium.so` next to the binary (`current_exe()`, or a bundled path if
-   `Engine::with_bundled_library` is used).
-3. The system library (`/usr/local/lib`, `/usr/lib`,
-   `/usr/lib/x86_64-linux-gnu`, and finally `Pdfium::bind_to_system_library()`).
+| OS | File |
+|----|------|
+| Linux | `libpdfium.so` |
+| Windows | `pdfium.dll` |
+| macOS | `libpdfium.dylib` |
 
-Example:
+`bind_pdfium` / `pdfium_search_paths` try **absolute paths only**.
+Relative paths, `.`, bare names, and relative `PATH` entries are
+dropped (`dll::require_absolute`). There is no
+`Pdfium::bind_to_system_library()` fallback.
+
+Order:
+
+1. `OPENPDF_PDFIUM` if it is an absolute path (file or directory).
+2. An absolute bundled path when `Engine::with_bundled_library` is used.
+3. The executable directory (`current_exe()` parent) and
+   `<exe-dir>/<library-name>`.
+4. **macOS only:** `<exe-dir>/Frameworks`,
+   `<exe-dir>/Frameworks/<library-name>`, and the same under
+   `Contents/Frameworks` (parent of the exe dir).
+5. **Linux system:** `/usr/local/lib`, `/usr/lib`,
+   `/usr/lib/x86_64-linux-gnu`, `/usr/lib/aarch64-linux-gnu`
+   (directory and `<dir>/<library-name>`).
+6. **macOS system:** `/usr/local/lib`, `/opt/homebrew/lib`.
+7. **Windows system:** `%WINDIR%\System32\pdfium.dll` when `WINDIR` is
+   an absolute path.
+
+On Windows, `dll::harden()` calls `SetDefaultDllDirectories` with
+`LOAD_LIBRARY_SEARCH_DEFAULT_DIRS` before any load (no CWD DLL
+search). The bind also uses
+`LOAD_LIBRARY_SEARCH_DEFAULT_DIRS | LOAD_LIBRARY_SEARCH_DLL_LOAD_DIR`.
+
+Example (absolute path required):
 
 ```bash
 export OPENPDF_PDFIUM=/usr/local/lib/libpdfium.so
@@ -438,16 +483,19 @@ Supported languages on `main`: **English** and **Spanish**. Catalogs are
 embedded at build time (`openpdf-core` `build.rs`). The CLI calls
 `init_i18n()` on startup. Missing keys fall back to the English msgid.
 
-Locale selection follows GNU gettext (`detect_locale` in `openpdf-core`):
+Locale selection (`detect_locale`) works on Linux, Windows, and macOS.
 
-1. `LANGUAGE` — colon-separated list, first available catalog wins
-   (for example `es:en` or `fr:es`). **Ignored** when the effective LC
-   locale is `C` or `POSIX`.
-2. `LC_ALL`
-3. `LC_MESSAGES`
-4. `LANG`
+1. GNU gettext env vars, when any of them is set:
+   `LANGUAGE` (colon-separated list, first available catalog wins,
+   for example `es:en` or `fr:es`) — **ignored** when the effective LC
+   locale is `C` or `POSIX` — then `LC_ALL`, `LC_MESSAGES`, `LANG`.
+2. If **none** of those variables are set (typical on Windows and
+   macOS), `sys-locale` (`sys_locale::get_locale()`). Hyphen tags
+   such as `en-US` become `en_US`.
+3. English if nothing matches.
 
-If none of those select a catalog, the fallback is English.
+`LANGUAGE=es:en` with `LANG=C` stays English: `LANGUAGE` is ignored for
+the `C` / `POSIX` locale.
 
 ```bash
 LANGUAGE=es openpdf info file.pdf
@@ -455,24 +503,26 @@ LANGUAGE=es:en openpdf --help
 LC_ALL=es_ES.UTF-8 openpdf info file.pdf
 ```
 
-`LANGUAGE=es:en` with `LANG=C` stays English: `LANGUAGE` is ignored for the
-`C` / `POSIX` locale.
-
 ## Contributing
 
 See [CONTRIBUTING.md](CONTRIBUTING.md) for workspace layout, build and test
 commands, i18n rules (including the locale test lock), structured errors,
 signing architecture, and append-only handling of signed files.
 
-## XDG paths
+## Config and state directories
 
-`openpdf-core` exposes `settings_dir`, `recovery_dir`, and `ensure_app_dirs`
-(creates the directories if they do not exist). They honor the XDG variables:
+`openpdf-core` (`paths.rs`) uses the `directories` crate
+(`ProjectDirs::from("", "", "openpdf")`). `settings_dir`,
+`recovery_dir`, and `ensure_app_dirs` (creates the directories if they
+do not exist):
 
-| Use        | Default                      | Variable          |
-|------------|------------------------------|-------------------|
-| Settings   | `~/.config/openpdf`          | `XDG_CONFIG_HOME` |
-| Recovery   | `~/.local/state/openpdf`     | `XDG_STATE_HOME`  |
+| Use | Linux | Windows | macOS |
+|-----|-------|---------|-------|
+| Settings | `~/.config/openpdf` (`XDG_CONFIG_HOME`) | `%APPDATA%\openpdf` | `~/Library/Application Support/openpdf` |
+| Recovery | `~/.local/state/openpdf` (`XDG_STATE_HOME`) | `%LOCALAPPDATA%\openpdf` | `~/Library/Caches/openpdf` |
+
+`state_dir` is Linux-only in `directories`. Recovery on Windows is
+`data_local_dir`; on macOS it is `cache_dir`.
 
 ## `openpdf-core`
 
@@ -695,3 +745,6 @@ Linux, Windows, and macOS.
 - **Release packages** (Flatpak, AppImage, Windows CLI zip, macOS CLI
   tarballs) are produced by [PR #6](https://github.com/ej3mpl0/openPDF/pull/6).
   Flathub is not published.
+- **Portable core/CLI** (per-OS config/state dirs, absolute PDFium and
+  Tesseract lookup, `sys-locale` + gettext) is on
+  [PR #10](https://github.com/ej3mpl0/openPDF/pull/10).
