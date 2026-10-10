@@ -34,7 +34,8 @@ jobs:
             --language swift --out-dir bindings/swift
           cargo install uniffi-bindgen-cs \
             --git https://github.com/NordSecurity/uniffi-bindgen-cs \
-            --tag v0.10.0+v0.29.4
+            --rev e4f18be96ca812571fd85fc39555646158b06b9c \
+            --locked
           uniffi-bindgen-cs --library --out-dir bindings/csharp \
             target/release/libopenpdf_ffi.so
           test -n "$(find bindings/swift -type f | head -n 1)"

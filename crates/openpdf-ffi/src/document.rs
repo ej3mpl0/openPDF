@@ -274,7 +274,8 @@ impl PdfDocument {
         }
         let doc = self.lock().map_err(|e| e.hide_secrets(&secrets))?;
         let out = protect(&doc, &opts).map_err(|e| FfiError::from_core_hiding(e, &secrets))?;
-        self.wrap_new(out).map_err(|e| e.hide_secrets(&secrets))
+        // Ciphertext cannot be bound until unprotect; do not call wrap().
+        Ok(self.adopt(out))
     }
 
     /// Decrypt with the user or owner password. The password is never logged.
@@ -373,17 +374,24 @@ impl PdfDocument {
 
     fn wrap(engine: Option<Engine>, doc: Document) -> Result<Arc<Self>, FfiError> {
         if let Some(ref engine) = engine {
-            // Encrypted files may fail PDFium bind until unprotect; keep the document.
-            let _ = engine.bind(&doc);
+            engine.bind(&doc)?;
         }
-        Ok(Arc::new(Self {
-            engine,
-            inner: Mutex::new(doc),
-        }))
+        Ok(Self::adopt_with(engine, doc))
     }
 
     fn wrap_new(&self, doc: Document) -> Result<Arc<Self>, FfiError> {
         Self::wrap(self.engine.clone(), doc)
+    }
+
+    fn adopt(&self, doc: Document) -> Arc<Self> {
+        Self::adopt_with(self.engine.clone(), doc)
+    }
+
+    fn adopt_with(engine: Option<Engine>, doc: Document) -> Arc<Self> {
+        Arc::new(Self {
+            engine,
+            inner: Mutex::new(doc),
+        })
     }
 
     fn lock(&self) -> Result<MutexGuard<'_, Document>, FfiError> {
