@@ -28,6 +28,7 @@ pub fn run(initial: Option<PathBuf>, signer: Box<dyn Signer>, verifier: Box<dyn 
     let verifier = Arc::<dyn Verifier>::from(verifier);
     let app = adw::Application::builder()
         .application_id(crate::APP_ID)
+        .flags(ApplicationFlags::HANDLES_OPEN | ApplicationFlags::NON_UNIQUE)
         .build();
 
     app.connect_startup(|_| {
@@ -36,28 +37,58 @@ pub fn run(initial: Option<PathBuf>, signer: Box<dyn Signer>, verifier: Box<dyn 
         load_css();
     });
 
-    app.connect_activate(move |app| {
-        // Defaults + chrome only before present(). Settings, recent files, and
-        // the home/tools widgets wait for the first idle so nothing blocks the
-        // first frame (and nothing talks to a portal until the user opens a file).
-        let settings = Settings::default();
-        settings.apply_locale();
-        apply_theme(settings.theme);
-        install_accels(app);
-        let win = window::OpenPdfWindow::new(app, settings, signer.clone(), verifier.clone());
-        win.present();
-        if let Some(path) = initial.clone() {
-            let win = win.clone();
-            glib::idle_add_local_full(glib::Priority::HIGH, move || {
-                win.open_path(&path);
-                glib::ControlFlow::Break
-            });
+    let win_slot: Rc<RefCell<Option<window::OpenPdfWindow>>> = Rc::new(RefCell::new(None));
+    let cli_path = Rc::new(RefCell::new(initial));
+
+    app.connect_activate({
+        let signer = signer.clone();
+        let verifier = verifier.clone();
+        let win_slot = win_slot.clone();
+        let cli_path = cli_path.clone();
+        move |app| {
+            // Defaults + chrome only before present(). Settings, recent files, and
+            // the home/tools widgets wait for the first idle so nothing blocks the
+            // first frame (and nothing talks to a portal until the user opens a file).
+            if win_slot.borrow().is_none() {
+                let settings = Settings::default();
+                settings.apply_locale();
+                apply_theme(settings.theme);
+                install_accels(app);
+                let win =
+                    window::OpenPdfWindow::new(app, settings, signer.clone(), verifier.clone());
+                win.present();
+                *win_slot.borrow_mut() = Some(win);
+                if let Some(win) = win_slot.borrow().as_ref() {
+                    let win_home = win.clone();
+                    glib::idle_add_local_once(move || {
+                        win_home.hydrate_settings();
+                        win_home.ensure_home();
+                    });
+                }
+            }
+            if let Some(path) = cli_path.borrow_mut().take() {
+                if let Some(win) = win_slot.borrow().as_ref() {
+                    let win = win.clone();
+                    glib::idle_add_local_full(glib::Priority::HIGH, move || {
+                        win.open_path(&path);
+                        glib::ControlFlow::Break
+                    });
+                }
+            }
         }
-        let win_home = win.clone();
-        glib::idle_add_local_once(move || {
-            win_home.hydrate_settings();
-            win_home.ensure_home();
-        });
+    });
+
+    app.connect_open(move |app, files, _hint| {
+        // `openpdf-gtk FILE` is delivered here. Without HANDLES_OPEN, GApplication
+        // exits with "This application can not open files".
+        app.activate();
+        if let Some(win) = win_slot.borrow().as_ref() {
+            for file in files {
+                if let Some(path) = file.path() {
+                    win.open_path(&path);
+                }
+            }
+        }
     });
 
     app.run();

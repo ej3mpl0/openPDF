@@ -150,6 +150,21 @@ impl Session {
         }
     }
 
+    pub fn bytes_for_verify(&self) -> Result<Vec<u8>, BackendError> {
+        if let Some(path) = &self.path {
+            if path.exists() {
+                return std::fs::read(path).map_err(BackendError::from);
+            }
+        }
+        // Fallback for unsaved buffers. `Document::original_bytes` is still
+        // `pub(crate)` until Jian's core PR lands.
+        if self.doc.borrow().is_signed() {
+            self.doc.borrow().to_incremental_bytes().map_err(core_err)
+        } else {
+            self.to_bytes()
+        }
+    }
+
     pub fn apply_signer(
         &self,
         signer: &dyn Signer,
@@ -506,6 +521,20 @@ impl Opened {
     pub fn bytes_for_sign(&self) -> Result<Vec<u8>, BackendError> {
         match self {
             Self::Core(s) => s.bytes_for_sign(),
+            Self::Mock(_) => Err(BackendError::Invalid(openpdf_core::tr(
+                "Placeholder has no PDF bytes.",
+            ))),
+        }
+    }
+
+    /// Bytes for token-less verify. Never use [`Self::to_bytes`] on a signed
+    /// document — that is a full rewrite and returns `Signed(Rewrite)`.
+    ///
+    /// Prepared for `Document::original_bytes()` once that is `pub` on core
+    /// (#25). Until then, read the file that was opened.
+    pub fn bytes_for_verify(&self) -> Result<Vec<u8>, BackendError> {
+        match self {
+            Self::Core(s) => s.bytes_for_verify(),
             Self::Mock(_) => Err(BackendError::Invalid(openpdf_core::tr(
                 "Placeholder has no PDF bytes.",
             ))),
