@@ -36,6 +36,12 @@ enum WorkerCmd {
     Unbind {
         id: DocumentId,
     },
+    #[cfg(test)]
+    Probe {
+        engine: EngineId,
+        doc: DocumentId,
+        reply: Sender<(bool, bool)>,
+    },
     Register {
         engine: EngineId,
         events: Sender<TileEvent>,
@@ -258,6 +264,10 @@ fn handle_cmd(
             if let Ok(mut c) = cache.lock() {
                 c.invalidate_doc(id);
             }
+        }
+        #[cfg(test)]
+        WorkerCmd::Probe { engine, doc, reply } => {
+            let _ = reply.send((engines.contains_key(&engine), docs.contains_key(&doc)));
         }
         WorkerCmd::Register { engine, events } => {
             engines.insert(
@@ -594,5 +604,93 @@ impl Drop for Engine {
         if Arc::strong_count(&self.events) == 1 {
             let _ = self.send(WorkerCmd::Unregister { engine: self.id });
         }
+    }
+}
+
+#[cfg(test)]
+mod drop_tests {
+    use super::*;
+
+    fn probe(engine: EngineId, doc: DocumentId) -> (bool, bool) {
+        let (tx, rx) = mpsc::channel();
+        worker()
+            .unwrap()
+            .cmd
+            .send(WorkerCmd::Probe {
+                engine,
+                doc,
+                reply: tx,
+            })
+            .unwrap();
+        rx.recv().unwrap()
+    }
+
+    fn engine_or_skip() -> Option<Engine> {
+        match Engine::new() {
+            Ok(e) => Some(e),
+            Err(err) => {
+                assert!(std::env::var("CI").is_err(), "PDFium required in CI: {err}");
+                None
+            }
+        }
+    }
+
+    #[test]
+    fn concurrent_drop_of_last_two_clones_unregisters_once() {
+        if engine_or_skip().is_none() {
+            return;
+        }
+        for _ in 0..1000 {
+            let a = Engine::new().unwrap();
+            let id = a.id;
+            let b = a.clone();
+            let barrier = Arc::new(std::sync::Barrier::new(2));
+            let handles: Vec<_> = [a, b]
+                .into_iter()
+                .map(|e| {
+                    let barrier = Arc::clone(&barrier);
+                    thread::spawn(move || {
+                        barrier.wait();
+                        drop(e);
+                    })
+                })
+                .collect();
+            for h in handles {
+                h.join().unwrap();
+            }
+            assert!(
+                !probe(id, DocumentId(u64::MAX)).0,
+                "engine {id} still registered"
+            );
+        }
+    }
+
+    #[test]
+    fn dropping_engine_releases_its_open_documents() {
+        let Some(engine) = engine_or_skip() else {
+            return;
+        };
+        let doc = crate::blank_document(1).unwrap();
+        engine.bind(&doc).unwrap();
+        let id = engine.id;
+        assert_eq!(probe(id, doc.id()), (true, true));
+        drop(engine);
+        assert_eq!(probe(id, doc.id()), (false, false));
+    }
+
+    #[test]
+    fn document_bound_by_two_engines_survives_one_drop() {
+        let Some(a) = engine_or_skip() else {
+            return;
+        };
+        let b = Engine::new().unwrap();
+        let doc = crate::blank_document(1).unwrap();
+        a.bind(&doc).unwrap();
+        b.bind(&doc).unwrap();
+        let (ida, idb) = (a.id, b.id);
+        drop(a);
+        assert_eq!(probe(ida, doc.id()), (false, true));
+        drop(b);
+        assert_eq!(probe(idb, doc.id()), (false, false));
     }
 }
