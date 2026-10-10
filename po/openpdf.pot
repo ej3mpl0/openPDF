@@ -692,3 +692,6 @@ msgstr ""
 
 msgid "Saved signed PDF to {path}"
 msgstr ""
+
+msgid "Cannot verify: original file bytes are unavailable."
+msgstr ""
