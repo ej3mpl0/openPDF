@@ -31,7 +31,7 @@ use crate::backend::{sign_pdf, KeyBackend, ListedCert};
 use crate::cades;
 use crate::cert::{unusable_reason, EcdsaHash, KeyKind};
 use crate::pin::StaticPinProvider;
-use crate::token::{Pkcs11Backend, Pkcs11Config, Pkcs11Signer};
+use crate::token::{resolve_module_paths_for_test, Pkcs11Backend, Pkcs11Config, Pkcs11Signer};
 use crate::{default_signer, verify_pdf, CertificateUsage};
 
 const USER_PIN: &str = "1234";
@@ -1400,4 +1400,95 @@ fn default_signer_is_pkcs11_on_linux() {
     }) else {
         return;
     };
+}
+
+/// Second path to the same SoftHSM library (a byte copy), so the same token is
+/// reachable through two distinct PKCS#11 modules, like OpenSC plus p11-kit-proxy.
+fn softhsm_copy(module: &Path) -> PathBuf {
+    let dir = std::env::temp_dir().join(format!("openpdf-sign-dup-{}", std::process::id()));
+    fs::create_dir_all(&dir).unwrap();
+    let copy = dir.join("libsofthsm2-copy.so");
+    if !copy.exists() {
+        fs::copy(module, &copy).expect("copy softhsm");
+    }
+    copy
+}
+
+#[test]
+fn same_token_via_two_modules_lists_each_cert_once() {
+    let Some(()) = with_softhsm(|| {
+        let env = test_env();
+        let copy = softhsm_copy(&env.module);
+        let backend = Pkcs11Backend::from_paths(
+            &[env.module.clone(), copy.clone()],
+            Arc::new(StaticPinProvider::new(USER_PIN)),
+        )
+        .expect("two modules");
+        assert_eq!(backend.module_count(), 2);
+        let listed = backend.list().expect("list");
+        let rsa: Vec<_> = listed
+            .iter()
+            .filter(|c| c.info.subject.contains("OpenPDF Test Signer"))
+            .collect();
+        let ec: Vec<_> = listed
+            .iter()
+            .filter(|c| c.info.subject.contains("OpenPDF EC Test"))
+            .collect();
+        assert_eq!(rsa.len(), 1, "RSA cert listed {} times", rsa.len());
+        assert_eq!(ec.len(), 1, "EC cert listed {} times", ec.len());
+        // First occurrence wins: the id names the first module, and signing resolves
+        // to that same module.
+        let stem = env.module.file_name().unwrap().to_str().unwrap();
+        assert!(rsa[0].id.starts_with(&format!("{stem}:")), "{}", rsa[0].id);
+        let again = backend.list().expect("list again");
+        assert!(again.iter().any(|c| c.id == rsa[0].id), "cert_id is stable");
+        let sig = backend.sign_bytes(&rsa[0].id, b"dedup").expect("sign");
+        assert!(!sig.is_empty());
+    }) else {
+        return;
+    };
+}
+
+#[cfg(not(any(windows, target_os = "macos")))]
+#[test]
+fn explicit_env_module_loads_only_that_module() {
+    let Some(()) = with_softhsm(|| {
+        let env = test_env();
+        let copy = softhsm_copy(&env.module);
+        let paths =
+            resolve_module_paths_for_test(&Pkcs11Config::default(), Some(copy.clone().into()))
+                .expect("resolve");
+        assert_eq!(paths, vec![copy.clone()]);
+
+        let prev = std::env::var_os("OPENPDF_PKCS11_MODULE");
+        std::env::set_var("OPENPDF_PKCS11_MODULE", &copy);
+        let backend = Pkcs11Backend::new(
+            Pkcs11Config::default(),
+            Arc::new(StaticPinProvider::new(USER_PIN)),
+        );
+        match prev {
+            Some(v) => std::env::set_var("OPENPDF_PKCS11_MODULE", v),
+            None => std::env::remove_var("OPENPDF_PKCS11_MODULE"),
+        }
+        let backend = backend.expect("backend");
+        assert_eq!(backend.module_count(), 1, "defaults must not be loaded");
+        let listed = backend.list().expect("list");
+        let rsa = listed
+            .iter()
+            .filter(|c| c.info.subject.contains("OpenPDF Test Signer"))
+            .count();
+        assert_eq!(rsa, 1);
+        // Single module: ids carry no module prefix.
+        assert!(listed.iter().all(|c| !c.id.contains("libsofthsm2")));
+    }) else {
+        return;
+    };
+}
+
+#[test]
+fn relative_env_module_is_rejected() {
+    let r = resolve_module_paths_for_test(&Pkcs11Config::default(), Some("libsofthsm2.so".into()));
+    assert!(r.is_err());
+    let r = resolve_module_paths_for_test(&Pkcs11Config::default(), Some("".into()));
+    assert!(r.expect("empty env falls back to defaults").len() > 1);
 }
