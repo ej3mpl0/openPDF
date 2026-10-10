@@ -28,12 +28,12 @@ use crate::pin::StaticPinProvider;
 use crate::token::{Pkcs11Config, Pkcs11Signer};
 use crate::{verify_pdf, CertificateUsage};
 
-const USER_PIN: &str = "1234";
+pub(crate) const USER_PIN: &str = "1234";
 const SO_PIN: &str = "12345678";
 const KEY_ID: &[u8] = &[0x01];
 
-struct TestEnv {
-    module: PathBuf,
+pub(crate) struct TestEnv {
+    pub(crate) module: PathBuf,
 }
 
 fn softhsm_module() -> Option<PathBuf> {
@@ -58,7 +58,7 @@ fn require_softhsm() -> PathBuf {
     }
 }
 
-fn test_env() -> &'static TestEnv {
+pub(crate) fn test_env() -> &'static TestEnv {
     static ENV: OnceLock<TestEnv> = OnceLock::new();
     static LOCK: Mutex<()> = Mutex::new(());
     let module = require_softhsm();
@@ -230,7 +230,7 @@ fn signer() -> Pkcs11Signer {
     .expect("Pkcs11Signer")
 }
 
-fn corpus(name: &str) -> PathBuf {
+pub(crate) fn corpus(name: &str) -> PathBuf {
     Path::new(env!("CARGO_MANIFEST_DIR"))
         .join("../../corpus")
         .join(name)
@@ -255,7 +255,7 @@ fn catch_skip<T>(f: impl FnOnce() -> T + std::panic::UnwindSafe) -> Option<T> {
 }
 
 /// SoftHSM / PKCS#11 is process-global and not safe to drive from several tests at once.
-fn with_softhsm<T>(f: impl FnOnce() -> T + std::panic::UnwindSafe) -> Option<T> {
+pub(crate) fn with_softhsm<T>(f: impl FnOnce() -> T + std::panic::UnwindSafe) -> Option<T> {
     static PKCS11: Mutex<()> = Mutex::new(());
     catch_skip(|| {
         let _g = PKCS11.lock().unwrap_or_else(|e| e.into_inner());
@@ -263,7 +263,7 @@ fn with_softhsm<T>(f: impl FnOnce() -> T + std::panic::UnwindSafe) -> Option<T> 
     })
 }
 
-struct PanicPin;
+pub(crate) struct PanicPin;
 
 impl PinProvider for PanicPin {
     fn request_pin(&self, _token_label: &str) -> openpdf_core::Result<SecretPin> {
@@ -427,43 +427,50 @@ fn reason_and_location_written_and_read_back() {
 }
 
 #[test]
-fn pades_bt_is_a_typed_error_not_a_downgrade() {
+fn pades_bt_without_tsa_url_is_a_typed_error_not_a_downgrade() {
     let pdf = fs::read(corpus("hello.pdf")).unwrap();
     let request = SignRequest::new("any").with_level(PadesLevel::BT);
     let mut called = false;
-    let err = crate::pades::sign_incremental(&pdf, &request, "x", |_| {
+    let err = crate::pades::sign_incremental(&pdf, &request, "x", None, |_| {
         called = true;
         Ok(Vec::new())
     })
     .unwrap_err();
     assert!(matches!(
         err,
-        Error::SignLevelUnsupported {
-            level: PadesLevel::BT
-        }
+        Error::Timestamp(openpdf_core::TimestampErrorKind::UrlMissing)
     ));
-    assert!(!called, "no CMS may be produced for an unsupported level");
+    assert!(!called, "no CMS may be produced without a TSA");
     with_locale("en", || {
         assert_eq!(
             err.to_string(),
-            "PAdES-B-T signatures are not supported yet"
+            "timestamp: PAdES-B-T needs a timestamp server (TSA) URL; none is configured"
         );
     });
     with_locale("es", || {
-        let es = tr("{level} signatures are not supported yet").replace("{level}", "PAdES-B-T");
-        assert_eq!(err.to_string(), es);
-        assert_ne!(es, "PAdES-B-T signatures are not supported yet");
+        assert_ne!(
+            err.to_string(),
+            "timestamp: PAdES-B-T needs a timestamp server (TSA) URL; none is configured"
+        );
     });
 
+    // Through the PKCS#11 signer: refused before the PIN prompt.
     let Some(()) = with_softhsm(|| {
-        let signer = signer();
+        let env = test_env();
+        let signer =
+            Pkcs11Signer::new(Pkcs11Config::with_module(&env.module), PanicPin).expect("signer");
         let cert = &signer.list_certificates().unwrap()[0];
         let request = SignRequest::new(cert.id.clone()).with_level(PadesLevel::BT);
         assert!(matches!(
             signer.sign(&pdf, &request),
-            Err(Error::SignLevelUnsupported {
-                level: PadesLevel::BT
-            })
+            Err(Error::Timestamp(
+                openpdf_core::TimestampErrorKind::UrlMissing
+            ))
+        ));
+        let request = request.with_tsa_url("ftp://tsa.invalid/");
+        assert!(matches!(
+            signer.sign(&pdf, &request),
+            Err(Error::Timestamp(openpdf_core::TimestampErrorKind::BadUrl))
         ));
     }) else {
         return;

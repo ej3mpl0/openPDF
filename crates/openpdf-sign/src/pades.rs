@@ -4,13 +4,25 @@ use std::io::Write;
 
 use lopdf::{Dictionary, Document, Object, ObjectId};
 use openpdf_core::{
-    tr_args, Error, PadesLevel, Result, SignRequest, SignatureInfo, VisibleAppearance,
+    tr_args, Error, PadesLevel, Result, SignRequest, SignatureInfo, TimestampErrorKind,
+    VisibleAppearance,
 };
 use sha2::{Digest, Sha256};
 
 use crate::cades;
+use crate::tsp::Tsa;
+use x509_cert::Certificate;
 
 const CONTENTS_LEN: usize = 8192;
+/// Bytes reserved in `/Contents` for a B-T CMS (64 KiB of hex in the file).
+///
+/// It must be fixed before signing: the ByteRange is hashed before the TSA is
+/// asked, so the token's size cannot be known yet. 32 KiB fits the signer's
+/// certificate (~2 KiB), the RSA signature and a token with a TSA chain of
+/// several RSA-4096 certificates (a real TSA token is typically 4-8 KiB). A
+/// larger token fails with [`TimestampErrorKind::TokenTooLarge`]; nothing is
+/// written and it never falls back to B-B.
+const CONTENTS_LEN_BT: usize = 32768;
 const BR_WIDTH: usize = 10;
 const CONTENTS_MARK: &[u8] = b"/Contents <";
 const BYTE_RANGE_MARK: &[u8] = b"/ByteRange [";
@@ -19,9 +31,15 @@ pub(crate) fn sign_incremental(
     pdf: &[u8],
     request: &SignRequest,
     signer_name: &str,
+    tsa: Option<&Tsa>,
     mut make_cms: impl FnMut(&[u8]) -> Result<Vec<u8>>,
 ) -> Result<Vec<u8>> {
-    ensure_supported_level(request)?;
+    let tsa = ensure_supported_level(request, tsa)?;
+    let contents_len = if tsa.is_some() {
+        CONTENTS_LEN_BT
+    } else {
+        CONTENTS_LEN
+    };
     if !pdf.starts_with(b"%PDF-") {
         return Err(Error::Sign("not a PDF".into()));
     }
@@ -45,7 +63,7 @@ pub(crate) fn sign_incremental(
     let mut xref: Vec<(u32, usize)> = Vec::new();
 
     let date = pdf_date_now();
-    let sig_body = signature_dict_placeholder(signer_name, request, &date, CONTENTS_LEN, BR_WIDTH);
+    let sig_body = signature_dict_placeholder(signer_name, request, &date, contents_len, BR_WIDTH);
     write_raw_object(&mut out, &mut xref, sig_id, &sig_body);
 
     let mut widget = Dictionary::new();
@@ -105,34 +123,57 @@ pub(crate) fn sign_incremental(
     let new_size = extra_id.max(old_size);
     write_xref_and_trailer(&mut out, &xref, new_size, root, prev);
 
-    let (lt, gt) = locate_contents(&out, CONTENTS_LEN)?;
+    let (lt, gt) = locate_contents(&out, contents_len)?;
     let rest = out.len() - (gt + 1);
     patch_byte_range(&mut out, lt, gt + 1, rest)?;
 
     let message = byterange_bytes(&out, &[0, lt as i64, (gt + 1) as i64, rest as i64])?;
-    let cms = make_cms(&message)?;
-    if cms.len() > CONTENTS_LEN {
+    let mut cms = make_cms(&message)?;
+    if let Some(tsa) = tsa {
+        request.check_cancelled()?;
+        // The token covers the SignerInfo signature value. Any failure is an
+        // error: never fall back to B-B.
+        cms = cades::add_signature_timestamp(&cms, |sig| {
+            crate::tsp::timestamp(tsa, sig, request.cancel.as_ref())
+        })?;
+    }
+    // A cancel that lands after the TSA replied still wins: nothing is returned.
+    request.check_cancelled()?;
+    if cms.len() > contents_len && tsa.is_some() {
+        return Err(Error::Timestamp(TimestampErrorKind::TokenTooLarge));
+    }
+    if cms.len() > contents_len {
         return Err(Error::Sign(
             "CMS signature is too large for the reserved Contents space".into(),
         ));
     }
     let hex = hex_encode_upper(&cms);
     let mut padded = hex.into_bytes();
-    padded.resize(CONTENTS_LEN * 2, b'0');
-    out[lt + 1..lt + 1 + CONTENTS_LEN * 2].copy_from_slice(&padded);
+    padded.resize(contents_len * 2, b'0');
+    out[lt + 1..lt + 1 + contents_len * 2].copy_from_slice(&padded);
     Ok(out)
 }
 
-/// Only PAdES-B-B is produced. Any other level is a typed error, never a
-/// silent downgrade to B-B.
-pub(crate) fn ensure_supported_level(request: &SignRequest) -> Result<()> {
+/// B-B needs nothing; B-T needs a resolved TSA. Anything else is a typed
+/// error, never a silent downgrade to B-B. Runs before any PIN prompt.
+pub(crate) fn ensure_supported_level<'a>(
+    request: &SignRequest,
+    tsa: Option<&'a Tsa>,
+) -> Result<Option<&'a Tsa>> {
     match request.level {
-        PadesLevel::BB => Ok(()),
+        PadesLevel::BB => Ok(None),
+        PadesLevel::BT => match tsa {
+            Some(t) => Ok(Some(t)),
+            None => Err(Error::Timestamp(TimestampErrorKind::UrlMissing)),
+        },
         level => Err(Error::SignLevelUnsupported { level }),
     }
 }
 
-pub(crate) fn verify_signatures(pdf: &[u8]) -> Result<Vec<SignatureInfo>> {
+pub(crate) fn verify_signatures(
+    pdf: &[u8],
+    tsa_trust: &[Certificate],
+) -> Result<Vec<SignatureInfo>> {
     let doc = Document::load_mem(pdf).map_err(|e| Error::Sign(e.to_string()))?;
     let mut out = Vec::new();
     for object in doc.objects.values() {
@@ -142,64 +183,38 @@ pub(crate) fn verify_signatures(pdf: &[u8]) -> Result<Vec<SignatureInfo>> {
         if !is_signature_value(dict) {
             continue;
         }
-        out.push(verify_one(pdf, dict));
+        out.push(verify_one(pdf, dict, tsa_trust));
     }
     Ok(out)
 }
 
-fn verify_one(pdf: &[u8], dict: &Dictionary) -> SignatureInfo {
+fn verify_one(pdf: &[u8], dict: &Dictionary, tsa_trust: &[Certificate]) -> SignatureInfo {
     let reason = dict_text(dict, b"Reason");
     let location = dict_text(dict, b"Location");
     let name = dict_text(dict, b"Name");
 
     let Some(ranges) = byte_range(dict) else {
-        return SignatureInfo {
-            name,
-            reason,
-            location,
-            valid: Some(false),
-        };
+        return SignatureInfo::new(name, reason, location).with_valid(Some(false));
     };
     let Some(contents) = contents_bytes(dict) else {
-        return SignatureInfo {
-            name,
-            reason,
-            location,
-            valid: Some(false),
-        };
+        return SignatureInfo::new(name, reason, location).with_valid(Some(false));
     };
     if contents.iter().all(|b| *b == 0) {
-        return SignatureInfo {
-            name,
-            reason,
-            location,
-            valid: Some(false),
-        };
+        return SignatureInfo::new(name, reason, location).with_valid(Some(false));
     }
     let Ok(message) = byterange_bytes(pdf, &ranges) else {
-        return SignatureInfo {
-            name,
-            reason,
-            location,
-            valid: Some(false),
-        };
+        return SignatureInfo::new(name, reason, location).with_valid(Some(false));
     };
     // Integrity of the claimed ranges: SHA-256 is also pinned inside CMS.
     let _ = Sha256::digest(&message);
-    let check = cades::verify_detached(&contents, &message);
-    SignatureInfo {
-        name: name.or(check.signer),
-        reason,
-        location,
-        valid: Some(check.valid),
-    }
+    let check = cades::verify_detached(&contents, &message, tsa_trust);
+    SignatureInfo::new(name.or(check.signer), reason, location)
+        .with_valid(Some(check.valid))
+        .with_timestamp(check.timestamp)
 }
 
 fn is_signature_value(dict: &Dictionary) -> bool {
-    let is_sig = match dict.get(b"Type") {
-        Ok(Object::Name(n)) if n.as_slice() == b"Sig" => true,
-        _ => false,
-    };
+    let is_sig = matches!(dict.get(b"Type"), Ok(Object::Name(n)) if n.as_slice() == b"Sig");
     if !is_sig {
         return false;
     }
@@ -222,21 +237,50 @@ fn byte_range(dict: &Dictionary) -> Option<Vec<i64>> {
 
 fn contents_bytes(dict: &Dictionary) -> Option<Vec<u8>> {
     match dict.get(b"Contents").ok()? {
-        Object::String(bytes, _) => {
-            let end = bytes
-                .iter()
-                .rposition(|b| *b != 0)
-                .map(|i| i + 1)
-                .unwrap_or(0);
-            Some(bytes[..end].to_vec())
-        }
+        Object::String(bytes, _) => Some(strip_contents_padding(bytes).to_vec()),
         _ => None,
     }
 }
 
+/// `/Contents` is the CMS DER followed by zero padding. Cut it at the DER
+/// length, not at the last non-zero byte: a CMS whose RSA signature happens to
+/// end in 0x00 (about 1 in 256) would otherwise be truncated and reported invalid.
+fn strip_contents_padding(bytes: &[u8]) -> &[u8] {
+    if let Some(len) = der_tlv_len(bytes) {
+        if len <= bytes.len() {
+            return &bytes[..len];
+        }
+    }
+    let end = bytes
+        .iter()
+        .rposition(|b| *b != 0)
+        .map(|i| i + 1)
+        .unwrap_or(0);
+    &bytes[..end]
+}
+
+/// Total length (header + content) of the DER TLV at the start of `b`.
+fn der_tlv_len(b: &[u8]) -> Option<usize> {
+    if b.len() < 2 || b[0] != 0x30 {
+        return None;
+    }
+    let first = b[1] as usize;
+    if first < 0x80 {
+        return Some(2 + first);
+    }
+    let n = first & 0x7f;
+    if n == 0 || n > 4 || b.len() < 2 + n {
+        return None;
+    }
+    let len = b[2..2 + n]
+        .iter()
+        .fold(0usize, |acc, x| (acc << 8) | *x as usize);
+    Some(2 + n + len)
+}
+
 pub(crate) fn byterange_bytes(pdf: &[u8], ranges: &[i64]) -> Result<Vec<u8>> {
     let mut out = Vec::new();
-    for chunk in ranges.chunks_exact(2) {
+    for chunk in ranges.as_chunks::<2>().0 {
         let off =
             usize::try_from(chunk[0]).map_err(|_| Error::Sign("ByteRange is invalid".into()))?;
         let len =
@@ -264,7 +308,8 @@ fn decode_pdf_text(bytes: &[u8]) -> Option<String> {
     if bytes.starts_with(&[0xFE, 0xFF]) {
         let units: Vec<u16> = bytes[2..]
             .chunks(2)
-            .filter_map(|c| (c.len() == 2).then(|| u16::from_be_bytes([c[0], c[1]])))
+            .filter(|c| c.len() == 2)
+            .map(|c| u16::from_be_bytes([c[0], c[1]]))
             .collect();
         String::from_utf16(&units).ok()
     } else if let Ok(s) = std::str::from_utf8(bytes) {
@@ -360,7 +405,7 @@ fn write_appearance(
 
     let off = out.len();
     xref.push((ap_id, off));
-    write!(out, "{ap_id} 0 obj\n").map_err(|e| Error::Sign(e.to_string()))?;
+    writeln!(out, "{ap_id} 0 obj").map_err(|e| Error::Sign(e.to_string()))?;
     encode_object(&Object::Dictionary(stream_dict), out)?;
     out.extend_from_slice(b"\nstream\n");
     out.extend_from_slice(content.as_bytes());
@@ -406,7 +451,7 @@ fn existing_array(doc: &Document, dict: &Dictionary, key: &[u8]) -> Vec<Object> 
 fn write_raw_object(out: &mut Vec<u8>, xref: &mut Vec<(u32, usize)>, id: u32, body: &[u8]) {
     let off = out.len();
     xref.push((id, off));
-    let _ = write!(out, "{id} 0 obj\n");
+    let _ = writeln!(out, "{id} 0 obj");
     out.extend_from_slice(body);
     if !body.ends_with(b"\n") {
         out.push(b'\n');
@@ -422,7 +467,7 @@ fn write_lopdf_object(
 ) -> Result<()> {
     let off = out.len();
     xref.push((id, off));
-    write!(out, "{id} 0 obj\n").map_err(|e| Error::Sign(e.to_string()))?;
+    writeln!(out, "{id} 0 obj").map_err(|e| Error::Sign(e.to_string()))?;
     encode_object(obj, out)?;
     out.extend_from_slice(b"\nendobj\n");
     Ok(())
@@ -508,8 +553,8 @@ fn write_xref_and_trailer(
             j += 1;
         }
         let _ = writeln!(out, "{start} {}", j - i);
-        for k in i..j {
-            let _ = write!(out, "{:010} {:05} n \n", entries[k].1, 0u16);
+        for entry in &entries[i..j] {
+            let _ = writeln!(out, "{:010} {:05} n ", entry.1, 0u16);
         }
         i = j;
     }
@@ -527,10 +572,8 @@ fn locate_contents(buf: &[u8], contents_len: usize) -> Result<(usize, usize)> {
         let lt = search + rel + CONTENTS_MARK.len() - 1; // '<'
         let hex_start = lt + 1;
         let gt = hex_start + expected_hex;
-        if gt < buf.len() && buf[gt] == b'>' {
-            if buf[hex_start..gt].iter().all(|b| *b == b'0') {
-                return Ok((lt, gt));
-            }
+        if gt < buf.len() && buf[gt] == b'>' && buf[hex_start..gt].iter().all(|b| *b == b'0') {
+            return Ok((lt, gt));
         }
         search += rel + 1;
     }
@@ -638,6 +681,11 @@ fn pdf_date_now() -> String {
     format!("D:{y:04}{m:02}{d:02}{h:02}{min:02}{s:02}+00'00'")
 }
 
+pub(crate) fn rfc3339_utc(unix: u64) -> String {
+    let (y, m, d, h, min, s) = civil_utc(unix);
+    format!("{y:04}-{m:02}-{d:02}T{h:02}:{min:02}:{s:02}Z")
+}
+
 pub(crate) fn civil_utc(unix: u64) -> (i32, u32, u32, u32, u32, u32) {
     let z = unix / 86400;
     let tod = unix % 86400;
@@ -716,12 +764,27 @@ mod tests {
     #[test]
     fn verify_unsigned_is_empty() {
         let pdf = std::fs::read(corpus("hello.pdf")).unwrap();
-        assert!(verify_signatures(&pdf).unwrap().is_empty());
+        assert!(verify_signatures(&pdf, &[]).unwrap().is_empty());
     }
 
     fn corpus(name: &str) -> std::path::PathBuf {
         std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
             .join("../../corpus")
             .join(name)
+    }
+
+    #[test]
+    fn contents_padding_keeps_trailing_zero_of_der() {
+        // SEQUENCE { OCTET STRING 01 00 } followed by padding.
+        let der = [0x30, 0x04, 0x04, 0x02, 0x01, 0x00];
+        let mut padded = der.to_vec();
+        padded.extend_from_slice(&[0; 16]);
+        assert_eq!(strip_contents_padding(&padded), &der);
+        let mut long = vec![0x30, 0x82, 0x01, 0x00];
+        long.extend(std::iter::repeat_n(0xAB, 255));
+        long.push(0x00);
+        let full = long.clone();
+        long.extend_from_slice(&[0; 8]);
+        assert_eq!(strip_contents_padding(&long), &full[..]);
     }
 }

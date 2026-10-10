@@ -29,7 +29,7 @@ pub mod test_support;
 
 pub use command::{Command, History};
 pub use document::{Document, DocumentId, PageInfo};
-pub use error::{Error, InvalidKind, Result, SignedOp};
+pub use error::{Error, InvalidKind, Result, SignedOp, TimestampErrorKind};
 pub use i18n::{
     available_locales, current_locale, detect_locale, init as init_i18n, set_locale, tr, tr_args,
 };
@@ -48,6 +48,6 @@ pub use render::{
 };
 pub use signer::{
     describe_certificate, format_verify_result, format_verify_results, pin_prompt_text,
-    usage_label, CertificateInfo, CertificateUsage, CertificateValidity, PadesLevel, SignRequest,
-    SignatureInfo, Signer, VisibleAppearance,
+    usage_label, CancelToken, CertificateInfo, CertificateUsage, CertificateValidity, PadesLevel,
+    SignRequest, SignatureInfo, Signer, TimestampInfo, VisibleAppearance,
 };

@@ -25,6 +25,12 @@ pub enum Error {
     SignLevelUnsupported {
         level: crate::signer::PadesLevel,
     },
+    /// PAdES B-T: the RFC 3161 timestamp could not be obtained or did not
+    /// validate. The signature is never downgraded to B-B.
+    Timestamp(TimestampErrorKind),
+    /// The caller cancelled the operation through a [`crate::CancelToken`].
+    /// Not a failure: the UI should treat it as a no-op. Nothing was written.
+    Cancelled,
     /// The PDF already has a signature; `op` would invalidate it.
     Signed {
         op: SignedOp,
@@ -48,6 +54,93 @@ pub enum InvalidKind {
     NoInputImages,
     EmptyOverlayText,
     UnknownPermission { value: String },
+}
+
+/// Why a PAdES B-T timestamp was refused. Match this instead of parsing [`Display`].
+#[derive(Clone, Debug, PartialEq, Eq)]
+#[non_exhaustive]
+pub enum TimestampErrorKind {
+    /// B-T was requested but no TSA URL is configured (there is no default).
+    UrlMissing,
+    /// The TSA URL is not an `http://` or `https://` URL.
+    BadUrl,
+    /// The TSA could not be reached (DNS, TLS, timeout, ...).
+    Network { detail: String },
+    /// The system random generator failed while making the request nonce.
+    Rng { detail: String },
+    /// The TSA response is larger than the 256 KiB the client accepts.
+    ResponseTooLarge,
+    /// The signature plus timestamp token (with the TSA's certificates) does
+    /// not fit the space reserved in `/Contents` for B-T (32 KiB).
+    TokenTooLarge,
+    /// The TSA answered with a non-success HTTP status.
+    Http { status: u16 },
+    /// The TSA answered, but did not grant the timestamp (PKIStatus).
+    Rejected { status: u8 },
+    /// The response or token is not valid RFC 3161 DER.
+    Malformed,
+    /// The token's nonce differs from the one we sent.
+    NonceMismatch,
+    /// The token's messageImprint is not the hash of our signature value.
+    ImprintMismatch,
+    /// The token's CMS signature does not verify.
+    BadSignature,
+    /// The ESS signing-certificate attribute does not bind the TSA certificate.
+    SigningCertMismatch,
+    /// The TSA certificate does not chain to a trusted root, is not valid at
+    /// the timestamp time, does not have a critical extended key usage with
+    /// timeStamping as its only purpose (RFC 3161 §2.3), or a CA in its chain
+    /// lacks keyCertSign or violates its pathLenConstraint.
+    UntrustedCert,
+}
+
+impl TimestampErrorKind {
+    pub fn to_locale_string(&self) -> String {
+        match self {
+            TimestampErrorKind::UrlMissing => {
+                tr("PAdES-B-T needs a timestamp server (TSA) URL; none is configured")
+            }
+            TimestampErrorKind::BadUrl => {
+                tr("the timestamp server URL must start with http:// or https://")
+            }
+            TimestampErrorKind::Network { detail } => tr_args(
+                "could not reach the timestamp server: {detail}",
+                &[("detail", detail)],
+            ),
+            TimestampErrorKind::Rng { detail } => tr_args(
+                "could not generate a random nonce: {detail}",
+                &[("detail", detail)],
+            ),
+            TimestampErrorKind::ResponseTooLarge => {
+                tr("the timestamp server response is too large")
+            }
+            TimestampErrorKind::TokenTooLarge => {
+                tr("the timestamp and its certificates do not fit in the signature")
+            }
+            TimestampErrorKind::Http { status } => tr_args(
+                "the timestamp server answered HTTP {status}",
+                &[("status", &status.to_string())],
+            ),
+            TimestampErrorKind::Rejected { status } => tr_args(
+                "the timestamp server refused the request (status {status})",
+                &[("status", &status.to_string())],
+            ),
+            TimestampErrorKind::Malformed => tr("the timestamp server sent a malformed response"),
+            TimestampErrorKind::NonceMismatch => {
+                tr("the timestamp does not answer our request (nonce mismatch)")
+            }
+            TimestampErrorKind::ImprintMismatch => {
+                tr("the timestamp does not cover this signature (hash mismatch)")
+            }
+            TimestampErrorKind::BadSignature => tr("the timestamp signature is not valid"),
+            TimestampErrorKind::SigningCertMismatch => {
+                tr("the timestamp is not bound to the TSA certificate (ESS signing-certificate)")
+            }
+            TimestampErrorKind::UntrustedCert => {
+                tr("the timestamp server certificate is not trusted")
+            }
+        }
+    }
 }
 
 /// Destructive operation blocked on a signed document.
@@ -85,6 +178,11 @@ impl fmt::Display for Error {
 }
 
 impl Error {
+    /// `true` for [`Error::Cancelled`]: the user aborted, do not show an error.
+    pub fn is_cancelled(&self) -> bool {
+        matches!(self, Error::Cancelled)
+    }
+
     /// Localized message for the active catalog. The UI may ignore this and
     /// match the variant instead.
     pub fn to_locale_string(&self) -> String {
@@ -106,6 +204,11 @@ impl Error {
                 "{level} signatures are not supported yet",
                 &[("level", level.label())],
             ),
+            Error::Timestamp(kind) => tr_args(
+                "timestamp: {detail}",
+                &[("detail", &kind.to_locale_string())],
+            ),
+            Error::Cancelled => tr("operation cancelled"),
             Error::Sign(m) => tr_args("sign: {detail}", &[("detail", &tr(m))]),
             Error::Signed { op } => tr_args(
                 "document is signed; {op} would invalidate the signature (incremental save only)",

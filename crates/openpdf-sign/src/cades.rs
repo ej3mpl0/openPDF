@@ -7,7 +7,7 @@ use cms::signed_data::{
 };
 use der::asn1::{OctetString, SetOfVec};
 use der::{Any, Decode, Encode, Sequence};
-use openpdf_core::{Error, Result};
+use openpdf_core::{Error, Result, TimestampErrorKind, TimestampInfo};
 use rsa::pkcs1v15::{Signature, VerifyingKey};
 use rsa::pkcs8::DecodePublicKey;
 use rsa::signature::Verifier;
@@ -141,29 +141,89 @@ fn cms_err(e: impl ToString) -> Error {
     Error::Sign(e.to_string())
 }
 
+/// PAdES B-T: obtain a timestamp over the SignerInfo signature value and add
+/// it as the unsigned attribute `id-aa-signatureTimeStampToken`.
+pub(crate) fn add_signature_timestamp(
+    cms_der: &[u8],
+    timestamp: impl FnOnce(&[u8]) -> Result<Vec<u8>>,
+) -> Result<Vec<u8>> {
+    let content_info = ContentInfo::from_der(cms_der).map_err(cms_err)?;
+    let mut signed_data = content_info
+        .content
+        .decode_as::<SignedData>()
+        .map_err(cms_err)?;
+    let mut infos: Vec<SignerInfo> = signed_data.signer_infos.0.into_vec();
+    let info = infos
+        .first_mut()
+        .ok_or_else(|| Error::Sign("CMS has no SignerInfo".into()))?;
+    let token = timestamp(info.signature.as_bytes())?;
+    let token_any =
+        Any::from_der(&token).map_err(|_| Error::Timestamp(TimestampErrorKind::Malformed))?;
+    let attr = attribute(crate::tsp::ID_AA_SIGNATURE_TIME_STAMP_TOKEN, token_any)?;
+    info.unsigned_attrs = Some(SetOfVec::try_from(vec![attr]).map_err(cms_err)?);
+    signed_data.signer_infos = SignerInfos(SetOfVec::try_from(infos).map_err(cms_err)?);
+    let sd_der = signed_data.to_der().map_err(cms_err)?;
+    ContentInfo {
+        content_type: ID_SIGNED_DATA,
+        content: Any::from_der(&sd_der).map_err(cms_err)?,
+    }
+    .to_der()
+    .map_err(cms_err)
+}
+
 /// Result of checking a detached CMS blob against the `/ByteRange` bytes.
 #[derive(Clone, Debug)]
 pub(crate) struct CmsCheck {
     pub valid: bool,
     pub signer: Option<String>,
+    pub timestamp: Option<TimestampInfo>,
 }
 
-pub(crate) fn verify_detached(cms_der: &[u8], message: &[u8]) -> CmsCheck {
-    match verify_inner(cms_der, message) {
+pub(crate) fn verify_detached(
+    cms_der: &[u8],
+    message: &[u8],
+    tsa_trust: &[Certificate],
+) -> CmsCheck {
+    match verify_inner(cms_der, message, tsa_trust) {
         Some(c) => c,
         None => CmsCheck {
             valid: false,
             signer: None,
+            timestamp: None,
         },
     }
 }
 
-fn verify_inner(cms_der: &[u8], message: &[u8]) -> Option<CmsCheck> {
+/// Check the `id-aa-signatureTimeStampToken` unsigned attribute, if any.
+fn check_timestamp(signer_info: &SignerInfo, tsa_trust: &[Certificate]) -> Option<TimestampInfo> {
+    let token = signer_info
+        .unsigned_attrs
+        .as_ref()?
+        .iter()
+        .find(|a| a.oid == crate::tsp::ID_AA_SIGNATURE_TIME_STAMP_TOKEN)?
+        .values
+        .as_slice()
+        .first()?
+        .to_der()
+        .ok()?;
+    let time = crate::tsp::token_gen_time(&token).map(crate::pades::rfc3339_utc);
+    let result = crate::tsp::validate_token(
+        &token,
+        signer_info.signature.as_bytes(),
+        None,
+        tsa_trust,
+        false,
+    );
+    Some(TimestampInfo::new(time, result.is_ok(), result.err()))
+}
+
+fn verify_inner(cms_der: &[u8], message: &[u8], tsa_trust: &[Certificate]) -> Option<CmsCheck> {
     let content_info = ContentInfo::from_der(cms_der).ok()?;
     let signed_data = content_info.content.decode_as::<SignedData>().ok()?;
     let signer_info = signed_data.signer_infos.0.as_slice().first()?;
     let cert = embedded_leaf(&signed_data)?;
     let signer = Some(cert.tbs_certificate.subject.to_string());
+    let timestamp = check_timestamp(signer_info, tsa_trust);
 
     let expected = Sha256::digest(message);
     let signed_attrs = signer_info.signed_attrs.as_ref()?;
@@ -176,6 +236,7 @@ fn verify_inner(cms_der: &[u8], message: &[u8]) -> Option<CmsCheck> {
         return Some(CmsCheck {
             valid: false,
             signer,
+            timestamp,
         });
     }
 
@@ -193,12 +254,17 @@ fn verify_inner(cms_der: &[u8], message: &[u8]) -> Option<CmsCheck> {
         return Some(CmsCheck {
             valid: false,
             signer,
+            timestamp,
         });
     }
     let valid = VerifyingKey::<Sha256>::new(public_key)
         .verify(&tbs, &signature)
         .is_ok();
-    Some(CmsCheck { valid, signer })
+    Some(CmsCheck {
+        valid,
+        signer,
+        timestamp,
+    })
 }
 
 fn embedded_leaf(signed_data: &SignedData) -> Option<&Certificate> {

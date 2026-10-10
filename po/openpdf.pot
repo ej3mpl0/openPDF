@@ -415,5 +415,62 @@ msgstr ""
 msgid "crop box must be llx,lly,urx,ury"
 msgstr ""
 
+msgid "could not generate a random nonce: {detail}"
+msgstr ""
+
+msgid "the timestamp server response is too large"
+msgstr ""
+
+msgid "the timestamp and its certificates do not fit in the signature"
+msgstr ""
+
+msgid "operation cancelled"
+msgstr ""
+
 msgid "{level} signatures are not supported yet"
+msgstr ""
+
+msgid "timestamp: {detail}"
+msgstr ""
+
+msgid "PAdES-B-T needs a timestamp server (TSA) URL; none is configured"
+msgstr ""
+
+msgid "the timestamp server URL must start with http:// or https://"
+msgstr ""
+
+msgid "could not reach the timestamp server: {detail}"
+msgstr ""
+
+msgid "the timestamp server answered HTTP {status}"
+msgstr ""
+
+msgid "the timestamp server refused the request (status {status})"
+msgstr ""
+
+msgid "the timestamp server sent a malformed response"
+msgstr ""
+
+msgid "the timestamp does not answer our request (nonce mismatch)"
+msgstr ""
+
+msgid "the timestamp does not cover this signature (hash mismatch)"
+msgstr ""
+
+msgid "the timestamp signature is not valid"
+msgstr ""
+
+msgid "the timestamp is not bound to the TSA certificate (ESS signing-certificate)"
+msgstr ""
+
+msgid "the timestamp server certificate is not trusted"
+msgstr ""
+
+msgid "unknown time"
+msgstr ""
+
+msgid "Timestamp: {time} (valid)"
+msgstr ""
+
+msgid "Timestamp: {time} (invalid)"
 msgstr ""
