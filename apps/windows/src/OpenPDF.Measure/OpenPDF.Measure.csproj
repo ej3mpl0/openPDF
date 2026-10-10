@@ -1,0 +1,22 @@
+<Project Sdk="Microsoft.NET.Sdk">
+  <PropertyGroup>
+    <OutputType>Exe</OutputType>
+    <TargetFramework>net8.0</TargetFramework>
+    <AllowUnsafeBlocks>true</AllowUnsafeBlocks>
+    <Nullable>enable</Nullable>
+    <ImplicitUsings>enable</ImplicitUsings>
+    <RootNamespace>OpenPdf</RootNamespace>
+    <DefineConstants>$(DefineConstants);OPENPDF_MEASURE</DefineConstants>
+  </PropertyGroup>
+  <ItemGroup>
+    <Compile Include="..\OpenPDF\Measure.cs" Link="Measure.cs" />
+    <Compile Include="..\OpenPDF\Localization.cs" Link="Localization.cs" />
+    <Compile Include="..\OpenPDF\Generated\*.cs" Condition="Exists('..\OpenPDF\Generated')" />
+    <None Include="..\..\lib\openpdf_ffi.dll" Condition="Exists('..\..\lib\openpdf_ffi.dll')">
+      <CopyToOutputDirectory>PreserveNewest</CopyToOutputDirectory>
+    </None>
+    <None Include="..\..\lib\pdfium.dll" Condition="Exists('..\..\lib\pdfium.dll')">
+      <CopyToOutputDirectory>PreserveNewest</CopyToOutputDirectory>
+    </None>
+  </ItemGroup>
+</Project>

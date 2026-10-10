@@ -429,3 +429,45 @@ msgstr ""
 
 msgid "Signing cancelled"
 msgstr ""
+
+msgid "Open"
+msgstr ""
+
+msgid "Open PDF"
+msgstr ""
+
+msgid "Thumbnails"
+msgstr ""
+
+msgid "Enter PIN"
+msgstr ""
+
+msgid "Cancel"
+msgstr ""
+
+msgid "Unlock"
+msgstr ""
+
+msgid "Signed document — read-only"
+msgstr ""
+
+msgid "Page {page} of {total}"
+msgstr ""
+
+msgid "Zoom in"
+msgstr ""
+
+msgid "Zoom out"
+msgstr ""
+
+msgid "Previous page"
+msgstr ""
+
+msgid "Next page"
+msgstr ""
+
+msgid "Sign"
+msgstr ""
+
+msgid "no signing certificates found"
+msgstr ""

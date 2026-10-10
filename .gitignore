@@ -3,3 +3,7 @@
 /bindings
 
 
+!apps/windows/src/OpenPDF/Assets/*.png
+/apps/windows/**/bin/
+/apps/windows/**/obj/
+/apps/windows/lib/

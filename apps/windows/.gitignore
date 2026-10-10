@@ -1,0 +1,5 @@
+bin/
+obj/
+lib/
+src/OpenPDF/Generated/*.cs
+.vs/
