@@ -1,6 +1,6 @@
 use std::collections::HashMap;
 use std::path::Path;
-use std::sync::mpsc::{self, Receiver, RecvTimeoutError, Sender, TryRecvError};
+use std::sync::mpsc::{self, Receiver, RecvTimeoutError, Sender};
 use std::sync::{Arc, Mutex, OnceLock};
 use std::thread;
 use std::time::Duration;
@@ -243,11 +243,13 @@ fn handle_cmd(
             reply,
         } => {
             let result = match docs.get(&id) {
-                Some(b) => pdfium_bind::render_page(&b.doc, page, zoom).map(|(w, h, rgba)| Raster {
-                    width: w,
-                    height: h,
-                    rgba,
-                }),
+                Some(b) => {
+                    pdfium_bind::render_page(&b.doc, page, zoom).map(|(w, h, rgba)| Raster {
+                        width: w,
+                        height: h,
+                        rgba,
+                    })
+                }
                 None => Err(Error::invalid(InvalidKind::DocumentNotBound)),
             };
             let _ = reply.send(result);
@@ -421,10 +423,7 @@ impl Engine {
     pub fn try_recv(&self) -> Option<TileEvent> {
         let h = worker().ok()?;
         let rx = h.events.lock().ok()?;
-        match rx.try_recv() {
-            Ok(ev) => Some(ev),
-            Err(TryRecvError::Empty | TryRecvError::Disconnected) => None,
-        }
+        rx.try_recv().ok()
     }
 
     pub fn recv_timeout(&self, timeout: Duration) -> Option<TileEvent> {

@@ -4,10 +4,11 @@ use std::path::{Path, PathBuf};
 use anyhow::{bail, Context, Result};
 use clap::{value_parser, Arg, ArgMatches, Command};
 use openpdf_core::{
-    apply_overlay, crop_pages, extract, images_to_pdf, insert_pages, optimize, parse_page_ranges,
-    pdf_to_rasters, protect, raster_to_png, replace_pages, sanitize_metadata, tr, tr_args,
-    unprotect, CropBox, Document, Engine, OptimizeOptions, Overlay, OverlayKind, PageRange,
-    PdfPermissions, ProtectOptions,
+    apply_overlay, compare_pdfs, crop_pages, extract, images_to_pdf, insert_pages, ocr,
+    ocr_capability, optimize, parse_page_ranges, pdf_to_rasters, protect, raster_to_png, redact,
+    replace_pages, sanitize_metadata, tr, tr_args, unprotect, CropBox, Document, Engine,
+    OcrOptions, OptimizeOptions, Overlay, OverlayKind, PageRange, PdfPermissions, ProtectOptions,
+    RedactBox,
 };
 
 use crate::{decorate, engine, path_arg};
@@ -104,11 +105,9 @@ pub fn register(cmd: Command, arguments: &'static str) -> Command {
                     .long("owner")
                     .help(tr("Owner password (defaults to user)")),
             )
-            .arg(
-                Arg::new("permit")
-                    .long("permit")
-                    .help(tr("Permissions: print,modify,copy,annotate,fill,assemble,print-high")),
-            )
+            .arg(Arg::new("permit").long("permit").help(tr(
+                "Permissions: print,modify,copy,annotate,fill,assemble,print-high",
+            )))
             .arg(output_arg()),
     ))
     .subcommand(decorate(
@@ -192,6 +191,63 @@ pub fn register(cmd: Command, arguments: &'static str) -> Command {
             )
             .arg(output_arg()),
     ))
+    .subcommand(decorate(
+        Command::new("ocr")
+            .about(tr("Add an invisible searchable text layer (Tesseract)"))
+            .arg(file_arg(arguments).required(false))
+            .arg(
+                Arg::new("lang")
+                    .long("lang")
+                    .default_value("eng")
+                    .help(tr("Tesseract language (eng, spa, …)")),
+            )
+            .arg(pages_arg())
+            .arg(
+                Arg::new("list-langs")
+                    .long("list-langs")
+                    .action(clap::ArgAction::SetTrue)
+                    .help(tr("List installed OCR languages")),
+            )
+            .arg(output_arg().required(false)),
+    ))
+    .subcommand(decorate(
+        Command::new("redact")
+            .about(tr("Permanently remove content in a box (true redaction)"))
+            .arg(file_arg(arguments))
+            .arg(
+                Arg::new("box")
+                    .long("box")
+                    .required(true)
+                    .action(clap::ArgAction::Append)
+                    .help(tr("Redaction box page,llx,lly,urx,ury (page is 1-based)")),
+            )
+            .arg(output_arg()),
+    ))
+    .subcommand(decorate(
+        Command::new("compare")
+            .about(tr("Compare two PDFs (text + per-page pixels)"))
+            .arg(
+                Arg::new("left")
+                    .required(true)
+                    .value_name("LEFT")
+                    .help_heading(arguments)
+                    .help(tr("First PDF")),
+            )
+            .arg(
+                Arg::new("right")
+                    .required(true)
+                    .value_name("RIGHT")
+                    .help_heading(arguments)
+                    .help(tr("Second PDF")),
+            )
+            .arg(
+                Arg::new("zoom")
+                    .long("zoom")
+                    .value_parser(value_parser!(f32))
+                    .default_value("1.0")
+                    .help(tr("Zoom factor")),
+            ),
+    ))
 }
 
 pub fn dispatch(matches: &ArgMatches) -> Option<Result<()>> {
@@ -210,6 +266,9 @@ pub fn dispatch(matches: &ArgMatches) -> Option<Result<()>> {
         Some(("number", m)) => number_cmd(m),
         Some(("from-images", m)) => from_images_cmd(m),
         Some(("to-images", m)) => to_images_cmd(m),
+        Some(("ocr", m)) => ocr_cmd(m),
+        Some(("redact", m)) => redact_cmd(m),
+        Some(("compare", m)) => compare_cmd(m),
         _ => return None,
     })
 }
@@ -403,9 +462,8 @@ fn to_images_cmd(m: &ArgMatches) -> Result<()> {
     let rasters = pdf_to_rasters(&engine, &doc, zoom)?;
     if rasters.len() == 1 && looks_png(&output) {
         let png = raster_to_png(&rasters[0])?;
-        fs::write(&output, png).with_context(|| {
-            tr_args("write {path}", &[("path", &output.display().to_string())])
-        })?;
+        fs::write(&output, png)
+            .with_context(|| tr_args("write {path}", &[("path", &output.display().to_string())]))?;
         println!(
             "{}",
             tr_args("wrote {path}", &[("path", &output.display().to_string())])
@@ -413,10 +471,7 @@ fn to_images_cmd(m: &ArgMatches) -> Result<()> {
         return Ok(());
     }
     fs::create_dir_all(&output)?;
-    let stem = path
-        .file_stem()
-        .and_then(|s| s.to_str())
-        .unwrap_or("page");
+    let stem = path.file_stem().and_then(|s| s.to_str()).unwrap_or("page");
     for (i, raster) in rasters.iter().enumerate() {
         let dest = output.join(format!("{}-{}.png", stem, i + 1));
         let png = raster_to_png(raster)?;
@@ -425,6 +480,134 @@ fn to_images_cmd(m: &ArgMatches) -> Result<()> {
             "{}",
             tr_args("wrote {path}", &[("path", &dest.display().to_string())])
         );
+    }
+    Ok(())
+}
+
+fn ocr_cmd(m: &ArgMatches) -> Result<()> {
+    if m.get_flag("list-langs") {
+        let cap = ocr_capability();
+        if !cap.available {
+            bail!(
+                "{}",
+                tr("OCR is unavailable (install tesseract-ocr or set OPENPDF_TESSERACT to the binary or libtesseract)")
+            );
+        }
+        for lang in cap.languages {
+            println!("{lang}");
+        }
+        return Ok(());
+    }
+    let output = m.get_one::<String>("output").map(PathBuf::from);
+    let Some(output) = output else {
+        bail!("{}", tr("Output path"));
+    };
+    if m.get_one::<String>("file").is_none() {
+        bail!("{}", tr("PDF file"));
+    }
+    let engine = engine()?;
+    let doc = engine.open(path_arg(m, "file"))?;
+    let mut opts = OcrOptions {
+        language: m.get_one::<String>("lang").unwrap().clone(),
+        pages: Vec::new(),
+    };
+    opts.pages = ranges_or_all(&doc, m.get_one::<String>("pages").map(String::as_str))?;
+    save_out(ocr(&engine, &doc, &opts)?, &output)
+}
+
+fn redact_cmd(m: &ArgMatches) -> Result<()> {
+    let doc = Document::open(path_arg(m, "file"))?;
+    let mut boxes = Vec::new();
+    for spec in m.get_many::<String>("box").unwrap() {
+        boxes.push(parse_redact_box(spec, doc.page_count())?);
+    }
+    save_out(redact(&doc, &boxes)?, &path_arg(m, "output"))
+}
+
+fn parse_redact_box(spec: &str, page_count: u32) -> Result<RedactBox> {
+    let parts: Vec<&str> = spec.split(',').map(str::trim).collect();
+    if parts.len() != 5 {
+        bail!("{}", tr("redaction box must be page,llx,lly,urx,ury"));
+    }
+    let page_1: u32 = parts[0]
+        .parse()
+        .map_err(|_| anyhow::anyhow!("{}", tr("page numbers are 1-based")))?;
+    if page_1 == 0 {
+        bail!("{}", tr("page numbers are 1-based"));
+    }
+    if page_1 > page_count {
+        bail!(
+            "{}",
+            tr_args(
+                "page {page} is out of range (0..{count})",
+                &[
+                    ("page", &(page_1 - 1).to_string()),
+                    ("count", &page_count.to_string()),
+                ],
+            )
+        );
+    }
+    let nums: Result<Vec<f32>, _> = parts[1..].iter().map(|s| s.parse()).collect();
+    let nums =
+        nums.map_err(|_| anyhow::anyhow!("{}", tr("redaction box must be page,llx,lly,urx,ury")))?;
+    Ok(RedactBox::new(
+        page_1 - 1,
+        nums[0],
+        nums[1],
+        nums[2],
+        nums[3],
+    )?)
+}
+
+fn compare_cmd(m: &ArgMatches) -> Result<()> {
+    let zoom = *m.get_one::<f32>("zoom").unwrap();
+    let engine = engine()?;
+    let left = engine.open(path_arg(m, "left"))?;
+    let right = engine.open(path_arg(m, "right"))?;
+    let report = compare_pdfs(&engine, &left, &right, zoom)?;
+    println!(
+        "{}",
+        tr_args(
+            "pages: {left} vs {right}",
+            &[
+                ("left", &report.left_pages.to_string()),
+                ("right", &report.right_pages.to_string()),
+            ],
+        )
+    );
+    for page in &report.pages {
+        let text = if page.text_equal {
+            tr("text equal")
+        } else {
+            tr("text differs")
+        };
+        let pixels = if page.pixel_equal {
+            tr("pixels equal")
+        } else {
+            tr_args(
+                "pixels differ ({changed}/{total})",
+                &[
+                    ("changed", &page.changed_pixels.to_string()),
+                    ("total", &page.total_pixels.to_string()),
+                ],
+            )
+        };
+        println!(
+            "{}",
+            tr_args(
+                "page {n}: {text}; {pixels}",
+                &[
+                    ("n", &(page.page + 1).to_string()),
+                    ("text", &text),
+                    ("pixels", &pixels),
+                ],
+            )
+        );
+    }
+    if report.identical {
+        println!("{}", tr("identical"));
+    } else {
+        println!("{}", tr("differ"));
     }
     Ok(())
 }

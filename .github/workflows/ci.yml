@@ -24,7 +24,7 @@ jobs:
       - name: Install SoftHSM2
         run: |
           sudo apt-get update
-          sudo apt-get install -y softhsm2
+          sudo apt-get install -y softhsm2 tesseract-ocr
       - name: Check po catalogs
         run: |
           python3 scripts/test_check_po.py

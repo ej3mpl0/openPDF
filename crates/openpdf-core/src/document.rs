@@ -264,8 +264,7 @@ impl Document {
     fn apply_inverse(&mut self, applied: Applied) -> Result<Applied> {
         match applied {
             Applied::Rotate { index, delta } => {
-                self.slots[index].rotation =
-                    normalize_rotation(self.slots[index].rotation - delta);
+                self.slots[index].rotation = normalize_rotation(self.slots[index].rotation - delta);
                 Ok(Applied::Rotate { index, delta })
             }
             Applied::Delete { index, slot } => {
@@ -286,8 +285,7 @@ impl Document {
     fn apply_forward(&mut self, applied: Applied) -> Result<Applied> {
         match applied {
             Applied::Rotate { index, delta } => {
-                self.slots[index].rotation =
-                    normalize_rotation(self.slots[index].rotation + delta);
+                self.slots[index].rotation = normalize_rotation(self.slots[index].rotation + delta);
                 Ok(Applied::Rotate { index, delta })
             }
             Applied::Delete { index, slot: _ } => {
@@ -341,7 +339,8 @@ impl Document {
     }
 
     pub(crate) fn lopdf_clone(&self) -> LopdfDocument {
-        self.assembled_lopdf().unwrap_or_else(|_| self.inner.clone())
+        self.assembled_lopdf()
+            .unwrap_or_else(|_| self.inner.clone())
     }
 
     pub(crate) fn assembled_lopdf(&self) -> Result<LopdfDocument> {
@@ -428,9 +427,7 @@ fn page_rotate(doc: &LopdfDocument, mut id: ObjectId) -> i32 {
 fn media_box(doc: &LopdfDocument, mut id: ObjectId) -> Result<(f32, f32)> {
     for _ in 0..16 {
         let obj = doc.get_object(id)?;
-        let dict = obj
-            .as_dict()
-            .map_err(|e| Error::structure(e.to_string()))?;
+        let dict = obj.as_dict().map_err(|e| Error::structure(e.to_string()))?;
         if let Ok(mb) = dict.get(b"MediaBox") {
             return parse_box(mb);
         }
@@ -460,7 +457,7 @@ fn parse_box(obj: &Object) -> Result<(f32, f32)> {
 fn number(obj: &Object) -> Result<f32> {
     match obj {
         Object::Integer(i) => Ok(*i as f32),
-        Object::Real(r) => Ok(*r as f32),
+        Object::Real(r) => Ok(*r),
         _ => Err(Error::structure("expected number")),
     }
 }

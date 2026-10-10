@@ -10,6 +10,9 @@ crates/openpdf-cli/src/main.rs
 crates/openpdf-sign/src/token.rs
 crates/openpdf-sign/src/pades.rs
 crates/openpdf-cli/src/tools.rs
+crates/openpdf-core/src/ocr.rs
+crates/openpdf-core/src/redact.rs
+crates/openpdf-core/src/compare.rs
 crates/openpdf-gtk/src/i18n.rs
 crates/openpdf-gtk/src/pin.rs
 crates/openpdf-gtk/src/sign.rs
