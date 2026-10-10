@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: MPL-2.0
 // swift-tools-version: 5.9
 import PackageDescription
 

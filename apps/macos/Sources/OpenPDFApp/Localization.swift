@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: MPL-2.0
 import Foundation
 
 /// Chrome strings go through core gettext (`translate`) so `po/es.po` is
