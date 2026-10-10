@@ -1,0 +1,12 @@
+[Desktop Entry]
+Type=Application
+Name=openPDF
+Comment=Fast, local PDF reader for Linux
+Exec=openpdf-gtk %f
+Icon=io.github.ej3mpl0.openpdf
+Terminal=false
+Categories=Office;Viewer;Graphics;
+MimeType=application/pdf;
+StartupNotify=true
+StartupWMClass=io.github.ej3mpl0.openpdf
+Keywords=PDF;Reader;Viewer;

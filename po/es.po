@@ -1,4 +1,3 @@
-# Spanish translations for openPDF.
 msgid ""
 msgstr ""
 "Project-Id-Version: openpdf 0.1.0\n"
@@ -265,6 +264,9 @@ msgstr "validez desconocida"
 msgid "{subject} — {usage} — {validity}"
 msgstr "Certificado {subject} — {usage} — {validity}"
 
+msgid "{usage} — {validity}"
+msgstr "{usage} — {validity}"
+
 msgid "Enter PIN for token \"{token}\""
 msgstr "Introduzca el PIN del token \"{token}\""
 
@@ -333,6 +335,162 @@ msgstr "ByteRange está fuera de rango"
 
 msgid "Signed by {name}"
 msgstr "Firmado por {name}"
+
+msgid "Fast, local PDF reader for Linux"
+msgstr "Lector de PDF rápido y local para Linux"
+
+msgid "Open"
+msgstr "Abrir"
+
+msgid "Open sample document"
+msgstr "Abrir documento de ejemplo"
+
+msgid "Recent files"
+msgstr "Archivos recientes"
+
+msgid "No recent files"
+msgstr "No hay archivos recientes"
+
+msgid "Tools"
+msgstr "Herramientas"
+
+msgid "View"
+msgstr "Ver"
+
+msgid "Comment"
+msgstr "Comentar"
+
+msgid "Fill and sign"
+msgstr "Rellenar y firmar"
+
+msgid "Organize pages"
+msgstr "Organizar páginas"
+
+msgid "Protect"
+msgstr "Proteger"
+
+msgid "Edit"
+msgstr "Editar"
+
+msgid "Waiting on openpdf-core"
+msgstr "Pendiente de openpdf-core"
+
+msgid "Signing goes through openpdf-core’s Signer trait (openpdf-sign). This UI never links that crate."
+msgstr "La firma pasa por el trait Signer de openpdf-core (openpdf-sign). Esta interfaz no enlaza ese crate."
+
+msgid "Preview uses a placeholder renderer because PDFium is not available."
+msgstr "La vista previa usa un renderizador provisional porque PDFium no está disponible."
+
+msgid "Open…"
+msgstr "Abrir…"
+
+msgid "Preferences"
+msgstr "Preferencias"
+
+msgid "About openPDF"
+msgstr "Acerca de openPDF"
+
+msgid "Quit"
+msgstr "Salir"
+
+msgid "Page"
+msgstr "Página"
+
+msgid "Fit width"
+msgstr "Ajustar al ancho"
+
+msgid "Fit page"
+msgstr "Ajustar a la página"
+
+msgid "Thumbnails"
+msgstr "Miniaturas"
+
+msgid "General"
+msgstr "Ajustes generales"
+
+msgid "Viewing"
+msgstr "Visualización"
+
+msgid "Advanced"
+msgstr "Avanzado"
+
+msgid "Language"
+msgstr "Idioma"
+
+msgid "Theme"
+msgstr "Tema"
+
+msgid "System"
+msgstr "Sistema"
+
+msgid "Light"
+msgstr "Claro"
+
+msgid "Dark"
+msgstr "Oscuro"
+
+msgid "English"
+msgstr "Inglés"
+
+msgid "Spanish"
+msgstr "Español"
+
+msgid "Restore last session"
+msgstr "Restaurar la última sesión"
+
+msgid "Show thumbnail sidebar"
+msgstr "Mostrar barra de miniaturas"
+
+msgid "Page layout"
+msgstr "Disposición"
+
+msgid "Continuous"
+msgstr "Continua"
+
+msgid "Single page"
+msgstr "Página suelta"
+
+msgid "Default zoom"
+msgstr "Zoom predeterminado"
+
+msgid "Tile size (px)"
+msgstr "Tamaño de tesela (px)"
+
+msgid "Tile cache (MiB)"
+msgstr "Caché de teselas (MiB)"
+
+msgid "256 px tiles and a cache cap keep RAM low on large PDFs."
+msgstr "Teselas de 256 px y un tope de caché mantienen la RAM baja en PDFs grandes."
+
+msgid "Language applies the next time the window opens."
+msgstr "El idioma se aplica al volver a abrir la ventana."
+
+msgid "Local PDF app. No accounts, no cloud, no telemetry."
+msgstr "App de PDF local. Sin cuentas, sin nube, sin telemetría."
+
+msgid "Find in document"
+msgstr "Buscar en el documento"
+
+msgid "No matches"
+msgstr "Sin resultados"
+
+msgid "PDF documents"
+msgstr "Documentos PDF"
+
+msgid "Open PDF"
+msgstr "Abrir PDF"
+
+msgid "Sign with certificate"
+msgstr "Firmar con certificado"
+
+msgid "No certificates found. openpdf-sign talks to the token; this window never asks for a PIN."
+msgstr "No hay certificados. openpdf-sign habla con el token; esta ventana nunca pide el PIN."
+
+msgid "Choose a signing certificate. The token will ask for the PIN if needed."
+msgstr "Elige un certificado de firma. El token pedirá el PIN si hace falta."
+
+msgid "Not a signing certificate"
+msgstr "No es un certificado de firma"
 
 msgid "crop box is inverted"
 msgstr "el recorte está invertido"
@@ -483,6 +641,123 @@ msgstr "la firma ECDSA tiene un tamaño de campo incorrecto"
 
 msgid "no signing certificates found"
 msgstr "no se encontraron certificados de firma"
+
+msgid "Other"
+msgstr "Otro"
+
+msgid "Open a PDF before signing."
+msgstr "Abre un PDF antes de firmar."
+
+msgid "Signed document — read-only. Rotate, delete and reorder are disabled."
+msgstr "Documento firmado — solo lectura. Girar, borrar y reordenar están desactivados."
+
+msgid "Rotate page"
+msgstr "Girar página"
+
+msgid "Delete page"
+msgstr "Eliminar página"
+
+msgid "Undo"
+msgstr "Deshacer"
+
+msgid "Sign with certificate…"
+msgstr "Firmar con certificado…"
+
+msgid "Bookmarks"
+msgstr "Marcadores"
+
+msgid "This document is signed; {op} is disabled."
+msgstr "Este documento está firmado; {op} está desactivado."
+
+msgid "Could not read the file: {detail}"
+msgstr "No se pudo leer el archivo: {detail}"
+
+msgid "Could not read this PDF: {detail}"
+msgstr "No se pudo leer este PDF: {detail}"
+
+msgid "Could not render the page: {detail}"
+msgstr "No se pudo dibujar la página: {detail}"
+
+msgid "Could not sign the document: {detail}"
+msgstr "No se pudo firmar el documento: {detail}"
+
+msgid "Page edits need a real document."
+msgstr "Hace falta un documento real para editar páginas."
+
+msgid "Placeholder has no PDF bytes."
+msgstr "El documento provisional no tiene bytes PDF."
+
+msgid "page {page} is out of range ({count} pages)"
+msgstr "la página {page} está fuera de rango ({count} páginas)"
+
+msgid "tile outside page"
+msgstr "tesela fuera de la página"
+
+msgid "file not found: {path}"
+msgstr "archivo no encontrado: {path}"
+
+msgid "PDF;Reader;Viewer;"
+msgstr "PDF;Lector;Visor;"
+
+msgid "--measure opens the real libadwaita window (needs a display or xvfb-run), loads a multi-page PDF, waits until every visible page tile and every visible thumbnail has been painted, then prints startup time and peak RSS and exits non-zero if over the documented limits."
+msgstr "--measure abre la ventana real de libadwaita (hace falta una pantalla o xvfb-run), carga un PDF de varias páginas, espera a que se pinten todas las teselas visibles y las miniaturas visibles, imprime el tiempo de arranque y el RSS de pico y sale distinto de cero si se superan los límites."
+
+msgid "Enter PIN"
+msgstr "Introducir PIN"
+
+msgid "Cancel"
+msgstr "Cancelar"
+
+msgid "Unlock"
+msgstr "Desbloquear"
+
+msgid "No certificates found."
+msgstr "No hay certificados."
+
+msgid "PKCS#11 module not available"
+msgstr "Módulo PKCS#11 no disponible"
+
+msgid "Could not load the PKCS#11 module"
+msgstr "No se pudo cargar el módulo PKCS#11"
+
+msgid "Loading certificates…"
+msgstr "Cargando certificados…"
+
+msgid "Could not list certificates."
+msgstr "No se pudieron listar los certificados."
+
+msgid "PIN entry cancelled"
+msgstr "Entrada de PIN cancelada"
+
+msgid "PIN dialog needs a display"
+msgstr "El diálogo de PIN necesita una pantalla"
+
+msgid "PIN entry was cancelled"
+msgstr "Se canceló la introducción del PIN"
+
+msgid "PKCS#11 module not available"
+msgstr "Módulo PKCS#11 no disponible"
+
+msgid "Could not load the PKCS#11 module"
+msgstr "No se pudo cargar el módulo PKCS#11"
+
+msgid "Signing…"
+msgstr "Firmando…"
+
+msgid "Signing failed"
+msgstr "La firma falló"
+
+msgid "Verification failed"
+msgstr "La verificación falló"
+
+msgid "PIN must be requested off the GTK thread"
+msgstr "El PIN debe pedirse fuera del hilo de GTK"
+
+msgid "Saved signed PDF to {path}"
+msgstr "PDF firmado guardado en {path}"
+
+msgid "Cannot verify: original file bytes are unavailable."
+msgstr "No se puede verificar: no hay bytes originales del archivo."
 
 msgid "PKCS#11 module_path in the configuration must be an absolute path: {path}"
 msgstr "module_path de PKCS#11 en la configuración debe ser una ruta absoluta: {path}"

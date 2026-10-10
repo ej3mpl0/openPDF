@@ -15,3 +15,17 @@ crates/openpdf-sign/src/cades.rs
 crates/openpdf-sign/src/windows.rs
 crates/openpdf-sign/src/macos.rs
 crates/openpdf-cli/src/tools.rs
+crates/openpdf-gtk/src/i18n.rs
+crates/openpdf-gtk/src/pin.rs
+crates/openpdf-gtk/src/sign.rs
+crates/openpdf-gtk/src/backend.rs
+crates/openpdf-gtk/src/session.rs
+crates/openpdf-gtk/src/ui/about.rs
+crates/openpdf-gtk/src/ui/home.rs
+crates/openpdf-gtk/src/ui/preferences.rs
+crates/openpdf-gtk/src/ui/sign.rs
+crates/openpdf-gtk/src/ui/viewer.rs
+crates/openpdf-gtk/src/ui/window.rs
+crates/openpdf-app/src/main.rs
+data/io.github.ej3mpl0.openpdf.desktop
+data/io.github.ej3mpl0.openpdf.metainfo.xml
