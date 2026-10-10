@@ -12,7 +12,7 @@ The app binary constructs `Box<dyn Signer>` from `openpdf-sign`.
 > The document model, tile engine, structure operations (rotate, delete, move,
 > merge, split), and incremental save are his work.
 
-License: [MPL-2.0](https://www.mozilla.org/MPL/2.0/).
+License: [MPL-2.0](LICENSE).
 
 ## Building
 
