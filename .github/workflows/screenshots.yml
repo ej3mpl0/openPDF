@@ -1,0 +1,124 @@
+name: Screenshots
+
+on:
+  pull_request:
+    types: [opened, synchronize, reopened, labeled]
+  workflow_dispatch:
+
+concurrency:
+  group: screenshots-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+jobs:
+  screenshots-windows:
+    name: screenshots-windows
+    runs-on: windows-latest
+    if: >
+      github.event_name == 'workflow_dispatch' ||
+      contains(github.event.pull_request.labels.*.name, 'ci:full')
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+        with:
+          persist-credentials: false
+
+      - name: Install Rust
+        shell: bash
+        run: rustup toolchain install stable --profile minimal --no-self-update
+
+      - uses: actions/setup-dotnet@67a3573c9a986a3f9c594539f4ab511d57bb3ce9 # v4.3.1
+        with:
+          dotnet-version: "8.0.x"
+
+      - name: Install PDFium
+        shell: bash
+        run: |
+          set -euo pipefail
+          curl -fsSL -o /tmp/pdfium.tgz \
+            "https://github.com/bblanchon/pdfium-binaries/releases/download/chromium%2F8035/pdfium-win-x64.tgz"
+          mkdir -p "$HOME/pdfium"
+          tar -xzf /tmp/pdfium.tgz -C "$HOME/pdfium"
+          if [ -f "$HOME/pdfium/bin/pdfium.dll" ]; then
+            echo "OPENPDF_PDFIUM=$HOME/pdfium/bin/pdfium.dll" >> "$GITHUB_ENV"
+          else
+            echo "OPENPDF_PDFIUM=$HOME/pdfium/lib/pdfium.dll" >> "$GITHUB_ENV"
+          fi
+
+      - name: Build FFI, generate C#, build WinUI app
+        shell: bash
+        run: |
+          set -euo pipefail
+          cargo build -p openpdf-ffi --release
+          mkdir -p apps/windows/src/OpenPDF/Generated apps/windows/lib
+          cargo install uniffi-bindgen-cs \
+            --git https://github.com/NordSecurity/uniffi-bindgen-cs \
+            --tag v0.10.0+v0.29.4
+          uniffi-bindgen-cs --library --out-dir apps/windows/src/OpenPDF/Generated \
+            target/release/openpdf_ffi.dll
+          cp target/release/openpdf_ffi.dll apps/windows/lib/
+          cp "$OPENPDF_PDFIUM" apps/windows/lib/pdfium.dll
+          dotnet build apps/windows/src/OpenPDF/OpenPDF.csproj -c Release -p:Platform=x64
+
+      - name: Launch, open corpus PDF, capture EN and ES
+        shell: pwsh
+        env:
+          OPENPDF_PDFIUM: ${{ env.OPENPDF_PDFIUM }}
+          OPENPDF_CORPUS: ${{ github.workspace }}/corpus
+        run: |
+          $ErrorActionPreference = "Stop"
+          $pdf = Join-Path $env:GITHUB_WORKSPACE "corpus\hello.pdf"
+          if (-not (Test-Path $pdf)) { throw "missing test PDF $pdf" }
+          $exe = Get-ChildItem -Recurse apps\windows\src\OpenPDF\bin -Filter OpenPDF.exe |
+            Where-Object { $_.FullName -match "Release" } |
+            Select-Object -First 1
+          if (-not $exe) { throw "OpenPDF.exe missing after build" }
+          Copy-Item apps\windows\lib\*.dll $exe.Directory.FullName -Force
+          $outDir = Join-Path $env:GITHUB_WORKSPACE "screenshots"
+          New-Item -ItemType Directory -Force -Path $outDir | Out-Null
+
+          Add-Type -AssemblyName System.Windows.Forms
+          Add-Type -AssemblyName System.Drawing
+
+          function Capture-Lang([string]$lang, [string]$dest) {
+            $env:LANGUAGE = $lang
+            if ($lang -eq "es") {
+              $env:LANG = "es_ES.UTF-8"
+              $env:LC_ALL = "es_ES.UTF-8"
+            } else {
+              $env:LANG = "en_US.UTF-8"
+              $env:LC_ALL = "en_US.UTF-8"
+            }
+            $p = Start-Process -FilePath $exe.FullName -ArgumentList @($pdf) -PassThru -WorkingDirectory $exe.Directory.FullName
+            Start-Sleep -Seconds 12
+            if ($p.HasExited) {
+              throw ("OpenPDF.exe exited before capture (lang={0}, code={1}). WinUI 3 unpackaged apps need an interactive desktop and the self-contained Windows App Runtime; this runner may not provide a usable session 1 desktop." -f $lang, $p.ExitCode)
+            }
+            $bounds = [System.Windows.Forms.Screen]::PrimaryScreen.Bounds
+            if ($bounds.Width -lt 2 -or $bounds.Height -lt 2) {
+              Stop-Process -Id $p.Id -Force -ErrorAction SilentlyContinue
+              throw "PrimaryScreen bounds are $($bounds.Width)x$($bounds.Height); no desktop to capture."
+            }
+            $bmp = New-Object System.Drawing.Bitmap $bounds.Width, $bounds.Height
+            $g = [System.Drawing.Graphics]::FromImage($bmp)
+            $g.CopyFromScreen($bounds.Location, [System.Drawing.Point]::Empty, $bounds.Size)
+            $g.Dispose()
+            $bmp.Save($dest, [System.Drawing.Imaging.ImageFormat]::Png)
+            $bmp.Dispose()
+            Stop-Process -Id $p.Id -Force -ErrorAction SilentlyContinue
+            $len = (Get-Item $dest).Length
+            if ($len -lt 10000) {
+              throw "screenshot $dest is $len bytes — too small to be a real window capture"
+            }
+            Write-Host "wrote $dest ($len bytes)"
+          }
+
+          Capture-Lang "en" (Join-Path $outDir "windows-en.png")
+          Capture-Lang "es" (Join-Path $outDir "windows-es.png")
+
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: screenshots-windows
+          path: screenshots/
+          if-no-files-found: error

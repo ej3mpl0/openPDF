@@ -47,6 +47,8 @@ public sealed partial class MainWindow : Window
         OpenPath(file.Path);
     }
 
+    internal void OpenFromCli(string path) => OpenPath(path);
+
     void OpenPath(string path)
     {
         try

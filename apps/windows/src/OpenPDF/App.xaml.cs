@@ -14,5 +14,13 @@ public partial class App : Application
     {
         var window = new MainWindow();
         window.Activate();
+        foreach (var arg in Environment.GetCommandLineArgs().Skip(1))
+        {
+            if (arg.EndsWith(".pdf", StringComparison.OrdinalIgnoreCase) && File.Exists(arg))
+            {
+                window.OpenFromCli(arg);
+                break;
+            }
+        }
     }
 }
