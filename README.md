@@ -313,11 +313,11 @@ cargo build -p openpdf-app --release
 
 `--measure [PAGES]` opens the real libadwaita window (needs a display or
 `xvfb-run`), loads a multi-page PDF, waits for visible tiles and
-thumbnails, prints startup time and peak RSS, and exits non-zero if over
-the limits (8 s / 250 MiB; default 32 pages):
+thumbnails, prints `startup_ms` and `peak_rss_bytes`, and exits
+non-zero when over its limit:
 
 ```bash
-xvfb-run -a ./target/release/openpdf-gtk --measure 32
+xvfb-run -a ./target/release/openpdf-gtk --measure
 ```
 
 ## Loading PDFium
@@ -487,7 +487,7 @@ Linux, Windows, and macOS.
 - **Native UIs** share core through an `openpdf-ffi` crate (UniFFI):
   GTK4/libadwaita on Linux, SwiftUI/AppKit in `apps/macos`, WinUI 3 + C#
   in `apps/windows` (MSIX).
-- **CI** matrix on the three platforms, with RAM and performance limits.
+- **CI** matrix on the three platforms.
 - **Releases:** one package per platform.
 
 ## Status
