@@ -23,7 +23,9 @@ use rsa::pkcs8::DecodePublicKey;
 use rsa::signature::Verifier;
 use rsa::RsaPublicKey;
 use sha2::{Digest, Sha256, Sha384, Sha512};
-use x509_cert::ext::pkix::{BasicConstraints, ExtendedKeyUsage, SubjectKeyIdentifier};
+use x509_cert::ext::pkix::{
+    BasicConstraints, ExtendedKeyUsage, KeyUsage, KeyUsages, SubjectKeyIdentifier,
+};
 use x509_cert::spki::AlgorithmIdentifierOwned;
 use x509_cert::Certificate;
 use x509_tsp::{MessageImprint, TimeStampReq, TimeStampResp, TspVersion, TstInfo};
@@ -136,7 +138,7 @@ pub(crate) fn timestamp(
     let digest = Sha256::digest(signature_value);
     let mut nonce = [0u8; 16];
     getrandom::fill(&mut nonce).map_err(|e| {
-        ts_err(TimestampErrorKind::Network {
+        ts_err(TimestampErrorKind::Rng {
             detail: e.to_string(),
         })
     })?;
@@ -217,11 +219,28 @@ fn post_cancellable(tsa: &Tsa, body: Vec<u8>, cancel: Option<&CancelToken>) -> R
     }
 }
 
+/// `user:pass@` of an `http(s)://user:pass@host/` URL, if any.
+fn url_userinfo(url: &str) -> Option<&str> {
+    let rest = url.split_once("://")?.1;
+    let authority = rest.split(['/', '?', '#']).next()?;
+    let at = authority.rfind('@')?;
+    Some(&authority[..=at])
+}
+
+/// Error text without the URL's credentials (they would end up in the UI and logs).
+pub(crate) fn redact(detail: &str, url: &str) -> String {
+    match url_userinfo(url) {
+        Some(ui) => detail.replace(ui, ""),
+        _ => detail.to_string(),
+    }
+}
+
 fn post(url: &str, timeout: Duration, body: &[u8]) -> Result<Vec<u8>> {
-    let net = |e: ureq::Error| {
-        ts_err(TimestampErrorKind::Network {
-            detail: e.to_string(),
-        })
+    let net = |e: ureq::Error| match e {
+        ureq::Error::BodyExceedsLimit(_) => ts_err(TimestampErrorKind::ResponseTooLarge),
+        e => ts_err(TimestampErrorKind::Network {
+            detail: redact(&e.to_string(), url),
+        }),
     };
     let tls = ureq::tls::TlsConfig::builder()
         .root_certs(ureq::tls::RootCerts::Specific(tls_roots()))
@@ -488,12 +507,41 @@ fn extension<T: AssociatedOid + for<'a> Decode<'a>>(cert: &Certificate) -> Optio
         .and_then(|e| T::from_der(e.extn_value.as_bytes()).ok())
 }
 
+/// RFC 3161 §2.3: the TSA certificate MUST have exactly one extended key
+/// usage, timeStamping, and the extension MUST be critical.
 fn has_time_stamping_eku(cert: &Certificate) -> bool {
-    extension::<ExtendedKeyUsage>(cert).is_some_and(|eku| eku.0.contains(&ID_KP_TIME_STAMPING))
+    let Some(ext) = cert
+        .tbs_certificate
+        .extensions
+        .as_ref()
+        .and_then(|exts| exts.iter().find(|e| e.extn_id == ExtendedKeyUsage::OID))
+    else {
+        return false;
+    };
+    if !ext.critical {
+        return false;
+    }
+    ExtendedKeyUsage::from_der(ext.extn_value.as_bytes())
+        .is_ok_and(|eku| eku.0.as_slice() == [ID_KP_TIME_STAMPING])
 }
 
-fn is_ca(cert: &Certificate) -> bool {
-    extension::<BasicConstraints>(cert).is_some_and(|bc| bc.ca)
+/// A CA in the chain may sign certificates: keyUsage present with keyCertSign
+/// (RFC 5280 §4.2.1.3), and `below` intermediate CAs under it fit its
+/// pathLenConstraint (§4.2.1.9).
+fn ca_may_issue(cert: &Certificate, below: usize) -> bool {
+    let Some(bc) = extension::<BasicConstraints>(cert) else {
+        return false;
+    };
+    if !bc.ca {
+        return false;
+    }
+    if bc
+        .path_len_constraint
+        .is_some_and(|max| below > max as usize)
+    {
+        return false;
+    }
+    extension::<KeyUsage>(cert).is_some_and(|ku| ku.0.contains(KeyUsages::KeyCertSign))
 }
 
 fn valid_at(cert: &Certificate, at: u64) -> bool {
@@ -522,7 +570,8 @@ fn chain_trusted(leaf: &Certificate, pool: &[Certificate], trust: &[Certificate]
         if !valid_at(&current, at) {
             return false;
         }
-        if depth > 0 && !is_ca(&current) {
+        // `current` at depth d has d-1 intermediate CAs below it.
+        if depth > 0 && !ca_may_issue(&current, depth - 1) {
             return false;
         }
         if trust.iter().any(|t| t == &current) {
@@ -530,7 +579,7 @@ fn chain_trusted(leaf: &Certificate, pool: &[Certificate], trust: &[Certificate]
         }
         if trust
             .iter()
-            .any(|t| valid_at(t, at) && signed_by(&current, t))
+            .any(|t| valid_at(t, at) && ca_may_issue(t, depth) && signed_by(&current, t))
         {
             return true;
         }

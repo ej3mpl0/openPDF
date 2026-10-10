@@ -166,7 +166,11 @@ impl PadesLevel {
 }
 
 /// Information about an existing signature dictionary. Validity is left to the signer backend.
+///
+/// `#[non_exhaustive]`: backends build it with [`SignatureInfo::new`] and the
+/// `with_*` methods.
 #[derive(Clone, Debug, Default)]
+#[non_exhaustive]
 pub struct SignatureInfo {
     pub name: Option<String>,
     pub reason: Option<String>,
@@ -177,7 +181,10 @@ pub struct SignatureInfo {
 }
 
 /// A signature timestamp found while verifying.
+///
+/// `#[non_exhaustive]`: build it with [`TimestampInfo::new`].
 #[derive(Clone, Debug, PartialEq, Eq)]
+#[non_exhaustive]
 pub struct TimestampInfo {
     /// `genTime` as RFC 3339 UTC, when the token could be parsed.
     pub time: Option<String>,
@@ -185,6 +192,41 @@ pub struct TimestampInfo {
     pub valid: bool,
     /// Why it is not valid, when `valid` is false.
     pub problem: Option<crate::error::TimestampErrorKind>,
+}
+
+impl SignatureInfo {
+    pub fn new(name: Option<String>, reason: Option<String>, location: Option<String>) -> Self {
+        Self {
+            name,
+            reason,
+            location,
+            ..Self::default()
+        }
+    }
+
+    pub fn with_valid(mut self, valid: Option<bool>) -> Self {
+        self.valid = valid;
+        self
+    }
+
+    pub fn with_timestamp(mut self, timestamp: Option<TimestampInfo>) -> Self {
+        self.timestamp = timestamp;
+        self
+    }
+}
+
+impl TimestampInfo {
+    pub fn new(
+        time: Option<String>,
+        valid: bool,
+        problem: Option<crate::error::TimestampErrorKind>,
+    ) -> Self {
+        Self {
+            time,
+            valid,
+            problem,
+        }
+    }
 }
 
 /// Certificate / PKCS#11 signing is implemented in `openpdf-sign`.

@@ -66,6 +66,13 @@ pub enum TimestampErrorKind {
     BadUrl,
     /// The TSA could not be reached (DNS, TLS, timeout, ...).
     Network { detail: String },
+    /// The system random generator failed while making the request nonce.
+    Rng { detail: String },
+    /// The TSA response is larger than the 256 KiB the client accepts.
+    ResponseTooLarge,
+    /// The signature plus timestamp token (with the TSA's certificates) does
+    /// not fit the space reserved in `/Contents` for B-T (32 KiB).
+    TokenTooLarge,
     /// The TSA answered with a non-success HTTP status.
     Http { status: u16 },
     /// The TSA answered, but did not grant the timestamp (PKIStatus).
@@ -81,7 +88,9 @@ pub enum TimestampErrorKind {
     /// The ESS signing-certificate attribute does not bind the TSA certificate.
     SigningCertMismatch,
     /// The TSA certificate does not chain to a trusted root, is not valid at
-    /// the timestamp time, or lacks the timeStamping key purpose.
+    /// the timestamp time, does not have a critical extended key usage with
+    /// timeStamping as its only purpose (RFC 3161 §2.3), or a CA in its chain
+    /// lacks keyCertSign or violates its pathLenConstraint.
     UntrustedCert,
 }
 
@@ -98,6 +107,16 @@ impl TimestampErrorKind {
                 "could not reach the timestamp server: {detail}",
                 &[("detail", detail)],
             ),
+            TimestampErrorKind::Rng { detail } => tr_args(
+                "could not generate a random nonce: {detail}",
+                &[("detail", detail)],
+            ),
+            TimestampErrorKind::ResponseTooLarge => {
+                tr("the timestamp server response is too large")
+            }
+            TimestampErrorKind::TokenTooLarge => {
+                tr("the timestamp and its certificates do not fit in the signature")
+            }
             TimestampErrorKind::Http { status } => tr_args(
                 "the timestamp server answered HTTP {status}",
                 &[("status", &status.to_string())],

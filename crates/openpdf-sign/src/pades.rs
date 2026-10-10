@@ -14,7 +14,14 @@ use crate::tsp::Tsa;
 use x509_cert::Certificate;
 
 const CONTENTS_LEN: usize = 8192;
-/// B-T adds the TSA token (with its certificate chain) to the CMS.
+/// Bytes reserved in `/Contents` for a B-T CMS (64 KiB of hex in the file).
+///
+/// It must be fixed before signing: the ByteRange is hashed before the TSA is
+/// asked, so the token's size cannot be known yet. 32 KiB fits the signer's
+/// certificate (~2 KiB), the RSA signature and a token with a TSA chain of
+/// several RSA-4096 certificates (a real TSA token is typically 4-8 KiB). A
+/// larger token fails with [`TimestampErrorKind::TokenTooLarge`]; nothing is
+/// written and it never falls back to B-B.
 const CONTENTS_LEN_BT: usize = 32768;
 const BR_WIDTH: usize = 10;
 const CONTENTS_MARK: &[u8] = b"/Contents <";
@@ -132,6 +139,9 @@ pub(crate) fn sign_incremental(
     }
     // A cancel that lands after the TSA replied still wins: nothing is returned.
     request.check_cancelled()?;
+    if cms.len() > contents_len && tsa.is_some() {
+        return Err(Error::Timestamp(TimestampErrorKind::TokenTooLarge));
+    }
     if cms.len() > contents_len {
         return Err(Error::Sign(
             "CMS signature is too large for the reserved Contents space".into(),
@@ -184,51 +194,23 @@ fn verify_one(pdf: &[u8], dict: &Dictionary, tsa_trust: &[Certificate]) -> Signa
     let name = dict_text(dict, b"Name");
 
     let Some(ranges) = byte_range(dict) else {
-        return SignatureInfo {
-            name,
-            reason,
-            location,
-            valid: Some(false),
-            timestamp: None,
-        };
+        return SignatureInfo::new(name, reason, location).with_valid(Some(false));
     };
     let Some(contents) = contents_bytes(dict) else {
-        return SignatureInfo {
-            name,
-            reason,
-            location,
-            valid: Some(false),
-            timestamp: None,
-        };
+        return SignatureInfo::new(name, reason, location).with_valid(Some(false));
     };
     if contents.iter().all(|b| *b == 0) {
-        return SignatureInfo {
-            name,
-            reason,
-            location,
-            valid: Some(false),
-            timestamp: None,
-        };
+        return SignatureInfo::new(name, reason, location).with_valid(Some(false));
     }
     let Ok(message) = byterange_bytes(pdf, &ranges) else {
-        return SignatureInfo {
-            name,
-            reason,
-            location,
-            valid: Some(false),
-            timestamp: None,
-        };
+        return SignatureInfo::new(name, reason, location).with_valid(Some(false));
     };
     // Integrity of the claimed ranges: SHA-256 is also pinned inside CMS.
     let _ = Sha256::digest(&message);
     let check = cades::verify_detached(&contents, &message, tsa_trust);
-    SignatureInfo {
-        name: name.or(check.signer),
-        reason,
-        location,
-        valid: Some(check.valid),
-        timestamp: check.timestamp,
-    }
+    SignatureInfo::new(name.or(check.signer), reason, location)
+        .with_valid(Some(check.valid))
+        .with_timestamp(check.timestamp)
 }
 
 fn is_signature_value(dict: &Dictionary) -> bool {

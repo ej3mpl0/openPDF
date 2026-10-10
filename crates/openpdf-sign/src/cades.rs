@@ -214,11 +214,7 @@ fn check_timestamp(signer_info: &SignerInfo, tsa_trust: &[Certificate]) -> Optio
         tsa_trust,
         false,
     );
-    Some(TimestampInfo {
-        time,
-        valid: result.is_ok(),
-        problem: result.err(),
-    })
+    Some(TimestampInfo::new(time, result.is_ok(), result.err()))
 }
 
 fn verify_inner(cms_der: &[u8], message: &[u8], tsa_trust: &[Certificate]) -> Option<CmsCheck> {

@@ -58,6 +58,65 @@ enum Mode {
     Reject,
     /// Valid reply, but only after 5 s.
     Slow,
+    EkuNonCritical,
+    EkuMulti,
+    EkuMissing,
+    /// genTime after the TSA (and root) certificate's notAfter.
+    ExpiredAtGenTime,
+    /// ESS signing-certificate-v2 names another certificate.
+    EssMismatch,
+    /// 300 KiB body, over the client's 256 KiB limit.
+    Huge,
+    /// 302 to the given port on 127.0.0.1.
+    Redirect(u16),
+    /// Intermediate CA without keyCertSign.
+    NoKeyCertSign,
+    /// root -> inter (pathLen 0) -> inter2 -> TSA.
+    PathLenExceeded,
+    /// root -> inter (pathLen 0) -> TSA: allowed.
+    PathLenOk,
+    /// Good TSA, plus bulky extra certificates: token overflows /Contents.
+    LongChain,
+}
+
+macro_rules! fx {
+    ($n:literal) => {
+        include_bytes!(concat!("../tests/fixtures/tsa/", $n, ".cert.der")).as_slice()
+    };
+}
+
+/// (leaf certificate, extra certificates in the token) for a mode.
+fn mode_certs(mode: Mode) -> (&'static [u8], Vec<&'static [u8]>) {
+    match mode {
+        Mode::Untrusted => (EVIL_TSA_CERT, vec![]),
+        Mode::EkuNonCritical => (fx!("tsa-eku-noncrit"), vec![]),
+        Mode::EkuMulti => (fx!("tsa-eku-multi"), vec![]),
+        Mode::EkuMissing => (fx!("tsa-eku-none"), vec![]),
+        Mode::NoKeyCertSign => (fx!("tsa-under-nokcs"), vec![fx!("inter-nokcs")]),
+        Mode::PathLenExceeded => (
+            fx!("tsa-under-inter2"),
+            vec![fx!("inter2"), fx!("inter-pl0")],
+        ),
+        Mode::PathLenOk => (fx!("tsa-under-pl0"), vec![fx!("inter-pl0")]),
+        Mode::LongChain => (
+            TSA_CERT,
+            vec![
+                fx!("filler-01"),
+                fx!("filler-02"),
+                fx!("filler-03"),
+                fx!("filler-04"),
+                fx!("filler-05"),
+                fx!("filler-06"),
+                fx!("filler-07"),
+                fx!("filler-08"),
+                fx!("filler-09"),
+                fx!("filler-10"),
+                fx!("filler-11"),
+                fx!("filler-12"),
+            ],
+        ),
+        _ => (TSA_CERT, vec![]),
+    }
 }
 
 /// Start a local TSA; returns its `http://127.0.0.1:<port>/` URL.
@@ -112,8 +171,24 @@ fn serve(
     if mode == Mode::Slow {
         std::thread::sleep(Duration::from_secs(5));
     }
-    let reply = respond(mode, &req);
     let mut out = stream;
+    if let Mode::Redirect(port) = mode {
+        return write!(
+            out,
+            "HTTP/1.1 302 Found\r\nLocation: http://127.0.0.1:{port}/tsa\r\nContent-Length: 0\r\nConnection: close\r\n\r\n"
+        );
+    }
+    if mode == Mode::Huge {
+        let body = vec![0x30u8; 300 * 1024];
+        write!(
+            out,
+            "HTTP/1.1 200 OK\r\nContent-Type: application/timestamp-reply\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
+            body.len()
+        )?;
+        let _ = out.write_all(&body);
+        return out.flush();
+    }
+    let reply = respond(mode, &req);
     write!(
         out,
         "HTTP/1.1 200 OK\r\nContent-Type: application/timestamp-reply\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
@@ -162,10 +237,11 @@ fn respond(mode: Mode, req: &TimeStampReq) -> Vec<u8> {
         .to_der()
         .unwrap();
     }
-    let (cert_der, key_der) = if mode == Mode::Untrusted {
-        (EVIL_TSA_CERT, EVIL_TSA_KEY)
+    let (cert_der, extra) = mode_certs(mode);
+    let key_der = if mode == Mode::Untrusted {
+        EVIL_TSA_KEY
     } else {
-        (TSA_CERT, TSA_KEY)
+        TSA_KEY
     };
     let cert = Certificate::from_der(cert_der).unwrap();
 
@@ -186,7 +262,14 @@ fn respond(mode: Mode, req: &TimeStampReq) -> Vec<u8> {
         policy: TEST_POLICY,
         message_imprint: imprint,
         serial_number: Int::new(&[0x2a]).unwrap(),
-        gen_time: GeneralizedTime::from_unix_duration(Duration::from_secs(now.as_secs())).unwrap(),
+        gen_time: GeneralizedTime::from_unix_duration(Duration::from_secs(
+            if mode == Mode::ExpiredAtGenTime {
+                2_429_913_600 // 2047-01-01, after every fixture's notAfter
+            } else {
+                now.as_secs()
+            },
+        ))
+        .unwrap(),
         accuracy: None,
         ordering: false,
         nonce,
@@ -197,7 +280,15 @@ fn respond(mode: Mode, req: &TimeStampReq) -> Vec<u8> {
 
     let scv2 = SigningCertificateV2 {
         certs: vec![EssCertIdV2 {
-            cert_hash: OctetString::new(Sha256::digest(cert_der).to_vec()).unwrap(),
+            cert_hash: OctetString::new(
+                Sha256::digest(if mode == Mode::EssMismatch {
+                    EVIL_TSA_CERT
+                } else {
+                    cert_der
+                })
+                .to_vec(),
+            )
+            .unwrap(),
         }],
     };
     let md = OctetString::new(Sha256::digest(&tst_der).to_vec()).unwrap();
@@ -250,7 +341,13 @@ fn respond(mode: Mode, req: &TimeStampReq) -> Vec<u8> {
             econtent: Some(any_of(&OctetString::new(econtent_der).unwrap())),
         },
         certificates: Some(CertificateSet(
-            SetOfVec::try_from(vec![CertificateChoices::Certificate(cert)]).unwrap(),
+            SetOfVec::try_from(
+                std::iter::once(cert)
+                    .chain(extra.iter().map(|d| Certificate::from_der(d).unwrap()))
+                    .map(CertificateChoices::Certificate)
+                    .collect::<Vec<_>>(),
+            )
+            .unwrap(),
         )),
         crls: None,
         signer_infos: SignerInfos(SetOfVec::try_from(vec![si]).unwrap()),
@@ -424,6 +521,9 @@ fn timestamp_errors_are_translated() {
         TimestampErrorKind::UrlMissing,
         TimestampErrorKind::BadUrl,
         TimestampErrorKind::Network { detail: "x".into() },
+        TimestampErrorKind::Rng { detail: "x".into() },
+        TimestampErrorKind::ResponseTooLarge,
+        TimestampErrorKind::TokenTooLarge,
         TimestampErrorKind::Http { status: 500 },
         TimestampErrorKind::Rejected { status: 2 },
         TimestampErrorKind::Malformed,
@@ -440,14 +540,9 @@ fn timestamp_errors_are_translated() {
         with_locale("es", || es = Error::Timestamp(kind.clone()).to_string());
         assert_ne!(en, es, "{kind:?} has no Spanish translation");
     }
-    let info = openpdf_core::SignatureInfo {
-        timestamp: Some(openpdf_core::TimestampInfo {
-            time: Some("2026-10-10T16:00:00Z".into()),
-            valid: true,
-            problem: None,
-        }),
-        ..Default::default()
-    };
+    let info = openpdf_core::SignatureInfo::default().with_timestamp(Some(
+        openpdf_core::TimestampInfo::new(Some("2026-10-10T16:00:00Z".into()), true, None),
+    ));
     let mut en = String::new();
     with_locale("en", || en = format_verify_result(&info));
     let mut es = String::new();
@@ -608,4 +703,120 @@ fn cancelled_error_is_translated() {
 fn cancel_token_is_clone_send_sync() {
     fn assert_traits<T: Clone + Send + Sync + 'static>() {}
     assert_traits::<CancelToken>();
+}
+
+#[test]
+fn bt_eku_must_be_critical_and_time_stamping_only() {
+    for mode in [Mode::EkuNonCritical, Mode::EkuMulti, Mode::EkuMissing] {
+        let url = spawn_tsa(mode);
+        assert_eq!(
+            ts_kind(sign_bt(&url)),
+            TimestampErrorKind::UntrustedCert,
+            "{mode:?}"
+        );
+    }
+}
+
+#[test]
+fn bt_ess_mismatch_is_refused() {
+    let url = spawn_tsa(Mode::EssMismatch);
+    assert_eq!(
+        ts_kind(sign_bt(&url)),
+        TimestampErrorKind::SigningCertMismatch
+    );
+}
+
+#[test]
+fn bt_tsa_cert_expired_at_gen_time_is_refused() {
+    let url = spawn_tsa(Mode::ExpiredAtGenTime);
+    assert_eq!(ts_kind(sign_bt(&url)), TimestampErrorKind::UntrustedCert);
+}
+
+#[test]
+fn bt_response_over_256_kib_is_refused() {
+    let url = spawn_tsa(Mode::Huge);
+    assert_eq!(ts_kind(sign_bt(&url)), TimestampErrorKind::ResponseTooLarge);
+}
+
+#[test]
+fn bt_redirect_is_not_followed() {
+    let (hit_tx, hit_rx) = std::sync::mpsc::channel();
+    let target = spawn_tsa_notify(Mode::Good, Some(hit_tx));
+    let port: u16 = target
+        .trim_start_matches("http://127.0.0.1:")
+        .trim_end_matches("/tsa")
+        .parse()
+        .unwrap();
+    let url = spawn_tsa(Mode::Redirect(port));
+    assert_eq!(
+        ts_kind(sign_bt(&url)),
+        TimestampErrorKind::Http { status: 302 }
+    );
+    assert!(
+        hit_rx.recv_timeout(Duration::from_millis(300)).is_err(),
+        "redirect target must not be contacted"
+    );
+}
+
+#[test]
+fn bt_intermediate_without_key_cert_sign_is_refused() {
+    let url = spawn_tsa(Mode::NoKeyCertSign);
+    assert_eq!(ts_kind(sign_bt(&url)), TimestampErrorKind::UntrustedCert);
+}
+
+#[test]
+fn bt_path_len_constraint_is_enforced() {
+    let url = spawn_tsa(Mode::PathLenExceeded);
+    assert_eq!(ts_kind(sign_bt(&url)), TimestampErrorKind::UntrustedCert);
+    // pathLen 0 still allows the leaf directly below it.
+    let url = spawn_tsa(Mode::PathLenOk);
+    sign_bt(&url).expect("pathLen 0 CA may issue the TSA leaf");
+}
+
+#[test]
+fn bt_token_too_large_for_contents_fails_cleanly() {
+    let url = spawn_tsa(Mode::LongChain);
+    let pdf = std::fs::read(corpus("hello.pdf")).unwrap();
+    assert_eq!(ts_kind(sign_bt(&url)), TimestampErrorKind::TokenTooLarge);
+    assert_eq!(std::fs::read(corpus("hello.pdf")).unwrap(), pdf);
+}
+
+#[test]
+fn bt_network_error_never_shows_url_credentials() {
+    let l = TcpListener::bind("127.0.0.1:0").unwrap();
+    let port = l.local_addr().unwrap().port();
+    std::thread::spawn(move || {
+        for stream in l.incoming().flatten() {
+            drop(stream);
+        }
+    });
+    for url in [
+        format!("https://user:pass@127.0.0.1:{port}/tsa"),
+        format!("http://user:pass@127.0.0.1:{port}/tsa"),
+    ] {
+        let err = sign_bt(&url).unwrap_err();
+        let mut text = String::new();
+        with_locale("en", || text = err.to_string());
+        let dbg = format!("{err:?}");
+        for shown in [&text, &dbg] {
+            assert!(!shown.contains("pass"), "{shown}");
+            assert!(!shown.contains("user:"), "{shown}");
+        }
+        assert!(
+            matches!(err, Error::Timestamp(TimestampErrorKind::Network { .. })),
+            "{err:?}"
+        );
+    }
+}
+
+#[test]
+fn url_credentials_are_redacted_from_details() {
+    let url = "https://user:pass@tsa.example:8443/ts?x=1";
+    let detail = "io: Connection refused for https://user:pass@tsa.example:8443/ts?x=1";
+    let out = crate::tsp::redact(detail, url);
+    assert_eq!(
+        out,
+        "io: Connection refused for https://tsa.example:8443/ts?x=1"
+    );
+    assert_eq!(crate::tsp::redact("plain", "https://tsa.example/"), "plain");
 }

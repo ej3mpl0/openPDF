@@ -415,6 +415,15 @@ msgstr ""
 msgid "crop box must be llx,lly,urx,ury"
 msgstr ""
 
+msgid "could not generate a random nonce: {detail}"
+msgstr ""
+
+msgid "the timestamp server response is too large"
+msgstr ""
+
+msgid "the timestamp and its certificates do not fit in the signature"
+msgstr ""
+
 msgid "operation cancelled"
 msgstr ""
 

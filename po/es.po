@@ -415,6 +415,15 @@ msgstr "--at empieza en 1"
 msgid "crop box must be llx,lly,urx,ury"
 msgstr "el recorte debe ser llx,lly,urx,ury"
 
+msgid "could not generate a random nonce: {detail}"
+msgstr "no se pudo generar un nonce aleatorio: {detail}"
+
+msgid "the timestamp server response is too large"
+msgstr "la respuesta del servidor de sellos de tiempo es demasiado grande"
+
+msgid "the timestamp and its certificates do not fit in the signature"
+msgstr "el sello de tiempo y sus certificados no caben en la firma"
+
 msgid "operation cancelled"
 msgstr "operación cancelada"
 
