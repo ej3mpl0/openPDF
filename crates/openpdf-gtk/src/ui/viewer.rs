@@ -353,10 +353,12 @@ impl DocumentView {
         self.shared.doc.set_cache_bytes(bytes);
     }
 
+    #[cfg(test)]
     pub(crate) fn pages_canvas(&self) -> &Canvas {
         &self.pages_area
     }
 
+    #[cfg(test)]
     pub(crate) fn thumbs_canvas(&self) -> &Canvas {
         &self.thumbs_area
     }
