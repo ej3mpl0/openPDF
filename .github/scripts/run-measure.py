@@ -278,6 +278,36 @@ def run_core(binary: Path) -> tuple[int, str]:
     return code, out
 
 
+def single_cold(binary: Path, frames: str, out_path: str) -> int:
+    """Exactly one GUI run, no warm-up, never gates (informational). Prints
+    cold_startup_ms, every ui_* / *_ms mark and the libpdfium sha256, and
+    writes them as k=v lines to OUT_PATH for the summary job."""
+    import hashlib
+    lib = os.environ.get("OPENPDF_PDFIUM") or "/usr/local/lib/libpdfium.so"
+    try:
+        sha = hashlib.sha256(Path(lib).read_bytes()).hexdigest()
+    except OSError as e:
+        sha = f"unavailable({e.__class__.__name__})"
+    print(f"measure: single-cold libpdfium={lib} sha256={sha}")
+    try:
+        code, output = run_gui(binary, frames)
+    except FileNotFoundError as e:
+        return fail(str(e))
+    print(output)
+    rss, startup = parse_metrics(output)
+    if code != 0 or startup is None:
+        return fail(f"single-cold: exit {code}, startup_ms={startup}")
+    marks = parse_marks(output)
+    lines = [f"cold_startup_ms={startup}"] + [f"{k}={v:g}" for k, v in marks.items()]
+    if rss is not None:
+        lines.append(f"peak_rss_mb={rss / 1048576:.1f}")
+    lines.append(f"libpdfium_sha256={sha}")
+    print("measure: single-cold " + " ".join(lines))
+    if out_path:
+        Path(out_path).write_text("\n".join(lines) + "\n", encoding="utf-8")
+    return 0
+
+
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--kind", choices=sorted(DEFAULT_STARTUP_MS),
@@ -289,7 +319,15 @@ def main(argv: list[str] | None = None) -> int:
                         help="discarded warm-up runs before measuring")
     parser.add_argument("--pin", metavar="CPUS", default=os.environ.get("OPENPDF_MEASURE_PIN", ""),
                         help="opt-in: wrap runs in `taskset -c CPUS` on Linux (e.g. 0-1); default off")
+    parser.add_argument("--single-cold", action="store_true",
+                        help="gui only: one run, no warm-up, no gate; informational cold start")
+    parser.add_argument("--out", default="", help="--single-cold: write k=v results here")
     args = parser.parse_args(argv)
+    if args.single_cold:
+        b = find_binary("gui")
+        if not b.is_file():
+            return fail(f"gui binary not found at {b}")
+        return single_cold(b, args.frames, args.out)
     try:
         PIN[:] = pin_prefix(args.pin)
     except FileNotFoundError as e:

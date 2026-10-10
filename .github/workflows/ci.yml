@@ -225,6 +225,131 @@ jobs:
           rustc --version
           cargo check --workspace --locked --all-targets
 
+  # Informational cold start: each runner is a fresh VM, so the first GUI
+  # launch below (no warm-up, page cache dropped) is a true cold start.
+  # Never gates. Skips cleanly while openpdf-gtk is a placeholder (until #1).
+  cold-start:
+    name: Cold start (shard ${{ matrix.shard }})
+    runs-on: ubuntu-latest
+    continue-on-error: true
+    strategy:
+      fail-fast: false
+      matrix:
+        shard: [1, 2, 3]
+    defaults:
+      run:
+        shell: bash
+    env:
+      CARGO_TERM_COLOR: always
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+        with:
+          persist-credentials: false
+
+      - name: Detect real GUI binary
+        id: gui
+        run: |
+          if [ -d crates/openpdf-app ]; then
+            echo "skip=false" >> "$GITHUB_OUTPUT"
+          else
+            echo "skip=true" >> "$GITHUB_OUTPUT"
+            msg="cold-start skipped: openpdf-gtk is still a placeholder on this branch (no crates/openpdf-app; lands with #1)."
+            echo "::notice::$msg"
+            mkdir -p cold
+            echo "skipped=1" > "cold/shard-${{ matrix.shard }}.txt"
+            echo "$msg" >> "$GITHUB_STEP_SUMMARY"
+          fi
+
+      - name: Install Rust from rust-toolchain.toml
+        if: steps.gui.outputs.skip == 'false'
+        run: |
+          rustup toolchain install
+          rustup show active-toolchain
+
+      - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
+        if: steps.gui.outputs.skip == 'false'
+        with:
+          prefix-key: cold-start
+
+      - name: Install PDFium
+        if: steps.gui.outputs.skip == 'false'
+        run: .github/scripts/install-pdfium.sh
+
+      - name: Install GTK4, libadwaita, SVG pixbuf loader
+        if: steps.gui.outputs.skip == 'false'
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends \
+            libgtk-4-dev libadwaita-1-dev pkg-config librsvg2-common adwaita-icon-theme
+
+      # Build only; nothing launches the GUI before the measurement.
+      - name: Build workspace (release)
+        if: steps.gui.outputs.skip == 'false'
+        run: cargo build --release --workspace --locked
+
+      - name: Drop page cache
+        if: steps.gui.outputs.skip == 'false'
+        run: |
+          sync
+          echo 3 | sudo tee /proc/sys/vm/drop_caches
+          echo "drop_caches: ran (sync; echo 3 > /proc/sys/vm/drop_caches) at $(date -u +%FT%TZ)"
+
+      - name: Cold GUI measure (single run, first launch)
+        if: steps.gui.outputs.skip == 'false'
+        env:
+          GDK_BACKEND: x11
+          GSK_RENDERER: cairo
+        run: |
+          mkdir -p cold
+          python3 .github/scripts/run-measure.py --kind gui --single-cold --frames 32 \
+            --out "cold/shard-${{ matrix.shard }}.txt"
+
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        if: always()
+        with:
+          name: cold-start-${{ matrix.shard }}
+          path: cold/
+          if-no-files-found: warn
+
+  cold-start-summary:
+    name: Cold start summary
+    needs: cold-start
+    if: always()
+    runs-on: ubuntu-latest
+    continue-on-error: true
+    steps:
+      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
+        with:
+          pattern: cold-start-*
+          path: cold
+          merge-multiple: true
+
+      - name: Median of cold_startup_ms
+        run: |
+          python3 - <<'PY'
+          import glob, os, statistics
+          rows, vals, skipped = [], [], 0
+          for f in sorted(glob.glob("cold/shard-*.txt")):
+              kv = dict(l.split("=", 1) for l in open(f).read().split() if "=" in l)
+              if kv.get("skipped"):
+                  skipped += 1; continue
+              if "cold_startup_ms" in kv:
+                  vals.append(float(kv["cold_startup_ms"]))
+                  rows.append((os.path.basename(f), kv))
+          out = ["## Cold start (informational, single first launch per fresh VM)", ""]
+          if not vals:
+              out.append(f"No cold values ({skipped} shard(s) skipped: GUI placeholder until #1).")
+          else:
+              for name, kv in rows:
+                  marks = " ".join(f"{k}={v}" for k, v in kv.items() if k.startswith("ui_"))
+                  out.append(f"- `{name}`: cold_startup_ms={kv['cold_startup_ms']} {marks} libpdfium sha256 `{kv.get('libpdfium_sha256','?')}`")
+              out += ["", f"**Median cold_startup_ms: {statistics.median(vals):g}** over {len(vals)} shard(s)"]
+          text = "\n".join(out) + "\n"
+          print(text)
+          with open(os.environ["GITHUB_STEP_SUMMARY"], "a") as fh:
+              fh.write(text)
+          PY
+
   times:
     name: CI times
     needs: build
