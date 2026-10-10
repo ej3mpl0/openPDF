@@ -387,7 +387,7 @@ mod tests {
                 .find(|c| c.id == request.cert_id)
                 .ok_or_else(|| Error::Sign("unknown certificate".into()))?;
             if let Some(reason) = &cert.unusable {
-                return Err(Error::Sign(describe_unusable(reason)));
+                return Err(Error::CertUnusable(reason.clone()));
             }
             if !cert.usage.contains(&CertificateUsage::Signing) {
                 return Err(Error::Sign("certificate is not a signing cert".into()));
@@ -694,8 +694,13 @@ mod tests {
                 )
                 .unwrap_err();
             match err {
-                Error::Sign(msg) => assert_eq!(msg, "Authentication only"),
-                other => panic!("expected Sign, got {other:?}"),
+                Error::CertUnusable(CertUnusable::AuthenticationOnly) => {
+                    assert_eq!(
+                        Error::CertUnusable(CertUnusable::AuthenticationOnly).to_string(),
+                        "Authentication only"
+                    )
+                }
+                other => panic!("expected CertUnusable, got {other:?}"),
             }
         });
     }

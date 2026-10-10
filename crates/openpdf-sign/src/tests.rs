@@ -938,8 +938,14 @@ fn sign_rejects_expired_certificate() {
         )
         .unwrap_err();
         match err {
-            Error::Sign(msg) => assert_eq!(msg, describe_unusable(&reason)),
-            other => panic!("expected Sign, got {other:?}"),
+            Error::CertUnusable(r) => {
+                assert_eq!(r, reason);
+                assert_eq!(
+                    Error::CertUnusable(r).to_string(),
+                    describe_unusable(&reason)
+                );
+            }
+            other => panic!("expected CertUnusable, got {other:?}"),
         }
     });
 }
@@ -973,8 +979,14 @@ fn sign_rejects_not_yet_valid_certificate() {
         )
         .unwrap_err();
         match err {
-            Error::Sign(msg) => assert_eq!(msg, describe_unusable(&reason)),
-            other => panic!("expected Sign, got {other:?}"),
+            Error::CertUnusable(r) => {
+                assert_eq!(r, reason);
+                assert_eq!(
+                    Error::CertUnusable(r).to_string(),
+                    describe_unusable(&reason)
+                );
+            }
+            other => panic!("expected CertUnusable, got {other:?}"),
         }
     });
 }
@@ -1286,10 +1298,8 @@ fn sign_rejects_authentication_only_certificate() {
         )
         .unwrap_err();
         match err {
-            Error::Sign(msg) => {
-                assert_eq!(msg, describe_unusable(&CertUnusable::AuthenticationOnly))
-            }
-            other => panic!("expected Sign, got {other:?}"),
+            Error::CertUnusable(CertUnusable::AuthenticationOnly) => {}
+            other => panic!("expected CertUnusable(AuthenticationOnly), got {other:?}"),
         }
     });
 }
