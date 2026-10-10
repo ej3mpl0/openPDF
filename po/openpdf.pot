@@ -103,6 +103,39 @@ msgstr ""
 msgid "certificate is not a signing cert"
 msgstr ""
 
+msgid "certificate is not yet valid"
+msgstr ""
+
+msgid "certificate has expired"
+msgstr ""
+
+msgid "Authentication only"
+msgstr ""
+
+msgid "Certificate has expired (valid until {not_after})"
+msgstr ""
+
+msgid "Certificate is not yet valid (valid from {not_before})"
+msgstr ""
+
+msgid "Unsupported key algorithm"
+msgstr ""
+
+msgid "PIN is required"
+msgstr ""
+
+msgid "PIN entry was cancelled"
+msgstr ""
+
+msgid "Token PIN is locked"
+msgstr ""
+
+msgid "Last PIN attempt"
+msgstr ""
+
+msgid "Few PIN attempts remaining"
+msgstr ""
+
 msgid "(untitled)"
 msgstr ""
 
@@ -413,4 +446,46 @@ msgid "--at is 1-based"
 msgstr ""
 
 msgid "crop box must be llx,lly,urx,ury"
+msgstr ""
+
+msgid "Windows certificate store error: {error}"
+msgstr ""
+
+msgid "Could not open the Windows certificate store"
+msgstr ""
+
+msgid "Windows CNG error: {error}"
+msgstr ""
+
+msgid "NCryptSignHash failed"
+msgstr ""
+
+msgid "certificate has no usable private key"
+msgstr ""
+
+msgid "Keychain error: {error}"
+msgstr ""
+
+msgid "Could not search the Keychain for identities: {error}"
+msgstr ""
+
+msgid "SecKeyCreateSignature failed: {error}"
+msgstr ""
+
+msgid "unsupported public key algorithm"
+msgstr ""
+
+msgid "ECDSA signature is truncated"
+msgstr ""
+
+msgid "ECDSA signature has the wrong field size"
+msgstr ""
+
+msgid "no signing certificates found"
+msgstr ""
+
+msgid "PKCS#11 module_path in the configuration must be an absolute path: {path}"
+msgstr ""
+
+msgid "OPENPDF_PKCS11_MODULE must be an absolute path: {path}"
 msgstr ""

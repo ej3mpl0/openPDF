@@ -1,0 +1,2 @@
+# Windows autocrlf must not rewrite PDF bytes (lopdf then rejects the trailer).
+*.pdf binary

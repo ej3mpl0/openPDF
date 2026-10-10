@@ -103,6 +103,39 @@ msgstr "certificado desconocido"
 msgid "certificate is not a signing cert"
 msgstr "el certificado no es de firma"
 
+msgid "certificate is not yet valid"
+msgstr "el certificado aún no es válido"
+
+msgid "certificate has expired"
+msgstr "el certificado ha caducado"
+
+msgid "Authentication only"
+msgstr "Solo autenticación"
+
+msgid "Certificate has expired (valid until {not_after})"
+msgstr "El certificado ha caducado (válido hasta {not_after})"
+
+msgid "Certificate is not yet valid (valid from {not_before})"
+msgstr "El certificado aún no es válido (válido desde {not_before})"
+
+msgid "Unsupported key algorithm"
+msgstr "Algoritmo de clave no admitido"
+
+msgid "PIN is required"
+msgstr "Se requiere el PIN"
+
+msgid "PIN entry was cancelled"
+msgstr "Se canceló la introducción del PIN"
+
+msgid "Token PIN is locked"
+msgstr "El PIN del token está bloqueado"
+
+msgid "Last PIN attempt"
+msgstr "Último intento de PIN"
+
+msgid "Few PIN attempts remaining"
+msgstr "Quedan pocos intentos de PIN"
+
 msgid "(untitled)"
 msgstr "(sin título)"
 
@@ -414,3 +447,45 @@ msgstr "--at empieza en 1"
 
 msgid "crop box must be llx,lly,urx,ury"
 msgstr "el recorte debe ser llx,lly,urx,ury"
+
+msgid "Windows certificate store error: {error}"
+msgstr "error del almacén de certificados de Windows: {error}"
+
+msgid "Could not open the Windows certificate store"
+msgstr "no se pudo abrir el almacén de certificados de Windows"
+
+msgid "Windows CNG error: {error}"
+msgstr "error CNG de Windows: {error}"
+
+msgid "NCryptSignHash failed"
+msgstr "NCryptSignHash ha fallado"
+
+msgid "certificate has no usable private key"
+msgstr "el certificado no tiene una clave privada utilizable"
+
+msgid "Keychain error: {error}"
+msgstr "error del llavero: {error}"
+
+msgid "Could not search the Keychain for identities: {error}"
+msgstr "no se pudieron buscar identidades en el llavero: {error}"
+
+msgid "SecKeyCreateSignature failed: {error}"
+msgstr "SecKeyCreateSignature ha fallado: {error}"
+
+msgid "unsupported public key algorithm"
+msgstr "algoritmo de clave pública no admitido"
+
+msgid "ECDSA signature is truncated"
+msgstr "la firma ECDSA está truncada"
+
+msgid "ECDSA signature has the wrong field size"
+msgstr "la firma ECDSA tiene un tamaño de campo incorrecto"
+
+msgid "no signing certificates found"
+msgstr "no se encontraron certificados de firma"
+
+msgid "PKCS#11 module_path in the configuration must be an absolute path: {path}"
+msgstr "module_path de PKCS#11 en la configuración debe ser una ruta absoluta: {path}"
+
+msgid "OPENPDF_PKCS11_MODULE must be an absolute path: {path}"
+msgstr "OPENPDF_PKCS11_MODULE debe ser una ruta absoluta: {path}"

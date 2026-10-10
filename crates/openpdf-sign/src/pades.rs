@@ -184,10 +184,7 @@ fn verify_one(pdf: &[u8], dict: &Dictionary) -> SignatureInfo {
 }
 
 fn is_signature_value(dict: &Dictionary) -> bool {
-    let is_sig = match dict.get(b"Type") {
-        Ok(Object::Name(n)) if n.as_slice() == b"Sig" => true,
-        _ => false,
-    };
+    let is_sig = matches!(dict.get(b"Type"), Ok(Object::Name(n)) if n.as_slice() == b"Sig");
     if !is_sig {
         return false;
     }
@@ -224,7 +221,7 @@ fn contents_bytes(dict: &Dictionary) -> Option<Vec<u8>> {
 
 pub(crate) fn byterange_bytes(pdf: &[u8], ranges: &[i64]) -> Result<Vec<u8>> {
     let mut out = Vec::new();
-    for chunk in ranges.chunks_exact(2) {
+    for chunk in ranges.as_chunks::<2>().0 {
         let off =
             usize::try_from(chunk[0]).map_err(|_| Error::Sign("ByteRange is invalid".into()))?;
         let len =
@@ -251,8 +248,10 @@ fn dict_text(dict: &Dictionary, key: &[u8]) -> Option<String> {
 fn decode_pdf_text(bytes: &[u8]) -> Option<String> {
     if bytes.starts_with(&[0xFE, 0xFF]) {
         let units: Vec<u16> = bytes[2..]
-            .chunks(2)
-            .filter_map(|c| (c.len() == 2).then(|| u16::from_be_bytes([c[0], c[1]])))
+            .as_chunks::<2>()
+            .0
+            .iter()
+            .map(|&pair| u16::from_be_bytes(pair))
             .collect();
         String::from_utf16(&units).ok()
     } else if let Ok(s) = std::str::from_utf8(bytes) {
@@ -348,7 +347,7 @@ fn write_appearance(
 
     let off = out.len();
     xref.push((ap_id, off));
-    write!(out, "{ap_id} 0 obj\n").map_err(|e| Error::Sign(e.to_string()))?;
+    writeln!(out, "{ap_id} 0 obj").map_err(|e| Error::Sign(e.to_string()))?;
     encode_object(&Object::Dictionary(stream_dict), out)?;
     out.extend_from_slice(b"\nstream\n");
     out.extend_from_slice(content.as_bytes());
@@ -394,7 +393,7 @@ fn existing_array(doc: &Document, dict: &Dictionary, key: &[u8]) -> Vec<Object> 
 fn write_raw_object(out: &mut Vec<u8>, xref: &mut Vec<(u32, usize)>, id: u32, body: &[u8]) {
     let off = out.len();
     xref.push((id, off));
-    let _ = write!(out, "{id} 0 obj\n");
+    let _ = writeln!(out, "{id} 0 obj");
     out.extend_from_slice(body);
     if !body.ends_with(b"\n") {
         out.push(b'\n');
@@ -410,7 +409,7 @@ fn write_lopdf_object(
 ) -> Result<()> {
     let off = out.len();
     xref.push((id, off));
-    write!(out, "{id} 0 obj\n").map_err(|e| Error::Sign(e.to_string()))?;
+    writeln!(out, "{id} 0 obj").map_err(|e| Error::Sign(e.to_string()))?;
     encode_object(obj, out)?;
     out.extend_from_slice(b"\nendobj\n");
     Ok(())
@@ -496,8 +495,8 @@ fn write_xref_and_trailer(
             j += 1;
         }
         let _ = writeln!(out, "{start} {}", j - i);
-        for k in i..j {
-            let _ = write!(out, "{:010} {:05} n \n", entries[k].1, 0u16);
+        for (_, offset) in &entries[i..j] {
+            let _ = writeln!(out, "{:010} {:05} n ", offset, 0u16);
         }
         i = j;
     }
@@ -515,10 +514,8 @@ fn locate_contents(buf: &[u8], contents_len: usize) -> Result<(usize, usize)> {
         let lt = search + rel + CONTENTS_MARK.len() - 1; // '<'
         let hex_start = lt + 1;
         let gt = hex_start + expected_hex;
-        if gt < buf.len() && buf[gt] == b'>' {
-            if buf[hex_start..gt].iter().all(|b| *b == b'0') {
-                return Ok((lt, gt));
-            }
+        if gt < buf.len() && buf[gt] == b'>' && buf[hex_start..gt].iter().all(|b| *b == b'0') {
+            return Ok((lt, gt));
         }
         search += rel + 1;
     }

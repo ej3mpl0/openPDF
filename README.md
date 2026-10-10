@@ -5,11 +5,14 @@ Native Linux PDF app. Rust + GTK4/libadwaita, render with pdfium-render (BSD). M
 - `openpdf-core`: document, tiles, text, undo, merge/split, `Signer`, `PinProvider`, sign UI strings
 - `openpdf-cli`: `openpdf info|render|text|merge|split` plus organize (`insert`, `extract`, `replace`, `crop`), `optimize`, `protect`/`unprotect`/`sanitize`, `watermark`/`header`/`footer`/`number`, `from-images`/`to-images`
 - `openpdf-gtk`: UI (depends only on core)
-- `openpdf-sign`: PKCS#11 / PAdES backend (depends only on core)
+- `openpdf-sign`: PAdES-B-B backends (PKCS#11 on all OSes, Windows CNG, macOS Keychain; depends only on core)
 
 Rule: gtk and sign depend on core, never on each other. The application
-binary constructs `Box<dyn Signer>` from `openpdf-sign` (with a UI
-`PinProvider`) and hands that trait object to the GTK UI.
+binary constructs `Box<dyn Signer>` from `openpdf-sign` (typically
+`default_signer` plus a UI `PinProvider`) and hands that trait object
+to the GTK UI. PKCS#11 still asks for a PIN through `PinProvider`.
+Windows and macOS native stores let the OS show any smart-card or
+Keychain prompt.
 
 PDFium is loaded at runtime (`OPENPDF_PDFIUM`, next to the binary, or the system).
 
