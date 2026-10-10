@@ -210,7 +210,7 @@ fn byte_range(dict: &Dictionary) -> Option<Vec<i64>> {
 
 fn contents_bytes(dict: &Dictionary) -> Option<Vec<u8>> {
     match dict.get(b"Contents").ok()? {
-        Object::String(bytes, _) => Some(strip_contents_padding(bytes).to_vec()),
+        Object::String(bytes, _) => strip_contents_padding(bytes).map(<[u8]>::to_vec),
         _ => None,
     }
 }
@@ -218,19 +218,12 @@ fn contents_bytes(dict: &Dictionary) -> Option<Vec<u8>> {
 /// `/Contents` is the CMS DER followed by zero padding. Cut it at the DER
 /// length, not at the last non-zero byte: a CMS that happens to end in 0x00
 /// (about 1 in 256 RSA signatures) would otherwise be truncated and reported
-/// invalid.
-fn strip_contents_padding(bytes: &[u8]) -> &[u8] {
-    if let Some(len) = der_tlv_len(bytes) {
-        if len <= bytes.len() {
-            return &bytes[..len];
-        }
-    }
-    let end = bytes
-        .iter()
-        .rposition(|b| *b != 0)
-        .map(|i| i + 1)
-        .unwrap_or(0);
-    &bytes[..end]
+/// invalid. If the DER length can't be read or runs past the data, the CMS is
+/// malformed: return `None` (signature invalid), never guess with the old
+/// trailing-zero trim.
+fn strip_contents_padding(bytes: &[u8]) -> Option<&[u8]> {
+    let len = der_tlv_len(bytes)?;
+    bytes.get(..len)
 }
 
 /// Total length (header + content) of the DER SEQUENCE at the start of `b`.
@@ -743,13 +736,79 @@ mod tests {
         let der = [0x30, 0x04, 0x04, 0x02, 0x01, 0x00];
         let mut padded = der.to_vec();
         padded.extend_from_slice(&[0; 16]);
-        assert_eq!(strip_contents_padding(&padded), &der);
+        assert_eq!(strip_contents_padding(&padded), Some(&der[..]));
         let mut long = vec![0x30, 0x82, 0x01, 0x00];
         long.extend(std::iter::repeat_n(0xAB, 255));
         long.push(0x00);
         let full = long.clone();
         long.extend_from_slice(&[0; 8]);
-        assert_eq!(strip_contents_padding(&long), &full[..]);
+        assert_eq!(strip_contents_padding(&long), Some(&full[..]));
+    }
+
+    #[test]
+    fn contents_with_unreadable_der_length_is_rejected() {
+        // Not a SEQUENCE.
+        assert_eq!(strip_contents_padding(&[0x04, 0x01, 0xAB, 0, 0]), None);
+        // Length runs past the data.
+        assert_eq!(strip_contents_padding(&[0x30, 0x10, 0x01, 0x02]), None);
+        assert_eq!(
+            strip_contents_padding(&[0x30, 0x84, 0x7F, 0xFF, 0xFF, 0xFF, 1, 0]),
+            None
+        );
+        // Indefinite / too many length octets / header cut short.
+        assert_eq!(strip_contents_padding(&[0x30, 0x80, 1, 0, 0]), None);
+        assert_eq!(strip_contents_padding(&[0x30, 0x85, 1, 1, 1, 1, 1]), None);
+        assert_eq!(strip_contents_padding(&[0x30, 0x82, 0x01]), None);
+        assert_eq!(strip_contents_padding(&[0x30]), None);
+    }
+
+    /// A /Contents whose DER length runs past the data is reported invalid
+    /// (not valid, not `Err`), and an earlier good signature in the same PDF
+    /// still verifies.
+    #[test]
+    fn truncated_der_contents_is_invalid_and_other_signature_verifies() {
+        use rsa::pkcs1v15::SigningKey;
+        use rsa::pkcs8::DecodePrivateKey;
+        use rsa::signature::{SignatureEncoding, Signer as _};
+        use rsa::RsaPrivateKey;
+
+        let dir = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("testdata");
+        let cert = std::fs::read(dir.join("trailing-zero-cert.der")).unwrap();
+        let key = SigningKey::<Sha256>::new(
+            RsaPrivateKey::from_pkcs8_der(
+                &std::fs::read(dir.join("trailing-zero-key.p8.der")).unwrap(),
+            )
+            .unwrap(),
+        );
+        let request = SignRequest {
+            cert_id: String::new(),
+            reason: Some("good".into()),
+            location: None,
+            contact: None,
+            appearance: None,
+        };
+        let pdf = std::fs::read(corpus("hello.pdf")).unwrap();
+        let once = sign_incremental(&pdf, &request, "Good", |m| {
+            cades::sign_detached(m, &cert, |tbs| Ok(key.sign(tbs).to_vec()))
+        })
+        .expect("first sign");
+        let twice = sign_incremental(&once, &request, "Truncated", |m| {
+            let mut cms = cades::sign_detached(m, &cert, |tbs| Ok(key.sign(tbs).to_vec()))?;
+            // Claim a DER length far beyond the reserved /Contents space.
+            assert_eq!(cms[0], 0x30);
+            let body = cms.split_off(2 + (cms[1] & 0x7f) as usize);
+            cms.truncate(1);
+            cms.extend_from_slice(&[0x84, 0x7F, 0xFF, 0xFF, 0xFF]);
+            cms.extend_from_slice(&body);
+            Ok(cms)
+        })
+        .expect("second sign");
+
+        let infos = verify_signatures(&twice).expect("verify must not fail");
+        assert_eq!(infos.len(), 2);
+        let good = infos.iter().filter(|i| i.valid == Some(true)).count();
+        let bad = infos.iter().filter(|i| i.valid == Some(false)).count();
+        assert_eq!((good, bad), (1, 1), "{infos:?}");
     }
 
     /// Regression: a real signed PDF whose CMS DER ends in 0x00 must verify.
