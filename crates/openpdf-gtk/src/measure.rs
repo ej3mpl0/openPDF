@@ -108,6 +108,34 @@ pub const MAX_RSS_BYTES: u64 = 250 * 1024 * 1024;
 /// Give up waiting for tiles (must be ≥ [`MAX_STARTUP_MS`]).
 pub const MAX_MEASURE_WAIT_MS: u128 = 15_000;
 
+/// Hard timeout for the final-layout visible-tile + min-thumbnail wait,
+/// counted from process start. Override with `OPENPDF_MEASURE_TIMEOUT_MS`.
+pub const DEFAULT_MEASURE_TIMEOUT_MS: u128 = 10_000;
+
+/// [`DEFAULT_MEASURE_TIMEOUT_MS`], or a positive `OPENPDF_MEASURE_TIMEOUT_MS`.
+pub fn measure_timeout_ms() -> u128 {
+    parse_measure_timeout_ms(std::env::var("OPENPDF_MEASURE_TIMEOUT_MS").ok().as_deref())
+}
+
+pub fn parse_measure_timeout_ms(raw: Option<&str>) -> u128 {
+    raw.and_then(|s| s.parse().ok())
+        .filter(|&ms| ms > 0)
+        .unwrap_or(DEFAULT_MEASURE_TIMEOUT_MS)
+}
+
+/// Stderr line for a timed-out `--measure` wait. Contains no `startup_ms`.
+pub fn format_measure_timeout(
+    timeout_ms: u128,
+    visible_ready: usize,
+    visible_total: usize,
+    thumb_ready: usize,
+    thumb_total: usize,
+) -> String {
+    format!(
+        "measure timeout after {timeout_ms} ms: tiles {visible_ready}/{visible_total}, thumbs {thumb_ready}/{thumb_total}"
+    )
+}
+
 /// Visible-page tiles that must be in cache before the run counts as ready.
 pub const MIN_VISIBLE_TILES: usize = 1;
 /// Sidebar thumbnail tiles that must be in cache (a 800 px strip shows ~4).
@@ -387,6 +415,32 @@ mod tests {
         assert!(text.contains("ui_doc_load_start_ms="));
         assert!(text.contains("ui_first_tile_requested_ms="));
         assert!(text.contains("ui_first_surface_ready_ms="));
+    }
+
+    #[test]
+    fn timeout_path_message_has_counts_and_no_startup_ms() {
+        assert_eq!(parse_measure_timeout_ms(None), 10_000);
+        assert_eq!(parse_measure_timeout_ms(Some("250")), 250);
+        assert_eq!(parse_measure_timeout_ms(Some("0")), 10_000);
+        assert_eq!(parse_measure_timeout_ms(Some("nope")), 10_000);
+        assert_eq!(
+            parse_measure_timeout_ms(Some("10000")),
+            DEFAULT_MEASURE_TIMEOUT_MS
+        );
+        let msg = format_measure_timeout(10_000, 0, 16, 0, 4);
+        assert_eq!(
+            msg,
+            "measure timeout after 10000 ms: tiles 0/16, thumbs 0/4"
+        );
+        assert!(!msg.contains("startup_ms"));
+        assert!(!msg.contains("startup"));
+        let report = BudgetReport {
+            startup_ms: 10_000,
+            ..Default::default()
+        }
+        .to_string();
+        assert!(report.contains("startup_ms="));
+        assert!(!msg.lines().any(|l| l.starts_with("startup_ms=")));
     }
 
     #[test]

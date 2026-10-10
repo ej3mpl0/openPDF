@@ -14,8 +14,7 @@ use std::rc::Rc;
 use std::sync::Arc;
 
 use crate::measure::{
-    self, peak_rss_bytes, BudgetReport, DEFAULT_MEASURE_PAGES, MAX_MEASURE_WAIT_MS,
-    MIN_THUMB_TILES, MIN_VISIBLE_TILES,
+    self, peak_rss_bytes, BudgetReport, DEFAULT_MEASURE_PAGES, MIN_THUMB_TILES, MIN_VISIBLE_TILES,
 };
 use crate::settings::{Settings, Theme};
 use crate::sign::{NoopVerifier, UnavailableSigner};
@@ -127,6 +126,7 @@ pub fn run_measure(pages: usize) -> i32 {
     };
 
     let report: Rc<RefCell<Option<BudgetReport>>> = Rc::new(RefCell::new(None));
+    let timed_out = Rc::new(Cell::new(false));
     let app = adw::Application::builder()
         .application_id(crate::MEASURE_APP_ID)
         .flags(ApplicationFlags::NON_UNIQUE)
@@ -147,6 +147,7 @@ pub fn run_measure(pages: usize) -> i32 {
     });
 
     let report_c = report.clone();
+    let timed_out_c = timed_out.clone();
     app.connect_activate(move |app| {
         let ui_activate_ms = measure::process_elapsed_ms();
         let mut settings = Settings::default();
@@ -177,6 +178,7 @@ pub fn run_measure(pages: usize) -> i32 {
             app,
             win,
             report_c.clone(),
+            timed_out_c.clone(),
             MeasureMarks {
                 ui_activate_ms,
                 ui_window_present_ms,
@@ -189,6 +191,9 @@ pub fn run_measure(pages: usize) -> i32 {
     });
 
     let _ = app.run_with_args::<&str>(&[]);
+    if timed_out.get() {
+        return 1;
+    }
     let result = report.borrow().clone();
     match result {
         Some(r) => {
@@ -224,6 +229,7 @@ fn watch_measure(
     app: &adw::Application,
     win: window::OpenPdfWindow,
     report: Rc<RefCell<Option<BudgetReport>>>,
+    timed_out: Rc<Cell<bool>>,
     marks: MeasureMarks,
 ) {
     let app = app.clone();
@@ -304,30 +310,26 @@ fn watch_measure(
             }
         }
 
-        if elapsed >= MAX_MEASURE_WAIT_MS {
-            let (pages, ready) = match win.current_view() {
-                Some(view) => (view.opened().page_count(), Some(view.tile_ready())),
-                None => (0, None),
+        let timeout_ms = measure::measure_timeout_ms();
+        if elapsed >= timeout_ms {
+            let (vr, vt, tr, tt) = match win.current_view() {
+                Some(view) => {
+                    let r = view.tile_ready();
+                    (
+                        r.visible_ready,
+                        r.visible_total,
+                        r.thumb_ready,
+                        r.thumb_total,
+                    )
+                }
+                None => (0, 0, 0, 0),
             };
-            let err = if ready.is_none() {
-                "document did not open".into()
-            } else {
-                format!(
-                    "timed out after {MAX_MEASURE_WAIT_MS} ms waiting for tiles ({}/{} visible, {}/{} thumbs)",
-                    ready.map(|r| r.visible_ready).unwrap_or(0),
-                    ready.map(|r| r.visible_total).unwrap_or(0),
-                    ready.map(|r| r.thumb_ready).unwrap_or(0),
-                    ready.map(|r| r.thumb_total).unwrap_or(0)
-                )
-            };
-            let mut built = failed_report(pages, elapsed, peak.get(), &err);
-            if let Some(ready) = ready {
-                built.visible_ready = ready.visible_ready;
-                built.visible_total = ready.visible_total;
-                built.thumb_ready = ready.thumb_ready;
-                built.thumb_total = ready.thumb_total;
-            }
-            finish_measure(&app, &report, built);
+            eprintln!(
+                "{}",
+                measure::format_measure_timeout(timeout_ms, vr, vt, tr, tt)
+            );
+            timed_out.set(true);
+            app.quit();
             return glib::ControlFlow::Break;
         }
         glib::ControlFlow::Continue
