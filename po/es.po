@@ -754,3 +754,6 @@ msgstr "El PIN debe pedirse fuera del hilo de GTK"
 
 msgid "Saved signed PDF to {path}"
 msgstr "PDF firmado guardado en {path}"
+
+msgid "Cannot verify: original file bytes are unavailable."
+msgstr "No se puede verificar: no hay bytes originales del archivo."
