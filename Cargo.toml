@@ -11,6 +11,8 @@ members = [
 edition = "2021"
 license = "MPL-2.0"
 version = "0.1.0"
+# MSRV = Rust in org.freedesktop.Sdk.Extension.rust-stable//26.08 (GNOME 51 Flatpak SDK).
+rust-version = "1.98.0"
 
 [workspace.dependencies]
 openpdf-core = { path = "crates/openpdf-core" }

@@ -140,6 +140,40 @@ jobs:
           path: ci-times/${{ matrix.os }}.txt
           if-no-files-found: error
 
+  # MSRV = Rust shipped in org.freedesktop.Sdk.Extension.rust-stable//26.08,
+  # which the GNOME 51 Flatpak builds with. Keep in sync with Cargo.toml
+  # [workspace.package] rust-version.
+  msrv:
+    name: MSRV (Flatpak SDK Rust)
+    runs-on: ubuntu-latest
+    env:
+      CARGO_TERM_COLOR: always
+      MSRV: "1.98.0"
+      RUSTUP_TOOLCHAIN: "1.98.0"
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Check MSRV matches Cargo.toml
+        run: grep -qx "rust-version = \"$MSRV\"" Cargo.toml
+
+      - name: Install Rust ${{ env.MSRV }}
+        run: rustup toolchain install "$MSRV" --profile minimal
+
+      - uses: Swatinem/rust-cache@v2
+        with:
+          prefix-key: msrv
+
+      - name: Install GTK4 and libadwaita
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends \
+            libgtk-4-dev libadwaita-1-dev pkg-config
+
+      - name: cargo check (full workspace incl. openpdf-gtk)
+        run: |
+          rustc --version
+          cargo check --workspace --locked --all-targets
+
   times:
     name: CI times
     needs: build
