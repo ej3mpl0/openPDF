@@ -1,5 +1,6 @@
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::Arc;
 
 use lopdf::{Dictionary, Document as LopdfDocument, Object, ObjectId};
 
@@ -40,7 +41,7 @@ pub(crate) struct PageSlot {
 pub struct Document {
     id: DocumentId,
     path: Option<PathBuf>,
-    original: Vec<u8>,
+    original: Arc<Vec<u8>>,
     inner: LopdfDocument,
     slots: Vec<PageSlot>,
     history: History,
@@ -56,6 +57,8 @@ impl Document {
     }
 
     pub fn from_bytes(bytes: Vec<u8>, path: Option<PathBuf>) -> Result<Self> {
+        // Arc::new moves the Vec: no byte copy.
+        let bytes = Arc::new(bytes);
         let inner = LopdfDocument::load_mem(&bytes)?;
         Self::from_lopdf_inner(inner, bytes, path)
     }
@@ -64,13 +67,14 @@ impl Document {
         let mut tmp = inner;
         let mut bytes = Vec::new();
         tmp.save_to(&mut bytes)?;
+        let bytes = Arc::new(bytes);
         let inner = LopdfDocument::load_mem(&bytes)?;
         Self::from_lopdf_inner(inner, bytes, path)
     }
 
     fn from_lopdf_inner(
         inner: LopdfDocument,
-        original: Vec<u8>,
+        original: Arc<Vec<u8>>,
         path: Option<PathBuf>,
     ) -> Result<Self> {
         let slots = slots_from(&inner)?;
@@ -264,8 +268,7 @@ impl Document {
     fn apply_inverse(&mut self, applied: Applied) -> Result<Applied> {
         match applied {
             Applied::Rotate { index, delta } => {
-                self.slots[index].rotation =
-                    normalize_rotation(self.slots[index].rotation - delta);
+                self.slots[index].rotation = normalize_rotation(self.slots[index].rotation - delta);
                 Ok(Applied::Rotate { index, delta })
             }
             Applied::Delete { index, slot } => {
@@ -286,8 +289,7 @@ impl Document {
     fn apply_forward(&mut self, applied: Applied) -> Result<Applied> {
         match applied {
             Applied::Rotate { index, delta } => {
-                self.slots[index].rotation =
-                    normalize_rotation(self.slots[index].rotation + delta);
+                self.slots[index].rotation = normalize_rotation(self.slots[index].rotation + delta);
                 Ok(Applied::Rotate { index, delta })
             }
             Applied::Delete { index, slot: _ } => {
@@ -332,7 +334,25 @@ impl Document {
         }
     }
 
-    pub(crate) fn original_bytes(&self) -> &[u8] {
+    /// The bytes this document was loaded from (or last saved to), unmodified.
+    ///
+    /// Unlike [`Document::to_bytes`], this never rewrites the file, so it is
+    /// allowed on signed documents and is what signature verification needs.
+    ///
+    /// Returns a shared handle (no byte copy) that can be moved to another
+    /// thread.
+    pub fn original_bytes(&self) -> Arc<Vec<u8>> {
+        Arc::clone(&self.original)
+    }
+
+    /// Address of the original buffer, for no-copy assertions in tests.
+    #[cfg(test)]
+    pub(crate) fn original_ptr(&self) -> *const u8 {
+        self.original.as_ptr()
+    }
+
+    /// Borrowed view of [`Document::original_bytes`] for internal use.
+    pub(crate) fn original_slice(&self) -> &[u8] {
         &self.original
     }
 
@@ -341,7 +361,8 @@ impl Document {
     }
 
     pub(crate) fn lopdf_clone(&self) -> LopdfDocument {
-        self.assembled_lopdf().unwrap_or_else(|_| self.inner.clone())
+        self.assembled_lopdf()
+            .unwrap_or_else(|_| self.inner.clone())
     }
 
     pub(crate) fn assembled_lopdf(&self) -> Result<LopdfDocument> {
@@ -351,6 +372,7 @@ impl Document {
     }
 
     pub(crate) fn reload_from_saved(&mut self, bytes: Vec<u8>) -> Result<()> {
+        let bytes = Arc::new(bytes);
         let inner = LopdfDocument::load_mem(&bytes)?;
         self.slots = slots_from(&inner)?;
         self.signed = contains_signature(&inner);
@@ -428,9 +450,7 @@ fn page_rotate(doc: &LopdfDocument, mut id: ObjectId) -> i32 {
 fn media_box(doc: &LopdfDocument, mut id: ObjectId) -> Result<(f32, f32)> {
     for _ in 0..16 {
         let obj = doc.get_object(id)?;
-        let dict = obj
-            .as_dict()
-            .map_err(|e| Error::structure(e.to_string()))?;
+        let dict = obj.as_dict().map_err(|e| Error::structure(e.to_string()))?;
         if let Ok(mb) = dict.get(b"MediaBox") {
             return parse_box(mb);
         }
@@ -514,5 +534,60 @@ mod tests {
         assert_eq!(doc.page_count(), 2);
         doc.move_page(0, 2).unwrap();
         assert_eq!(doc.page_count(), 2);
+    }
+
+    #[test]
+    fn original_bytes_of_signed_document_are_untouched() {
+        let plain = std::fs::read(
+            std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../corpus/hello.pdf"),
+        )
+        .unwrap();
+        let signed = crate::signer::append_stub_signature(&plain).unwrap();
+        let path =
+            std::env::temp_dir().join(format!("openpdf-original-bytes-{}.pdf", std::process::id()));
+        std::fs::write(&path, &signed).unwrap();
+        let doc = Document::open(&path).unwrap();
+        std::fs::remove_file(&path).ok();
+        assert!(doc.is_signed());
+        assert!(doc.to_bytes().is_err());
+        assert_eq!(&*doc.original_bytes(), signed.as_slice());
+    }
+
+    #[test]
+    fn original_bytes_is_shared_not_copied() {
+        let doc = Document::open(
+            std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../corpus/hello.pdf"),
+        )
+        .unwrap();
+        let a = doc.original_bytes();
+        let b = doc.original_bytes();
+        assert!(Arc::ptr_eq(&a, &b));
+    }
+
+    #[test]
+    fn loading_does_not_copy_the_bytes() {
+        let bytes = std::fs::read(
+            std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../corpus/hello.pdf"),
+        )
+        .unwrap();
+        let before = bytes.as_ptr();
+        let doc = Document::from_bytes(bytes, None).unwrap();
+        assert_eq!(doc.original_ptr(), before);
+        assert_eq!(doc.original_bytes().as_ptr(), before);
+    }
+
+    #[test]
+    fn original_bytes_can_move_to_another_thread() {
+        let path = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../corpus/hello.pdf");
+        let on_disk = std::fs::read(&path).unwrap();
+        let doc = Document::open(&path).unwrap();
+        let bytes = doc.original_bytes();
+        let len = std::thread::spawn(move || {
+            assert!(bytes.starts_with(b"%PDF"));
+            bytes.len()
+        })
+        .join()
+        .unwrap();
+        assert_eq!(len, on_disk.len());
     }
 }
