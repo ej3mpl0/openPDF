@@ -43,7 +43,8 @@ jobs:
           curl -fsSL -o /tmp/adwaita.tar.xz "$ADWAITA_ICON_THEME_URL"
           echo "$ADWAITA_ICON_THEME_SHA256  /tmp/adwaita.tar.xz" | sha256sum -c -
           mkdir -p /tmp/adwaita && tar -xJf /tmp/adwaita.tar.xz -C /tmp/adwaita --strip-components=1
-          packaging/check-icons.sh /tmp/adwaita/Adwaita
+          packaging/stage-adwaita.sh /tmp/adwaita /tmp/adwaita-staged/Adwaita
+          packaging/check-icons.sh /tmp/adwaita-staged
 
   flatpak:
     name: Flatpak

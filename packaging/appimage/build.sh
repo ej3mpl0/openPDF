@@ -116,11 +116,11 @@ install -Dm0644 "$icon_src" "$APPDIR/usr/share/icons/hicolor/scalable/apps/${APP
 # adwaita-icon-theme (KDE, minimal distros) would show image-missing.
 adwaita_archive="$BUILD_DIR/adwaita-icon-theme-${ADWAITA_ICON_THEME_VERSION}.tar.xz"
 download_verify "$ADWAITA_ICON_THEME_URL" "$adwaita_archive" "$ADWAITA_ICON_THEME_SHA256"
-rm -rf "$BUILD_DIR/adwaita-src" "$APPDIR/usr/share/icons/Adwaita"
-mkdir -p "$BUILD_DIR/adwaita-src" "$APPDIR/usr/share/icons/Adwaita"
+rm -rf "$BUILD_DIR/adwaita-src"
+mkdir -p "$BUILD_DIR/adwaita-src"
 tar -xJf "$adwaita_archive" -C "$BUILD_DIR/adwaita-src" --strip-components=1
-cp -a "$BUILD_DIR/adwaita-src/Adwaita/index.theme" "$BUILD_DIR/adwaita-src/Adwaita/symbolic" \
-  "$BUILD_DIR/adwaita-src/Adwaita/scalable" "$APPDIR/usr/share/icons/Adwaita/"
+# index.theme is at the tarball top level, icons under Adwaita/ (meson layout).
+"$ROOT/packaging/stage-adwaita.sh" "$BUILD_DIR/adwaita-src" "$APPDIR/usr/share/icons/Adwaita"
 if command -v gtk4-update-icon-cache >/dev/null; then
   gtk4-update-icon-cache -q -t -f "$APPDIR/usr/share/icons/Adwaita"
   gtk4-update-icon-cache -q -t -f "$APPDIR/usr/share/icons/hicolor"
