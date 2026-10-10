@@ -22,6 +22,10 @@ build-options:
 
 finish-args:
   - --share=ipc
+  # Network is used only for the RFC 3161 timestamp request when the user picks
+  # PAdES B-T (only the SHA-256 hash of the signature is sent, to the TSA the user
+  # configured; there is no default). PAdES B-B makes no network connection.
+  - --share=network
   - --socket=wayland
   - --socket=fallback-x11
   - --device=dri
