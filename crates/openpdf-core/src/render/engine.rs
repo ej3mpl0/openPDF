@@ -422,6 +422,11 @@ impl Engine {
         }
     }
 
+    /// Last tile/page buffer copy after PDFium render. See `pdfium::last_convert_ms`.
+    pub fn last_convert_ms(&self) -> f64 {
+        pdfium_bind::last_convert_ms()
+    }
+
     /// First successful call wins; later engines share the same worker.
     pub fn with_bundled_library(path: impl AsRef<Path>) -> Result<Self> {
         let path = path.as_ref().to_path_buf();

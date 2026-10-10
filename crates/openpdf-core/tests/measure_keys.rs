@@ -18,6 +18,12 @@ fn help_documents_origin_and_core_keys() {
         "peak_rss_bytes",
         "pdfium_load_ms",
         "doc_open_ms",
+        "convert_ms",
+        "visible_tiles",
+        "first_ready_ms",
+        "first_ready_x",
+        "first_ready_y",
+        "visible_tiles_ms",
     ] {
         assert!(s.contains(key), "help missing {key}: {s}");
     }
@@ -47,6 +53,10 @@ fn stdout_line_has_new_keys_and_no_ui_prefix() {
     assert!(line.contains("peak_rss_bytes="), "{line}");
     assert!(line.contains("pdfium_load_ms="), "{line}");
     assert!(line.contains("doc_open_ms="), "{line}");
+    assert!(line.contains("convert_ms="), "{line}");
+    assert!(line.contains("visible_tiles="), "{line}");
+    assert!(line.contains("first_ready_ms="), "{line}");
+    assert!(line.contains("visible_tiles_ms="), "{line}");
     assert!(
         !line.split_whitespace().any(|f| f.starts_with("ui_")),
         "core must never emit GTK ui-prefixed keys: {line}"
