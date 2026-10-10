@@ -137,22 +137,61 @@ fn tr_args_signed(_lang: Lang, op: SignedOp) -> String {
 fn apply_in_place(
     overlay: &adw::ToastOverlay,
     lang: Lang,
-    view: &DocumentView,
+    view: Rc<DocumentView>,
     f: impl FnOnce(&Document) -> openpdf_core::Result<Document>,
 ) {
-    match view.opened().apply_tool(f) {
-        Ok(()) => {
-            if let Err(e) = view.opened().save() {
-                show_toast(overlay, &e.to_string());
-            } else {
-                show_toast(overlay, t(lang, "Document updated."));
-            }
-            view.ensure_laid_out();
-            view.refresh_lock_chrome();
-            view.queue_repaint();
+    let Some(engine) = view.opened().engine() else {
+        show_toast(overlay, t(lang, "Page edits need a real document."));
+        return;
+    };
+    let prepared = match view.opened() {
+        crate::session::Opened::Core(session) => session.apply_tool_prepare(f),
+        crate::session::Opened::Mock(_) => {
+            show_toast(overlay, t(lang, "Page edits need a real document."));
+            return;
         }
-        Err(e) => show_toast(overlay, &e.to_string()),
-    }
+    };
+    let (old_id, new) = match prepared {
+        Ok(v) => v,
+        Err(e) => {
+            show_toast(overlay, &e.to_string());
+            return;
+        }
+    };
+    let parent = overlay
+        .root()
+        .and_then(|r| r.downcast::<gtk::Window>().ok());
+    let busy = parent
+        .as_ref()
+        .map(|w| crate::bind::present_busy(w, lang, t(lang, "Document updated.")));
+    let overlay = overlay.clone();
+    crate::bind::spawn_engine_bind(
+        move || {
+            engine
+                .bind(&new)
+                .map(|_| new)
+                .map_err(|e| crate::i18n::format_core_error(&e))
+        },
+        move |result| {
+            if let Some(b) = busy {
+                b.close();
+            }
+            match result {
+                Ok(new) => {
+                    view.opened().adopt_document(old_id, new);
+                    if let Err(e) = view.opened().save() {
+                        show_toast(&overlay, &e.to_string());
+                    } else {
+                        show_toast(&overlay, t(lang, "Document updated."));
+                    }
+                    view.ensure_laid_out();
+                    view.refresh_lock_chrome();
+                    view.queue_repaint();
+                }
+                Err(e) => show_toast(&overlay, &e),
+            }
+        },
+    );
 }
 
 struct Form {
@@ -339,10 +378,10 @@ fn adopt_insert_source(
                 warn: ui.warn.clone(),
             };
             let dest = path.clone();
-            password::prompt(parent, lang, &path, move |pw| {
-                let doc = Document::open_with_password(&dest, pw)?;
-                store_insert_source(&ui, dest.clone(), doc);
-                Ok(())
+            password::prompt(parent, lang, &path, move |pw, done| {
+                done(Document::open_with_password(&dest, pw).map(|doc| {
+                    store_insert_source(&ui, dest.clone(), doc);
+                }));
             });
         }
         Err(e) => show_toast(overlay, &format_core_error(&e)),
@@ -453,7 +492,7 @@ fn insert_dialog(
                 }
             };
             let at_idx = (at.value() as u32).saturating_sub(1);
-            apply_in_place(&overlay, lang, &view, |doc| {
+            apply_in_place(&overlay, lang, view.clone(), |doc| {
                 insert_pages(doc, at_idx, &src, &ranges)
             });
             win.close();
@@ -554,7 +593,9 @@ fn crop_dialog(
                     return;
                 }
             };
-            apply_in_place(&overlay, lang, &view, |doc| crop_pages(doc, &ranges, crop));
+            apply_in_place(&overlay, lang, view.clone(), |doc| {
+                crop_pages(doc, &ranges, crop)
+            });
             win.close();
         }
     });
@@ -602,7 +643,7 @@ fn optimize_dialog(
                 drop_unused: true,
                 linearize: !linear.is_active(),
             };
-            apply_in_place(&overlay, lang, &view, |doc| optimize(doc, &opts));
+            apply_in_place(&overlay, lang, view.clone(), |doc| optimize(doc, &opts));
             win.close();
         }
     });
@@ -646,7 +687,7 @@ fn protect_dialog(
                     return;
                 }
             };
-            apply_in_place(&overlay, lang, &view, |doc| protect(doc, &opts));
+            apply_in_place(&overlay, lang, view.clone(), |doc| protect(doc, &opts));
             win.close();
         }
     });
@@ -675,7 +716,9 @@ fn unprotect_dialog(
             }
             let pw = Zeroizing::new(password.text().to_string());
             password.set_text("");
-            apply_in_place(&overlay, lang, &view, |doc| unprotect(doc, pw.as_str()));
+            apply_in_place(&overlay, lang, view.clone(), |doc| {
+                unprotect(doc, pw.as_str())
+            });
             win.close();
         }
     });
@@ -706,7 +749,7 @@ fn sanitize_dialog(
             if blocked {
                 return;
             }
-            apply_in_place(&overlay, lang, &view, sanitize_metadata);
+            apply_in_place(&overlay, lang, view.clone(), sanitize_metadata);
             win.close();
         }
     });
@@ -768,7 +811,7 @@ fn overlay_dialog(
                     return;
                 }
             }
-            apply_in_place(&toast, lang, &view, |doc| apply_overlay(doc, &stamp));
+            apply_in_place(&toast, lang, view.clone(), |doc| apply_overlay(doc, &stamp));
             win.close();
         }
     });
@@ -865,30 +908,40 @@ fn to_images_dialog(
                 return;
             }
         };
-        match pdf_to_rasters(&engine, &doc, 1.0) {
-            Ok(rasters) => {
-                for (i, raster) in rasters.iter().enumerate() {
-                    match raster_to_png(raster) {
-                        Ok(png) => {
-                            let path = dir.join(format!("page-{}.png", i + 1));
-                            if let Err(e) = std::fs::write(&path, png) {
-                                show_toast(&overlay, &e.to_string());
-                                return;
+        let busy = crate::bind::present_busy(&parent, lang, t(lang, "Document updated."));
+        crate::bind::spawn_engine_bind(
+            move || pdf_to_rasters(&engine, &doc, 1.0).map_err(|e| format_core_error(&e)),
+            move |result| {
+                busy.close();
+                match result {
+                    Ok(rasters) => {
+                        for (i, raster) in rasters.iter().enumerate() {
+                            match raster_to_png(raster) {
+                                Ok(png) => {
+                                    let path = dir.join(format!("page-{}.png", i + 1));
+                                    if let Err(e) = std::fs::write(&path, png) {
+                                        show_toast(&overlay, &e.to_string());
+                                        return;
+                                    }
+                                }
+                                Err(e) => {
+                                    show_toast(&overlay, &format_core_error(&e));
+                                    return;
+                                }
                             }
                         }
-                        Err(e) => {
-                            show_toast(&overlay, &format_core_error(&e));
-                            return;
-                        }
+                        show_toast(
+                            &overlay,
+                            &openpdf_core::tr_args(
+                                "wrote {path}",
+                                &[("path", &dir.display().to_string())],
+                            ),
+                        );
                     }
+                    Err(e) => show_toast(&overlay, &e),
                 }
-                show_toast(
-                    &overlay,
-                    &openpdf_core::tr_args("wrote {path}", &[("path", &dir.display().to_string())]),
-                );
-            }
-            Err(e) => show_toast(&overlay, &format_core_error(&e)),
-        }
+            },
+        );
     });
 }
 

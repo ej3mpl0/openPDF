@@ -20,7 +20,7 @@ pub fn prompt(
     parent: &impl IsA<gtk::Window>,
     lang: Lang,
     path: &Path,
-    attempt: impl Fn(Zeroizing<String>) -> Result<(), Error> + 'static,
+    attempt: impl Fn(Zeroizing<String>, Box<dyn FnOnce(Result<(), Error>)>) + 'static,
 ) {
     let win = adw::Window::new();
     win.set_transient_for(Some(parent));
@@ -81,24 +81,35 @@ pub fn prompt(
         let row = row.clone();
         let err = err.clone();
         let win = win.clone();
+        let unlock = unlock.clone();
         move || {
             let pw = Zeroizing::new(row.text().to_string());
             row.set_text("");
-            match attempt(pw) {
-                Ok(()) => win.close(),
-                Err(Error::WrongPassword) => {
-                    err.set_text(t(lang, "wrong password"));
-                    err.set_visible(true);
-                }
-                Err(Error::PasswordRequired) => {
-                    err.set_text(t(lang, "password is required"));
-                    err.set_visible(true);
-                }
-                Err(e) => {
-                    err.set_text(&e.to_string());
-                    err.set_visible(true);
-                }
-            }
+            unlock.set_sensitive(false);
+            let err = err.clone();
+            let win = win.clone();
+            let unlock = unlock.clone();
+            attempt(
+                pw,
+                Box::new(move |result| {
+                    unlock.set_sensitive(true);
+                    match result {
+                        Ok(()) => win.close(),
+                        Err(Error::WrongPassword) => {
+                            err.set_text(t(lang, "wrong password"));
+                            err.set_visible(true);
+                        }
+                        Err(Error::PasswordRequired) => {
+                            err.set_text(t(lang, "password is required"));
+                            err.set_visible(true);
+                        }
+                        Err(e) => {
+                            err.set_text(&e.to_string());
+                            err.set_visible(true);
+                        }
+                    }
+                }),
+            );
         }
     });
     unlock.connect_clicked({

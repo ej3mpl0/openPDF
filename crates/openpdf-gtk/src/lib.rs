@@ -16,6 +16,7 @@ pub const APP_ID: &str = "io.github.ej3mpl0.openpdf";
 pub const MEASURE_APP_ID: &str = "io.github.ej3mpl0.openpdf.Measure";
 
 pub mod backend;
+pub mod bind;
 pub mod core_needed;
 pub mod i18n;
 pub mod measure;
@@ -32,8 +33,8 @@ pub use pin::GtkPinProvider;
 pub use session::{Opened, Session};
 pub use settings::{Settings, Theme, ZoomMode};
 pub use tiles::{
-    layout_continuous, layout_single, visible_tiles, PageLayout, PageRect, TileCache, TileKey,
-    DEFAULT_TILE_SIZE,
+    layout_continuous, layout_single, thumb_request_viewport, visible_tiles, PageLayout, PageRect,
+    TileCache, TileKey, DEFAULT_TILE_SIZE, MIN_THUMB_STRIP_PX,
 };
 pub use ui::{run, run_measure};
 

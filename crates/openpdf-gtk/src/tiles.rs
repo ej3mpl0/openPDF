@@ -5,7 +5,22 @@ use std::sync::Arc;
 use crate::backend::{PageSize, TileBitmap};
 
 pub const DEFAULT_TILE_SIZE: u32 = 256;
-pub const DEFAULT_CACHE_BYTES: usize = 64 * 1024 * 1024;
+pub const DEFAULT_CACHE_BYTES: usize = 16 * 1024 * 1024;
+
+/// Thumbnail sidebar request viewport. Never the full document height:
+/// a ~800 px strip shows the measure gate (`MIN_THUMB_TILES` ≈ 3–4).
+pub const MIN_THUMB_STRIP_PX: f64 = 800.0;
+
+/// `(view_y, view_h)` for thumbnail tile requests.
+///
+/// When the strip is not yet allocated, cover [`MIN_THUMB_STRIP_PX`] from
+/// the top instead of every page (32 pages would pin 32 surfaces).
+pub fn thumb_request_viewport(allocated: f64, scroll_y: f64, content_height: f64) -> (f64, f64) {
+    let content_height = content_height.max(1.0);
+    let view_h = allocated.max(MIN_THUMB_STRIP_PX).min(content_height);
+    let view_y = if allocated < 32.0 { 0.0 } else { scroll_y };
+    (view_y, view_h)
+}
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub struct TileKey {
@@ -387,6 +402,20 @@ mod tests {
         let i = (2 * 8 + 2) * 4;
         assert_eq!(&dest[i..i + 4], &[255, 0, 0, 255]);
         assert_eq!(&dest[0..4], &[0, 0, 0, 0]);
+    }
+
+    #[test]
+    fn thumb_request_viewport_caps_unallocated_strip() {
+        let content = 32.0 * 200.0;
+        let (y, h) = thumb_request_viewport(0.0, 40.0, content);
+        assert_eq!(y, 0.0);
+        assert_eq!(h, MIN_THUMB_STRIP_PX);
+        assert!(h < content, "must not request all 32 thumbnail pages");
+        let (y2, h2) = thumb_request_viewport(480.0, 120.0, content);
+        assert_eq!(y2, 120.0);
+        assert_eq!(h2, MIN_THUMB_STRIP_PX);
+        let (y3, h3) = thumb_request_viewport(900.0, 0.0, content);
+        assert_eq!((y3, h3), (0.0, 900.0));
     }
 
     #[test]

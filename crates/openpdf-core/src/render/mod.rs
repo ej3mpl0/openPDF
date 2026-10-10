@@ -13,8 +13,22 @@ use crate::document::DocumentId;
 /// Tile edge in pixels.
 pub const TILE_SIZE: u32 = 256;
 
-/// Default tile-cache memory cap (64 MiB of raw RGBA).
-pub const DEFAULT_CACHE_BYTES: usize = 64 * 1024 * 1024;
+/// Default tile-cache memory cap (16 MiB of raw RGBA).
+///
+/// Override with `OPENPDF_TILE_CACHE_BYTES` (bytes). 16 visible 256² tiles
+/// are ~4 MiB; the rest is thumbs and a short-lived adjacent preview.
+pub const DEFAULT_CACHE_BYTES: usize = 16 * 1024 * 1024;
+
+/// [`DEFAULT_CACHE_BYTES`], or a positive `OPENPDF_TILE_CACHE_BYTES`.
+pub fn tile_cache_bytes() -> usize {
+    parse_tile_cache_bytes(std::env::var("OPENPDF_TILE_CACHE_BYTES").ok().as_deref())
+}
+
+pub fn parse_tile_cache_bytes(raw: Option<&str>) -> usize {
+    raw.and_then(|s| s.parse().ok())
+        .filter(|&n| n > 0)
+        .unwrap_or(DEFAULT_CACHE_BYTES)
+}
 
 /// Quantized zoom used in [`TileKey`]. Stored as `round(zoom * 1000)`.
 pub fn quantize_zoom(zoom: f32) -> u32 {
@@ -145,5 +159,14 @@ mod tests {
         let (tw, th, x0, y0) = tile_rect(600, 800, 2, 3, 256);
         assert_eq!((x0, y0), (512, 768));
         assert_eq!((tw, th), (88, 32));
+    }
+
+    #[test]
+    fn tile_cache_bytes_reads_env_or_default() {
+        assert_eq!(parse_tile_cache_bytes(None), DEFAULT_CACHE_BYTES);
+        assert_eq!(parse_tile_cache_bytes(Some("0")), DEFAULT_CACHE_BYTES);
+        assert_eq!(parse_tile_cache_bytes(Some("nope")), DEFAULT_CACHE_BYTES);
+        assert_eq!(parse_tile_cache_bytes(Some("8388608")), 8 * 1024 * 1024);
+        assert_eq!(DEFAULT_CACHE_BYTES, 16 * 1024 * 1024);
     }
 }

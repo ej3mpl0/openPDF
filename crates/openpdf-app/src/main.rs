@@ -128,7 +128,10 @@ All --measure marks are milliseconds from one process-start Instant \
   pdfium_load_ms                  Engine::new / bind_pdfium finished
   ui_engine_created_ms            Engine::new returned in main (font warmup continues)
   pdfium_sha256                   SHA-256 of the bound libpdfium.so
-The first-tile → startup gap is remaining visible tiles plus thumbs.";
+The first-tile → startup gap is remaining visible tiles plus thumbs.
+OPENPDF_MEASURE_RSS_BREAKDOWN=1 prints smaps_rollup + top 15 mappings
+(heap, libpdfium, GTK/adw, icon theme, fontconfig, cairo) at peak RSS.
+OPENPDF_TILE_CACHE_BYTES overrides the Engine RGBA cache cap (default 16 MiB).";
 
 fn create_engine() -> Option<openpdf_core::Engine> {
     let engine = openpdf_core::Engine::new().ok();
@@ -142,6 +145,10 @@ fn main() {
     let mut args = std::env::args().skip(1);
     match args.next().as_deref() {
         Some("--measure") => {
+            // Isolate + RSS caps before Engine::new so PDFium/Pango see the
+            // tiny fontconfig and OPENPDF_TILE_CACHE_BYTES. Harmless without #50.
+            let isolate = measure::isolate_xdg();
+            measure::apply_measure_rss_caps(&isolate);
             // Engine::new is ~4 ms (bind + spawn). Font warmup continues on the
             // render thread and overlaps GTK activate. Do not wait for it here.
             let engine = create_engine();

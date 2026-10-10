@@ -7,7 +7,8 @@ use crate::measure::{MIN_THUMB_TILES, MIN_VISIBLE_TILES};
 use crate::session::Opened;
 use crate::settings::{PageLayoutMode, Settings, ZoomMode};
 use crate::tiles::{
-    layout_continuous, layout_single, visible_tiles, PageLayout, TileKey, DEFAULT_TILE_SIZE,
+    layout_continuous, layout_single, thumb_request_viewport, visible_tiles, PageLayout, TileKey,
+    DEFAULT_TILE_SIZE,
 };
 use crate::{Lang, PageSize};
 use gtk::cairo;
@@ -19,7 +20,7 @@ use openpdf_core::Priority;
 
 const PADDING: f64 = 18.0;
 const GAP: f64 = 14.0;
-const THUMB_WIDTH: f64 = 132.0;
+const THUMB_WIDTH: f64 = 96.0;
 
 struct Shared {
     doc: Rc<Opened>,
@@ -104,16 +105,16 @@ impl DocumentView {
     pub fn rotate_current(&self, delta: i32) -> Result<(), String> {
         self.shared
             .doc
-            .rotate(self.shared.current_page.get(), delta)
+            .rotate_local(self.shared.current_page.get(), delta)
             .map_err(|e| e.to_string())?;
-        self.relayout();
+        self.rebind_off_thread();
         Ok(())
     }
 
     pub fn delete_current(&self) -> Result<(), String> {
         self.shared
             .doc
-            .delete_page(self.shared.current_page.get())
+            .delete_page_local(self.shared.current_page.get())
             .map_err(|e| e.to_string())?;
         let n = self.shared.doc.page_count() as u32;
         if n > 0 {
@@ -121,24 +122,45 @@ impl DocumentView {
                 .current_page
                 .set(self.shared.current_page.get().min(n - 1));
         }
-        self.relayout();
+        self.rebind_off_thread();
         Ok(())
     }
 
     pub fn undo(&self) -> Result<bool, String> {
-        let changed = self.shared.doc.undo().map_err(|e| e.to_string())?;
+        let changed = self.shared.doc.undo_local().map_err(|e| e.to_string())?;
         if changed {
-            self.relayout();
+            self.rebind_off_thread();
         }
         Ok(changed)
     }
 
     pub fn redo(&self) -> Result<bool, String> {
-        let changed = self.shared.doc.redo().map_err(|e| e.to_string())?;
+        let changed = self.shared.doc.redo_local().map_err(|e| e.to_string())?;
         if changed {
-            self.relayout();
+            self.rebind_off_thread();
         }
         Ok(changed)
+    }
+
+    fn rebind_off_thread(&self) {
+        let Some(engine) = self.shared.doc.engine() else {
+            self.relayout();
+            return;
+        };
+        let Some(doc) = self.shared.doc.clone_document() else {
+            self.relayout();
+            return;
+        };
+        let pages = self.pages_area.clone();
+        let thumbs = self.thumbs_area.clone();
+        crate::bind::spawn_engine_bind(
+            move || engine.refresh(&doc),
+            move |_| {
+                pages.queue_draw();
+                thumbs.queue_draw();
+            },
+        );
+        self.relayout();
     }
 
     pub fn refresh_lock_chrome(&self) {
@@ -699,15 +721,9 @@ fn thumb_tile_keys(view: &DocumentView) -> Vec<TileKey> {
     let layout = view.shared.thumb_layout.borrow();
     let vadj = view.thumbs_scroll.vadjustment();
     let allocated = vadj.page_size().max(view.thumbs_scroll.height() as f64);
-    // Before the strip is allocated (first frames / Xvfb) `page_size` is 0, so
-    // a 1 px viewport would request only page 1 and the rest never appear.
-    let cover_all = layout.pages.len() <= 32 || allocated < 32.0;
-    let view_y = if cover_all { 0.0 } else { vadj.value() };
-    let view_h = if cover_all {
-        layout.content_height.max(1.0)
-    } else {
-        allocated.max(1.0)
-    };
+    // Before the strip is allocated (first frames / Xvfb) `page_size` is 0.
+    // Request an ~800 px strip (MIN_THUMB_TILES), not every page.
+    let (view_y, view_h) = thumb_request_viewport(allocated, vadj.value(), layout.content_height);
     let sizes = view.shared.doc.pages();
     let zoom = sizes.first().map(|s| THUMB_WIDTH / s.width).unwrap_or(0.2);
     visible_tiles(
@@ -734,8 +750,14 @@ fn paint_pages(cr: &cairo::Context, view: &DocumentView) {
         *view.shared.last_visible.borrow_mut() = keys.clone();
     }
     view.shared.doc.request_tiles(&keys, Priority::Visible);
-    let preview: Vec<TileKey> = keys.iter().map(|k| k.preview()).collect();
-    view.shared.doc.request_tiles(&preview, Priority::Adjacent);
+    // Adjacent previews wait until a real tile has painted so they do not
+    // compete with first-tile / startup. `--measure` skips them entirely
+    // (visible tiles + MIN_THUMB_TILES already fill the budget).
+    if crate::measure::ui_first_tile_painted_ms() > 0 && !crate::measure::measure_rss_caps_applied()
+    {
+        let preview: Vec<TileKey> = keys.iter().map(|k| k.preview()).collect();
+        view.shared.doc.request_tiles(&preview, Priority::Adjacent);
+    }
 
     for page in &layout.pages {
         cr.set_source_rgba(0.0, 0.0, 0.0, 0.18);

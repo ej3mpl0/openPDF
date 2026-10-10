@@ -14,7 +14,7 @@ use zeroize::Zeroizing;
 use super::cache::TileCache;
 use super::pdfium::{self as pdfium_bind};
 use super::queue::RenderQueue;
-use super::{Raster, SearchHit, Tile, TileEvent, TileKey, TileRequest, DEFAULT_CACHE_BYTES};
+use super::{Raster, SearchHit, Tile, TileEvent, TileKey, TileRequest};
 
 enum WorkerCmd {
     Bind {
@@ -79,7 +79,7 @@ fn start_worker(bundled: Option<&Path>) -> Result<WorkerHandle> {
     let pdfium = pdfium_bind::bind_pdfium(bundled)?;
     let (cmd_tx, cmd_rx) = mpsc::channel();
     let (event_tx, event_rx) = mpsc::channel();
-    let cache = Arc::new(Mutex::new(TileCache::new(DEFAULT_CACHE_BYTES)));
+    let cache = Arc::new(Mutex::new(TileCache::new(super::tile_cache_bytes())));
     let cache_thread = Arc::clone(&cache);
     let event_tx_thread = event_tx.clone();
 
@@ -361,12 +361,14 @@ impl Engine {
         }
     }
 
+    /// Open and bind. Blocks on the render worker (see [`Self::bind`]).
     pub fn open(&self, path: impl AsRef<Path>) -> Result<Document> {
         let doc = Document::open(path)?;
         self.bind(&doc)?;
         Ok(doc)
     }
 
+    /// Open with a password and bind. Blocks on the render worker (see [`Self::bind`]).
     pub fn open_with_password(
         &self,
         path: impl AsRef<Path>,
@@ -377,12 +379,19 @@ impl Engine {
         Ok(doc)
     }
 
+    /// Bind in-memory bytes. Blocks on the render worker (see [`Self::bind`]).
     pub fn open_bytes(&self, bytes: Vec<u8>, path: Option<std::path::PathBuf>) -> Result<Document> {
         let doc = Document::from_bytes(bytes, path)?;
         self.bind(&doc)?;
         Ok(doc)
     }
 
+    /// Send the document to the render worker and **block until it is bound**.
+    ///
+    /// The caller waits on `rx.recv()`. If the worker is still in the
+    /// synchronous font warmup this can take ~200 ms cold. GTK and FFI host
+    /// UIs must call this from a worker (`gio::spawn_blocking` / a background
+    /// queue), never the UI thread.
     pub fn bind(&self, doc: &Document) -> Result<()> {
         let bytes = if doc.is_dirty() {
             doc.to_bytes()?
@@ -392,6 +401,7 @@ impl Engine {
         self.bind_bytes(doc.id(), bytes, doc.password().get().cloned())
     }
 
+    /// Re-bind after an edit. Same contract as [`Self::bind`]: not for the UI thread.
     pub fn refresh(&self, doc: &Document) -> Result<()> {
         self.bind(doc)
     }

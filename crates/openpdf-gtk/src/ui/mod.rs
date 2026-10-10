@@ -122,7 +122,8 @@ pub fn run_measure(pages: usize, engine: Option<Engine>) -> i32 {
         eprintln!("measure: {}", measure::display_hint());
         return 1;
     }
-    measure::isolate_xdg();
+    let isolate = measure::isolate_xdg();
+    measure::apply_measure_rss_caps(&isolate);
     let pages = if pages == 0 {
         DEFAULT_MEASURE_PAGES
     } else {
@@ -153,6 +154,7 @@ pub fn run_measure(pages: usize, engine: Option<Engine>) -> i32 {
             measure::warmup_fontconfig_pango();
             measure::mark_pango_init();
             adw::init().ok();
+            restrict_measure_icon_theme();
             register_icons();
             ui_adw_init_ms.set(measure::process_elapsed_ms());
             load_css();
@@ -207,12 +209,18 @@ pub fn run_measure(pages: usize, engine: Option<Engine>) -> i32 {
 
     let _ = app.run_with_args::<&str>(&[]);
     if timed_out.get() {
+        if let Some(breakdown) = measure::take_rss_breakdown() {
+            eprint!("{breakdown}");
+        }
         return 1;
     }
     let result = report.borrow().clone();
     match result {
         Some(r) => {
             print!("{r}");
+            if let Some(breakdown) = measure::take_rss_breakdown() {
+                print!("{breakdown}");
+            }
             i32::from(!r.ok)
         }
         None => {
@@ -256,6 +264,7 @@ fn watch_measure(
 
         if let Some(view) = win.current_view() {
             if view.opened().is_placeholder() {
+                measure::capture_rss_breakdown_if_enabled();
                 finish_measure(
                     &app,
                     &report,
@@ -292,6 +301,7 @@ fn watch_measure(
                 && ready.visible_ready >= MIN_VISIBLE_TILES
                 && ready.thumb_ready >= MIN_THUMB_TILES
             {
+                measure::capture_rss_breakdown_if_enabled();
                 finish_measure(
                     &app,
                     &report,
@@ -345,6 +355,7 @@ fn watch_measure(
                 }
                 None => (0, 0, 0, 0),
             };
+            measure::capture_rss_breakdown_if_enabled();
             eprintln!(
                 "{}",
                 measure::format_measure_timeout(timeout_ms, vr, vt, tr, tt)
@@ -400,6 +411,20 @@ fn install_accels(app: &adw::Application) {
     app.set_accels_for_action("win.rotate", &["<Ctrl>r"]);
     app.set_accels_for_action("win.undo", &["<Ctrl>z"]);
     app.set_accels_for_action("win.redo", &["<Ctrl><Shift>z"]);
+}
+
+/// Keep `--measure` from walking every installed icon theme (the usual
+/// 15–20 MiB host delta vs a thin VM). Buttons may render without icons.
+fn restrict_measure_icon_theme() {
+    let Some(display) = gtk::gdk::Display::default() else {
+        return;
+    };
+    let theme = gtk::IconTheme::for_display(&display);
+    if let Ok(dir) = std::env::var("XDG_DATA_HOME") {
+        let icons = std::path::PathBuf::from(dir).join("icons");
+        let _ = std::fs::create_dir_all(icons.join("hicolor"));
+        theme.set_search_path(&[icons.as_path()]);
+    }
 }
 
 fn register_icons() {

@@ -45,6 +45,7 @@ pub fn sibling_signed_path(src: &Path) -> PathBuf {
 
 impl Session {
     pub fn open(engine: &Engine, path: &Path) -> Result<Self, BackendError> {
+        crate::bind::assert_off_gtk_thread();
         let doc = engine.open(path).map_err(core_err)?;
         Ok(Self::from_doc(engine.clone(), doc, path))
     }
@@ -54,6 +55,7 @@ impl Session {
         path: &Path,
         password: Zeroizing<String>,
     ) -> Result<Self, BackendError> {
+        crate::bind::assert_off_gtk_thread();
         let doc = engine
             .open_with_password(path, password)
             .map_err(core_err)?;
@@ -117,19 +119,61 @@ impl Session {
         self.doc.borrow().is_encrypted()
     }
 
-    /// Run a core tool that returns a replacement document, then rebind the engine.
-    pub fn apply_tool(
+    pub fn engine(&self) -> Engine {
+        self.engine.clone()
+    }
+
+    pub fn clone_document(&self) -> Document {
+        self.doc.borrow().clone()
+    }
+
+    pub fn adopt_document(&self, old_id: DocumentId, new: Document) {
+        let _ = self.engine.close(old_id);
+        *self.doc.borrow_mut() = new;
+    }
+
+    pub fn adopt_reopened(&self, old_id: DocumentId, new: Document, path: PathBuf) {
+        self.adopt_document(old_id, new);
+        *self.title.borrow_mut() = path
+            .file_name()
+            .and_then(|s| s.to_str())
+            .unwrap_or("document.pdf")
+            .to_string();
+        *self.path.borrow_mut() = Some(path);
+    }
+
+    pub fn signed_dest(&self) -> PathBuf {
+        match self.path.borrow().as_ref() {
+            Some(p) => sibling_signed_path(p),
+            None => {
+                std::env::temp_dir().join(format!("document-signed-{}.pdf", std::process::id()))
+            }
+        }
+    }
+
+    pub fn apply_tool_prepare(
         &self,
         f: impl FnOnce(&Document) -> openpdf_core::Result<Document>,
-    ) -> Result<(), BackendError> {
+    ) -> Result<(DocumentId, Document), BackendError> {
         let old_id = self.doc.borrow().id();
         let new = {
             let doc = self.doc.borrow();
             f(&doc).map_err(core_err)?
         };
+        Ok((old_id, new))
+    }
+
+    /// Run a core tool that returns a replacement document, then rebind the engine.
+    ///
+    /// Must not run on the GTK thread (`Engine::bind` waits on the render worker).
+    pub fn apply_tool(
+        &self,
+        f: impl FnOnce(&Document) -> openpdf_core::Result<Document>,
+    ) -> Result<(), BackendError> {
+        let (old_id, new) = self.apply_tool_prepare(f)?;
+        crate::bind::assert_off_gtk_thread();
         self.engine.bind(&new).map_err(core_err)?;
-        let _ = self.engine.close(old_id);
-        *self.doc.borrow_mut() = new;
+        self.adopt_document(old_id, new);
         Ok(())
     }
 
@@ -171,52 +215,73 @@ impl Session {
         self.doc.borrow().outline().unwrap_or_default()
     }
 
-    pub fn rotate(&self, page: u32, delta: i32) -> Result<(), BackendError> {
+    pub fn rebind(&self) -> Result<(), BackendError> {
+        crate::bind::assert_off_gtk_thread();
+        self.engine.refresh(&self.doc.borrow()).map_err(core_err)
+    }
+
+    pub fn rotate_local(&self, page: u32, delta: i32) -> Result<(), BackendError> {
         self.ensure_writable()?;
-        let mut doc = self.doc.borrow_mut();
-        doc.rotate_page(page, delta).map_err(core_err)?;
-        self.engine.refresh(&doc).map_err(core_err)
+        self.doc
+            .borrow_mut()
+            .rotate_page(page, delta)
+            .map_err(core_err)
+    }
+
+    pub fn rotate(&self, page: u32, delta: i32) -> Result<(), BackendError> {
+        self.rotate_local(page, delta)?;
+        self.rebind()
+    }
+
+    pub fn delete_page_local(&self, page: u32) -> Result<(), BackendError> {
+        self.ensure_writable()?;
+        self.doc.borrow_mut().delete_page(page).map_err(core_err)
     }
 
     pub fn delete_page(&self, page: u32) -> Result<(), BackendError> {
-        self.ensure_writable()?;
-        let mut doc = self.doc.borrow_mut();
-        doc.delete_page(page).map_err(core_err)?;
-        self.engine.refresh(&doc).map_err(core_err)
+        self.delete_page_local(page)?;
+        self.rebind()
     }
 
     pub fn move_page(&self, from: u32, to: u32) -> Result<(), BackendError> {
         self.ensure_writable()?;
-        let mut doc = self.doc.borrow_mut();
-        doc.move_page(from, to).map_err(core_err)?;
-        self.engine.refresh(&doc).map_err(core_err)
+        self.doc
+            .borrow_mut()
+            .move_page(from, to)
+            .map_err(core_err)?;
+        self.rebind()
+    }
+
+    pub fn undo_local(&self) -> Result<bool, BackendError> {
+        self.ensure_writable()?;
+        self.doc.borrow_mut().undo().map_err(core_err)
     }
 
     pub fn undo(&self) -> Result<bool, BackendError> {
-        self.ensure_writable()?;
-        let mut doc = self.doc.borrow_mut();
-        let changed = doc.undo().map_err(core_err)?;
+        let changed = self.undo_local()?;
         if changed {
-            self.engine.refresh(&doc).map_err(core_err)?;
+            self.rebind()?;
         }
         Ok(changed)
     }
 
-    pub fn redo(&self) -> Result<bool, BackendError> {
+    pub fn redo_local(&self) -> Result<bool, BackendError> {
         self.ensure_writable()?;
-        let mut doc = self.doc.borrow_mut();
-        let changed = doc.redo().map_err(core_err)?;
+        self.doc.borrow_mut().redo().map_err(core_err)
+    }
+
+    pub fn redo(&self) -> Result<bool, BackendError> {
+        let changed = self.redo_local()?;
         if changed {
-            self.engine.refresh(&doc).map_err(core_err)?;
+            self.rebind()?;
         }
         Ok(changed)
     }
 
     pub fn execute(&self, command: Command) -> Result<(), BackendError> {
         self.ensure_writable()?;
-        let mut doc = self.doc.borrow_mut();
-        doc.execute(command).map_err(core_err)?;
-        self.engine.refresh(&doc).map_err(core_err)
+        self.doc.borrow_mut().execute(command).map_err(core_err)?;
+        self.rebind()
     }
 
     pub fn to_bytes(&self) -> Result<Vec<u8>, BackendError> {
@@ -261,6 +326,7 @@ impl Session {
     ) -> Result<(), BackendError> {
         let old_id = self.doc.borrow().id();
         let mut doc = self.doc.borrow_mut();
+        crate::bind::assert_off_gtk_thread();
         doc.apply_signer(signer, request).map_err(core_err)?;
         self.engine.bind(&doc).map_err(core_err)?;
         let _ = self.engine.close(old_id);
@@ -268,6 +334,7 @@ impl Session {
     }
 
     pub fn apply_signed_bytes(&self, signed: Vec<u8>) -> Result<(), BackendError> {
+        crate::bind::assert_off_gtk_thread();
         let old_id = self.doc.borrow().id();
         let path = self.path.borrow().clone();
         let doc = Document::from_bytes(signed, path).map_err(core_err)?;
@@ -287,14 +354,15 @@ impl Session {
             }
         };
         std::fs::write(&dest, &signed)?;
+        crate::bind::assert_off_gtk_thread();
         self.reopen(&dest)?;
         Ok(dest)
     }
 
     pub fn reopen(&self, path: &Path) -> Result<(), BackendError> {
+        crate::bind::assert_off_gtk_thread();
         let old_id = self.doc.borrow().id();
         let doc = self.engine.open(path).map_err(core_err)?;
-        self.engine.bind(&doc).map_err(core_err)?;
         let _ = self.engine.close(old_id);
         *self.doc.borrow_mut() = doc;
         *self.path.borrow_mut() = Some(path.to_path_buf());
@@ -486,6 +554,13 @@ impl Opened {
         }
     }
 
+    pub fn doc_id(&self) -> DocumentId {
+        match self {
+            Self::Core(s) => s.doc_id(),
+            Self::Mock(_) => DocumentId(0),
+        }
+    }
+
     pub fn pages(&self) -> Vec<PageSize> {
         match self {
             Self::Core(s) => s.pages(),
@@ -641,9 +716,41 @@ impl Opened {
         }
     }
 
+    pub fn engine(&self) -> Option<Engine> {
+        match self {
+            Self::Core(s) => Some(s.engine()),
+            Self::Mock(_) => None,
+        }
+    }
+
+    pub fn clone_document(&self) -> Option<Document> {
+        match self {
+            Self::Core(s) => Some(s.clone_document()),
+            Self::Mock(_) => None,
+        }
+    }
+
+    pub fn rotate_local(&self, page: u32, delta: i32) -> Result<(), BackendError> {
+        match self {
+            Self::Core(s) => s.rotate_local(page, delta),
+            Self::Mock(_) => Err(BackendError::Invalid(openpdf_core::tr(
+                "Page edits need a real document.",
+            ))),
+        }
+    }
+
     pub fn rotate(&self, page: u32, delta: i32) -> Result<(), BackendError> {
         match self {
             Self::Core(s) => s.rotate(page, delta),
+            Self::Mock(_) => Err(BackendError::Invalid(openpdf_core::tr(
+                "Page edits need a real document.",
+            ))),
+        }
+    }
+
+    pub fn delete_page_local(&self, page: u32) -> Result<(), BackendError> {
+        match self {
+            Self::Core(s) => s.delete_page_local(page),
             Self::Mock(_) => Err(BackendError::Invalid(openpdf_core::tr(
                 "Page edits need a real document.",
             ))),
@@ -659,9 +766,23 @@ impl Opened {
         }
     }
 
+    pub fn undo_local(&self) -> Result<bool, BackendError> {
+        match self {
+            Self::Core(s) => s.undo_local(),
+            Self::Mock(_) => Ok(false),
+        }
+    }
+
     pub fn undo(&self) -> Result<bool, BackendError> {
         match self {
             Self::Core(s) => s.undo(),
+            Self::Mock(_) => Ok(false),
+        }
+    }
+
+    pub fn redo_local(&self) -> Result<bool, BackendError> {
+        match self {
+            Self::Core(s) => s.redo_local(),
             Self::Mock(_) => Ok(false),
         }
     }
@@ -729,6 +850,27 @@ impl Opened {
                 let _ = signed;
                 Ok(())
             }
+        }
+    }
+
+    pub fn signed_dest(&self) -> Option<PathBuf> {
+        match self {
+            Self::Core(s) => Some(s.signed_dest()),
+            Self::Mock(s) => Some(s.path().map(sibling_signed_path).unwrap_or_else(|| {
+                std::env::temp_dir().join(format!("document-signed-{}.pdf", std::process::id()))
+            })),
+        }
+    }
+
+    pub fn adopt_document(&self, old_id: DocumentId, new: Document) {
+        if let Self::Core(s) = self {
+            s.adopt_document(old_id, new);
+        }
+    }
+
+    pub fn adopt_reopened(&self, old_id: DocumentId, new: Document, path: PathBuf) {
+        if let Self::Core(s) = self {
+            s.adopt_reopened(old_id, new, path);
         }
     }
 

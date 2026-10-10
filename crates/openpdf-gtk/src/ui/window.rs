@@ -7,6 +7,7 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 
 use crate::backend::MockDocument;
+use crate::bind::{present_busy, spawn_engine_bind};
 use crate::i18n::{format_core_error, t};
 use crate::session::{sample_pdf_path, MockView, Opened, Session};
 use crate::settings::{self, Settings};
@@ -409,37 +410,66 @@ fn ensure_engine(ctx: &Ctx) -> Option<Engine> {
 fn open_path_inner(ctx: &Ctx, path: &Path) {
     crate::measure::mark_doc_load_start();
     let path_buf = path.to_path_buf();
-    if let Some(engine) = ensure_engine(ctx) {
-        match engine.open(&path_buf) {
-            Ok(doc) => finish_open(
-                ctx,
-                Opened::Core(Session::from_doc(engine, doc, &path_buf)),
-                &path_buf,
-            ),
-            Err(Error::PasswordRequired) => {
-                let lang = ctx.settings.borrow().lang();
-                let parent = ctx.window.clone();
-                let ctx = ctx.clone();
-                let engine = engine.clone();
-                let dest = path_buf.clone();
-                password::prompt(&parent, lang, &path_buf, move |pw| {
-                    let doc = engine.open_with_password(&dest, pw)?;
-                    finish_open(
-                        &ctx,
-                        Opened::Core(Session::from_doc(engine.clone(), doc, &dest)),
-                        &dest,
-                    );
-                    Ok(())
-                });
-            }
-            Err(e) => show_toast(&ctx.toast, &format_core_error(&e)),
+    let Some(engine) = ensure_engine(ctx) else {
+        match MockDocument::open(&path_buf) {
+            Ok(doc) => finish_open(ctx, Opened::Mock(MockView::new(doc)), &path_buf),
+            Err(e) => show_toast(&ctx.toast, &e.to_string()),
         }
         return;
-    }
-    match MockDocument::open(&path_buf) {
-        Ok(doc) => finish_open(ctx, Opened::Mock(MockView::new(doc)), &path_buf),
-        Err(e) => show_toast(&ctx.toast, &e.to_string()),
-    }
+    };
+    let lang = ctx.settings.borrow().lang();
+    let busy = present_busy(&ctx.window, lang, t(lang, "Open PDF"));
+    let ctx = ctx.clone();
+    spawn_engine_bind(
+        move || match engine.open(&path_buf) {
+            Ok(doc) => Ok((engine, doc, path_buf)),
+            Err(e) => Err((engine, e, path_buf)),
+        },
+        move |result| {
+            busy.close();
+            match result {
+                Ok((engine, doc, path_buf)) => finish_open(
+                    &ctx,
+                    Opened::Core(Session::from_doc(engine, doc, &path_buf)),
+                    &path_buf,
+                ),
+                Err((engine, Error::PasswordRequired, path_buf)) => {
+                    prompt_password_open(&ctx, engine, path_buf)
+                }
+                Err((_, e, _)) => show_toast(&ctx.toast, &format_core_error(&e)),
+            }
+        },
+    );
+}
+
+fn prompt_password_open(ctx: &Ctx, engine: Engine, dest: std::path::PathBuf) {
+    let lang = ctx.settings.borrow().lang();
+    let parent = ctx.window.clone();
+    let ctx = ctx.clone();
+    let dest_prompt = dest.clone();
+    password::prompt(&parent, lang, &dest_prompt, move |pw, done| {
+        let engine = engine.clone();
+        let dest = dest.clone();
+        let ctx = ctx.clone();
+        spawn_engine_bind(
+            move || {
+                engine
+                    .open_with_password(&dest, pw)
+                    .map(|doc| (engine, doc, dest))
+            },
+            move |result| match result {
+                Ok((engine, doc, dest)) => {
+                    finish_open(
+                        &ctx,
+                        Opened::Core(Session::from_doc(engine, doc, &dest)),
+                        &dest,
+                    );
+                    done(Ok(()));
+                }
+                Err(e) => done(Err(e)),
+            },
+        );
+    });
 }
 
 fn finish_open(ctx: &Ctx, opened: Opened, path: &Path) {
@@ -644,6 +674,7 @@ fn sign_on_worker(
 
     let overlay = overlay.clone();
     let tab_view = tab_view.clone();
+    let parent = parent.clone();
     glib::timeout_add_local(std::time::Duration::from_millis(16), move || {
         match rx.try_recv() {
             Ok(Ok(Ok(signed))) => {
@@ -651,33 +682,15 @@ fn sign_on_worker(
                 if cancelled.load(Ordering::SeqCst) {
                     return glib::ControlFlow::Break;
                 }
-                match view.opened().persist_signed(signed) {
-                    Ok(dest) => {
-                        view.refresh_lock_chrome();
-                        view.ensure_laid_out();
-                        view.request_first_tile();
-                        if let Some(page) = tab_view.selected_page() {
-                            page.set_title(&view.title());
-                            page.set_tooltip(&dest.to_string_lossy());
-                        }
-                        show_toast(
-                            &overlay,
-                            &tr_args(
-                                "Saved signed PDF to {path}",
-                                &[("path", &dest.display().to_string())],
-                            ),
-                        );
-                        show_toast(
-                            &overlay,
-                            t(
-                                lang,
-                                "Signed document — read-only. Rotate, delete and reorder are disabled.",
-                            ),
-                        );
-                        maybe_show_verify(&overlay, verifier.clone(), view.opened(), lang);
-                    }
-                    Err(e) => show_toast(&overlay, &e.to_string()),
-                }
+                persist_signed_off_thread(
+                    &parent,
+                    &overlay,
+                    &tab_view,
+                    lang,
+                    view.clone(),
+                    verifier.clone(),
+                    signed,
+                );
                 glib::ControlFlow::Break
             }
             Ok(Ok(Err(e))) => {
@@ -704,4 +717,81 @@ fn sign_on_worker(
             }
         }
     });
+}
+
+fn persist_signed_off_thread(
+    parent: &adw::ApplicationWindow,
+    overlay: &adw::ToastOverlay,
+    tab_view: &adw::TabView,
+    lang: crate::Lang,
+    view: Rc<DocumentView>,
+    verifier: Arc<dyn Verifier>,
+    signed: Vec<u8>,
+) {
+    let Some(engine) = view.opened().engine() else {
+        match view.opened().persist_signed(signed) {
+            Ok(dest) => {
+                view.refresh_lock_chrome();
+                finish_signed_toast(overlay, tab_view, lang, &view, verifier, dest);
+            }
+            Err(e) => show_toast(overlay, &e.to_string()),
+        }
+        return;
+    };
+    let dest = view.opened().signed_dest().unwrap_or_else(|| {
+        std::env::temp_dir().join(format!("document-signed-{}.pdf", std::process::id()))
+    });
+    let old_id = view.opened().doc_id();
+    let busy = present_busy(parent, lang, t(lang, "Open PDF"));
+    let overlay = overlay.clone();
+    let tab_view = tab_view.clone();
+    spawn_engine_bind(
+        move || {
+            std::fs::write(&dest, &signed).map_err(|e| e.to_string())?;
+            let doc = engine.open(&dest).map_err(|e| format_core_error(&e))?;
+            Ok::<_, String>((dest, old_id, doc))
+        },
+        move |result| {
+            busy.close();
+            match result {
+                Ok((dest, old_id, doc)) => {
+                    view.opened().adopt_reopened(old_id, doc, dest.clone());
+                    view.refresh_lock_chrome();
+                    view.ensure_laid_out();
+                    view.request_first_tile();
+                    finish_signed_toast(&overlay, &tab_view, lang, &view, verifier, dest);
+                }
+                Err(e) => show_toast(&overlay, &e),
+            }
+        },
+    );
+}
+
+fn finish_signed_toast(
+    overlay: &adw::ToastOverlay,
+    tab_view: &adw::TabView,
+    lang: crate::Lang,
+    view: &DocumentView,
+    verifier: Arc<dyn Verifier>,
+    dest: std::path::PathBuf,
+) {
+    if let Some(page) = tab_view.selected_page() {
+        page.set_title(&view.title());
+        page.set_tooltip(&dest.to_string_lossy());
+    }
+    show_toast(
+        overlay,
+        &tr_args(
+            "Saved signed PDF to {path}",
+            &[("path", &dest.display().to_string())],
+        ),
+    );
+    show_toast(
+        overlay,
+        t(
+            lang,
+            "Signed document — read-only. Rotate, delete and reorder are disabled.",
+        ),
+    );
+    maybe_show_verify(overlay, verifier, view.opened(), lang);
 }

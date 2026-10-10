@@ -1,6 +1,7 @@
 // SPDX-License-Identifier: MPL-2.0
 use std::fmt::{Display, Formatter};
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::OnceLock;
 use std::time::Instant;
 
@@ -338,6 +339,383 @@ pub fn peak_rss_bytes() -> u64 {
     proc_status_bytes("VmHWM:").max(current_rss_bytes())
 }
 
+/// Opt-in `--measure` RSS dump. Any value except empty / `0` / `false` / `off`.
+pub fn rss_breakdown_enabled() -> bool {
+    match std::env::var("OPENPDF_MEASURE_RSS_BREAKDOWN") {
+        Ok(v) => {
+            let v = v.trim();
+            !v.is_empty()
+                && v != "0"
+                && !v.eq_ignore_ascii_case("false")
+                && !v.eq_ignore_ascii_case("off")
+        }
+        Err(_) => false,
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum RssClass {
+    Heap,
+    Pdfium,
+    Gtk,
+    Adw,
+    Icon,
+    Font,
+    Cairo,
+    Other,
+}
+
+impl RssClass {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Heap => "heap",
+            Self::Pdfium => "libpdfium",
+            Self::Gtk => "gtk",
+            Self::Adw => "adw",
+            Self::Icon => "icon",
+            Self::Font => "fontconfig",
+            Self::Cairo => "cairo",
+            Self::Other => "other",
+        }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SmapsMapping {
+    pub pathname: String,
+    pub rss_kb: u64,
+    pub pss_kb: u64,
+    pub class: RssClass,
+}
+
+/// Classify a `/proc/self/smaps` pathname into the host-delta buckets.
+pub fn classify_smaps_path(pathname: &str) -> RssClass {
+    let p = pathname.to_ascii_lowercase();
+    if p.contains("pdfium") {
+        return RssClass::Pdfium;
+    }
+    if p.contains("/icons/")
+        || p.contains("icon-theme")
+        || p.contains("icon_theme")
+        || p.contains(".icon-cache")
+        || p.contains("icon-theme.cache")
+    {
+        return RssClass::Icon;
+    }
+    if p.contains("fontconfig")
+        || p.contains("/fonts/")
+        || p.ends_with(".ttf")
+        || p.ends_with(".otf")
+        || p.ends_with(".ttc")
+        || p.ends_with(".pfb")
+        || p.contains("libpango")
+        || p.contains("libharfbuzz")
+        || p.contains("libfreetype")
+    {
+        return RssClass::Font;
+    }
+    if p.contains("libcairo") || p.contains("libpixman") {
+        return RssClass::Cairo;
+    }
+    if p.contains("libadwaita") {
+        return RssClass::Adw;
+    }
+    if p.contains("libgtk")
+        || p.contains("libgdk-4")
+        || p.contains("libgdk_pixbuf")
+        || p.contains("libgsk")
+        || p.contains("libgraphene")
+    {
+        return RssClass::Gtk;
+    }
+    if pathname.is_empty()
+        || pathname == "[heap]"
+        || pathname == "[stack]"
+        || pathname.starts_with("[anon")
+        || pathname.starts_with("[anon:")
+        || (pathname.starts_with('[') && !pathname.contains('/'))
+    {
+        return RssClass::Heap;
+    }
+    RssClass::Other
+}
+
+pub fn parse_smaps_rollup(text: &str) -> Vec<(String, u64)> {
+    let mut out = Vec::new();
+    for line in text.lines() {
+        let Some((key, rest)) = line.split_once(':') else {
+            continue;
+        };
+        if key.eq_ignore_ascii_case("VmFlags") {
+            continue;
+        }
+        let kb = rest
+            .split_whitespace()
+            .next()
+            .and_then(|s| s.parse().ok())
+            .unwrap_or(0);
+        out.push((key.to_string(), kb));
+    }
+    out
+}
+
+pub fn parse_smaps(text: &str) -> Vec<SmapsMapping> {
+    let mut maps = Vec::new();
+    let mut pathname = String::new();
+    let mut rss_kb = 0u64;
+    let mut pss_kb = 0u64;
+    let mut in_map = false;
+
+    let flush = |pathname: &mut String,
+                 rss_kb: &mut u64,
+                 pss_kb: &mut u64,
+                 maps: &mut Vec<SmapsMapping>| {
+        if pathname.is_empty() && *rss_kb == 0 && *pss_kb == 0 {
+            return;
+        }
+        let class = classify_smaps_path(pathname);
+        maps.push(SmapsMapping {
+            pathname: std::mem::take(pathname),
+            rss_kb: *rss_kb,
+            pss_kb: *pss_kb,
+            class,
+        });
+        *rss_kb = 0;
+        *pss_kb = 0;
+    };
+
+    for line in text.lines() {
+        if is_smaps_header(line) {
+            if in_map {
+                flush(&mut pathname, &mut rss_kb, &mut pss_kb, &mut maps);
+            }
+            pathname = smaps_pathname(line);
+            rss_kb = 0;
+            pss_kb = 0;
+            in_map = true;
+            continue;
+        }
+        if !in_map {
+            continue;
+        }
+        if let Some(rest) = line.strip_prefix("Rss:") {
+            rss_kb = rest
+                .split_whitespace()
+                .next()
+                .and_then(|s| s.parse().ok())
+                .unwrap_or(0);
+        } else if let Some(rest) = line.strip_prefix("Pss:") {
+            pss_kb = rest
+                .split_whitespace()
+                .next()
+                .and_then(|s| s.parse().ok())
+                .unwrap_or(0);
+        }
+    }
+    if in_map {
+        flush(&mut pathname, &mut rss_kb, &mut pss_kb, &mut maps);
+    }
+    maps
+}
+
+fn is_smaps_header(line: &str) -> bool {
+    let Some((range, _)) = line.split_once(' ') else {
+        return false;
+    };
+    range.contains('-') && !line.contains(" kB") && !line.starts_with("VmFlags:")
+}
+
+fn smaps_pathname(header: &str) -> String {
+    let mut parts = header.split_whitespace();
+    // address perms offset dev inode [pathname...]
+    for _ in 0..5 {
+        if parts.next().is_none() {
+            return String::new();
+        }
+    }
+    parts.collect::<Vec<_>>().join(" ")
+}
+
+/// Coalesce same-class / same-path RSS, then take the top `n` by Rss.
+pub fn top_smaps_mappings(maps: &[SmapsMapping], n: usize) -> Vec<SmapsMapping> {
+    let mut by_path: std::collections::BTreeMap<String, SmapsMapping> =
+        std::collections::BTreeMap::new();
+    for m in maps {
+        let key = if m.pathname.is_empty() {
+            format!("anon:{}", m.class.as_str())
+        } else {
+            m.pathname.clone()
+        };
+        by_path
+            .entry(key)
+            .and_modify(|e| {
+                e.rss_kb = e.rss_kb.saturating_add(m.rss_kb);
+                e.pss_kb = e.pss_kb.saturating_add(m.pss_kb);
+            })
+            .or_insert_with(|| m.clone());
+    }
+    let mut merged: Vec<SmapsMapping> = by_path.into_values().collect();
+    merged.sort_by(|a, b| {
+        b.rss_kb
+            .cmp(&a.rss_kb)
+            .then_with(|| a.pathname.cmp(&b.pathname))
+    });
+    merged.truncate(n);
+    merged
+}
+
+pub fn class_rss_kb(maps: &[SmapsMapping]) -> [(RssClass, u64); 8] {
+    let mut out = [
+        (RssClass::Heap, 0u64),
+        (RssClass::Pdfium, 0),
+        (RssClass::Gtk, 0),
+        (RssClass::Adw, 0),
+        (RssClass::Icon, 0),
+        (RssClass::Font, 0),
+        (RssClass::Cairo, 0),
+        (RssClass::Other, 0),
+    ];
+    for m in maps {
+        let slot = match m.class {
+            RssClass::Heap => 0,
+            RssClass::Pdfium => 1,
+            RssClass::Gtk => 2,
+            RssClass::Adw => 3,
+            RssClass::Icon => 4,
+            RssClass::Font => 5,
+            RssClass::Cairo => 6,
+            RssClass::Other => 7,
+        };
+        out[slot].1 = out[slot].1.saturating_add(m.rss_kb);
+    }
+    out
+}
+
+fn read_proc(path: &str) -> String {
+    std::fs::read_to_string(path).unwrap_or_default()
+}
+
+/// Snapshot `/proc/self/smaps_rollup` + top 15 mappings (merged by path).
+pub fn format_rss_breakdown() -> String {
+    format_rss_breakdown_from(
+        &read_proc("/proc/self/smaps_rollup"),
+        &read_proc("/proc/self/smaps"),
+    )
+}
+
+pub fn format_rss_breakdown_from(rollup: &str, smaps: &str) -> String {
+    let mut out = String::from("rss_breakdown=1\n");
+    for (key, kb) in parse_smaps_rollup(rollup) {
+        let slug = key
+            .chars()
+            .map(|c| {
+                if c.is_ascii_alphanumeric() {
+                    c.to_ascii_lowercase()
+                } else {
+                    '_'
+                }
+            })
+            .collect::<String>();
+        out.push_str(&format!("smaps_rollup_{slug}_kb={kb}\n"));
+    }
+    let maps = parse_smaps(smaps);
+    for (class, kb) in class_rss_kb(&maps) {
+        out.push_str(&format!("rss_class_{}_kb={kb}\n", class.as_str()));
+    }
+    for (i, m) in top_smaps_mappings(&maps, 15).into_iter().enumerate() {
+        let path = if m.pathname.is_empty() {
+            "[anon]".to_string()
+        } else {
+            m.pathname
+        };
+        out.push_str(&format!(
+            "rss_map_{}={} {} {}\n",
+            i + 1,
+            m.class.as_str(),
+            m.rss_kb,
+            path
+        ));
+    }
+    out
+}
+
+static RSS_BREAKDOWN: OnceLock<String> = OnceLock::new();
+
+/// Capture the peak-time smaps dump once (first call wins).
+pub fn capture_rss_breakdown_if_enabled() {
+    if !rss_breakdown_enabled() {
+        return;
+    }
+    let _ = RSS_BREAKDOWN.set(format_rss_breakdown());
+}
+
+pub fn take_rss_breakdown() -> Option<String> {
+    RSS_BREAKDOWN.get().cloned()
+}
+
+static MEASURE_RSS_CAPS: AtomicBool = AtomicBool::new(false);
+
+pub fn measure_rss_caps_applied() -> bool {
+    MEASURE_RSS_CAPS.load(Ordering::Relaxed)
+}
+
+/// DejaVu-only fontconfig so `--measure` RSS is not the host's full font set.
+const MEASURE_FONTS_CONF: &str = r#"<?xml version="1.0"?>
+<!DOCTYPE fontconfig SYSTEM "fonts.dtd">
+<fontconfig>
+  <dir>/usr/share/fonts/truetype/dejavu</dir>
+  <cachedir prefix="xdg">fontconfig</cachedir>
+  <alias>
+    <family>sans-serif</family>
+    <prefer><family>DejaVu Sans</family></prefer>
+  </alias>
+  <alias>
+    <family>serif</family>
+    <prefer><family>DejaVu Serif</family></prefer>
+  </alias>
+  <alias>
+    <family>monospace</family>
+    <prefer><family>DejaVu Sans Mono</family></prefer>
+  </alias>
+  <alias>
+    <family>Sans</family>
+    <prefer><family>DejaVu Sans</family></prefer>
+  </alias>
+</fontconfig>
+"#;
+
+/// Measure-only RSS caps. Call **before** `Engine::new` so PDFium/Pango see
+/// the tiny fontconfig and the 16 MiB tile-cache env.
+///
+/// Harmless without a display: only env + a fonts.conf in `isolate`.
+pub fn apply_measure_rss_caps(isolate: &Path) {
+    MEASURE_RSS_CAPS.store(true, Ordering::Relaxed);
+    let _ = std::fs::create_dir_all(isolate);
+    let fonts = isolate.join("fonts.conf");
+    if !fonts.exists() {
+        let _ = std::fs::write(&fonts, MEASURE_FONTS_CONF);
+    }
+    std::env::set_var("FONTCONFIG_FILE", &fonts);
+    std::env::set_var("FONTCONFIG_PATH", isolate);
+    std::env::set_var("XDG_CACHE_HOME", isolate);
+    std::env::set_var("XDG_DATA_HOME", isolate);
+    if std::env::var_os("OPENPDF_TILE_CACHE_BYTES").is_none() {
+        std::env::set_var(
+            "OPENPDF_TILE_CACHE_BYTES",
+            DEFAULT_MEASURE_TILE_CACHE_BYTES.to_string(),
+        );
+    }
+    if std::env::var_os("GTK_A11Y").is_none() {
+        std::env::set_var("GTK_A11Y", "none");
+    }
+    if std::env::var_os("PANGO_LANGUAGE").is_none() {
+        std::env::set_var("PANGO_LANGUAGE", "en-US");
+    }
+}
+
+/// 16 MiB — matches [`openpdf_core::DEFAULT_CACHE_BYTES`].
+pub const DEFAULT_MEASURE_TILE_CACHE_BYTES: usize = 16 * 1024 * 1024;
+
 fn proc_status_bytes(key: &str) -> u64 {
     let Ok(text) = std::fs::read_to_string("/proc/self/status") else {
         return 0;
@@ -404,11 +782,16 @@ fn parse_status_kb(status: &str, key: &str) -> u64 {
 }
 
 /// Isolate settings so `--measure` does not touch `~/.config/openpdf`.
+///
+/// Also pins cache/data homes so fontconfig / icon-theme caches stay in
+/// the isolate dir (host Adwaita/font caches are the usual 15–20 MiB delta).
 pub fn isolate_xdg() -> PathBuf {
     let dir = std::env::temp_dir().join(format!("openpdf-measure-{}", std::process::id()));
     let _ = std::fs::create_dir_all(&dir);
     std::env::set_var("XDG_CONFIG_HOME", &dir);
     std::env::set_var("XDG_STATE_HOME", &dir);
+    std::env::set_var("XDG_CACHE_HOME", &dir);
+    std::env::set_var("XDG_DATA_HOME", &dir);
     dir
 }
 
@@ -608,5 +991,80 @@ mod tests {
         let doc = Document::open(&path).unwrap();
         assert_eq!(doc.page_count(), 4);
         let _ = std::fs::remove_file(path);
+    }
+
+    #[test]
+    fn classify_smaps_buckets() {
+        assert_eq!(classify_smaps_path("[heap]"), RssClass::Heap);
+        assert_eq!(classify_smaps_path(""), RssClass::Heap);
+        assert_eq!(classify_smaps_path("[anon:cairo]"), RssClass::Heap);
+        assert_eq!(
+            classify_smaps_path("/usr/local/lib/libpdfium.so"),
+            RssClass::Pdfium
+        );
+        assert_eq!(
+            classify_smaps_path("/usr/lib/x86_64-linux-gnu/libgtk-4.so.1"),
+            RssClass::Gtk
+        );
+        assert_eq!(
+            classify_smaps_path("/usr/lib/x86_64-linux-gnu/libadwaita-1.so.0"),
+            RssClass::Adw
+        );
+        assert_eq!(
+            classify_smaps_path("/usr/share/icons/Adwaita/icon-theme.cache"),
+            RssClass::Icon
+        );
+        assert_eq!(
+            classify_smaps_path("/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf"),
+            RssClass::Font
+        );
+        assert_eq!(
+            classify_smaps_path("/usr/lib/x86_64-linux-gnu/libcairo.so.2"),
+            RssClass::Cairo
+        );
+        assert_eq!(
+            classify_smaps_path("/usr/lib/x86_64-linux-gnu/libc.so.6"),
+            RssClass::Other
+        );
+    }
+
+    #[test]
+    fn parse_smaps_and_format_top15() {
+        let rollup = "Rss:                4096 kB\nPss:                3000 kB\nPrivate_Dirty:      1024 kB\n";
+        let smaps = "\
+7f0000000000-7f0000100000 rw-p 00000000 00:00 0                          [heap]
+Size:               1024 kB
+Rss:                 512 kB
+Pss:                 512 kB
+7f1000000000-7f1000200000 r-xp 00000000 08:01 1                          /usr/local/lib/libpdfium.so
+Rss:                2048 kB
+Pss:                2048 kB
+7f2000000000-7f2000010000 r--p 00000000 08:01 2                          /usr/share/icons/Adwaita/icon-theme.cache
+Rss:                 256 kB
+Pss:                  64 kB
+7f3000000000-7f3000010000 r-xp 00000000 08:01 3                          /usr/lib/x86_64-linux-gnu/libgtk-4.so.1
+Rss:                 128 kB
+Pss:                  32 kB
+";
+        let maps = parse_smaps(smaps);
+        assert_eq!(maps.len(), 4);
+        assert_eq!(maps[0].class, RssClass::Heap);
+        assert_eq!(maps[0].rss_kb, 512);
+        assert_eq!(maps[1].class, RssClass::Pdfium);
+        let classes = class_rss_kb(&maps);
+        assert_eq!(classes[1], (RssClass::Pdfium, 2048));
+        assert_eq!(classes[4], (RssClass::Icon, 256));
+        let text = format_rss_breakdown_from(rollup, smaps);
+        assert!(text.contains("rss_breakdown=1"));
+        assert!(text.contains("smaps_rollup_rss_kb=4096"));
+        assert!(text.contains("rss_class_libpdfium_kb=2048"));
+        assert!(text.contains("rss_class_heap_kb=512"));
+        assert!(text.contains("rss_class_icon_kb=256"));
+        assert!(text.contains("rss_class_gtk_kb=128"));
+        assert!(text.contains("rss_map_1=libpdfium 2048 /usr/local/lib/libpdfium.so"));
+        assert!(text.contains("rss_map_2=heap 512 [heap]"));
+        let top = top_smaps_mappings(&maps, 15);
+        assert_eq!(top[0].pathname, "/usr/local/lib/libpdfium.so");
+        assert_eq!(top.len(), 4);
     }
 }
