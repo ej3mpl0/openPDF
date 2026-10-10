@@ -752,3 +752,15 @@ msgstr "La redacción es permanente. El contenido seleccionado se elimina y no s
 
 msgid "Drag on the page to select a redaction area."
 msgstr "Arrastra sobre la página para seleccionar el área a redactar."
+
+msgid "Signing…"
+msgstr "Firmando…"
+
+msgid "Signing failed"
+msgstr "La firma falló"
+
+msgid "Verification failed"
+msgstr "La verificación falló"
+
+msgid "PIN must be requested off the GTK thread"
+msgstr "El PIN debe pedirse fuera del hilo de GTK"

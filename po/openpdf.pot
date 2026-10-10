@@ -742,3 +742,15 @@ msgstr ""
 
 msgid "Drag on the page to select a redaction area."
 msgstr ""
+
+msgid "Signing…"
+msgstr ""
+
+msgid "Signing failed"
+msgstr ""
+
+msgid "Verification failed"
+msgstr ""
+
+msgid "PIN must be requested off the GTK thread"
+msgstr ""

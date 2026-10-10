@@ -149,6 +149,10 @@ fn certificate_row(
     row
 }
 
+/// Sync helper for tests. The window signs on a worker via
+/// [`crate::Opened::bytes_for_sign`] + [`Signer::sign`] +
+/// [`crate::Opened::apply_signed_bytes`] so `C_Sign` never runs on the GTK thread.
+#[allow(dead_code)]
 pub fn try_sign(
     opened: &crate::Opened,
     request: &SignRequest,
