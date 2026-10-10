@@ -1,3 +1,5 @@
+use std::sync::Arc;
+
 use lopdf::{Dictionary, Document as LopdfDocument, Object};
 
 use crate::document::Document;
@@ -189,23 +191,25 @@ impl Document {
             return Err(Error::invalid(InvalidKind::CertIdRequired));
         }
         let input = self.bytes_for_signer()?;
-        let signed = signer.sign(&input, request)?;
+        let signed = signer.sign(input.as_slice(), request)?;
         *self = Document::from_bytes(signed, self.path().map(|p| p.to_path_buf()))?;
         Ok(())
     }
 
-    /// Bytes handed to a [`Signer`]: rewrite only when the document is still unsigned.
-    pub(crate) fn bytes_for_signer(&self) -> Result<Vec<u8>> {
-        if self.is_signed() {
-            if self.is_dirty() {
-                self.to_incremental_bytes()
-            } else {
-                Ok(self.original_slice().to_vec())
-            }
-        } else if self.is_dirty() {
-            self.to_bytes()
+    /// Bytes handed to a [`Signer`].
+    ///
+    /// Signed documents — and any clean unsigned document — return a clone of
+    /// the [`Arc`] from [`Self::original_bytes`] (the loaded file). That is a
+    /// pointer clone, not a copy of the bytes. A second signature therefore
+    /// hashes the original signed file; [`Self::to_bytes`] errors on signed
+    /// documents and must not be used here.
+    ///
+    /// Only an unsigned dirty document is rewritten.
+    pub fn bytes_for_signer(&self) -> Result<Arc<Vec<u8>>> {
+        if self.is_signed() || !self.is_dirty() {
+            Ok(self.original_bytes())
         } else {
-            Ok(self.original_slice().to_vec())
+            self.to_bytes().map(Arc::new)
         }
     }
 }
@@ -420,6 +424,26 @@ mod tests {
         assert!(contains_signature(
             &LopdfDocument::load_mem(&incremental).unwrap()
         ));
+    }
+
+    #[test]
+    fn bytes_for_signer_is_shared_arc_for_signed_and_clean() {
+        let clean = Document::open(corpus("hello.pdf")).unwrap();
+        let a = clean.bytes_for_signer().unwrap();
+        let b = clean.bytes_for_signer().unwrap();
+        let original = clean.original_bytes();
+        assert!(Arc::ptr_eq(&a, &b));
+        assert!(Arc::ptr_eq(&a, &original));
+
+        let signed_bytes = append_stub_signature(&original).unwrap();
+        let signed = Document::from_bytes(signed_bytes, None).unwrap();
+        assert!(signed.is_signed());
+        assert!(signed.to_bytes().is_err());
+        let s1 = signed.bytes_for_signer().unwrap();
+        let s2 = signed.bytes_for_signer().unwrap();
+        let signed_original = signed.original_bytes();
+        assert!(Arc::ptr_eq(&s1, &s2));
+        assert!(Arc::ptr_eq(&s1, &signed_original));
     }
 
     #[test]
