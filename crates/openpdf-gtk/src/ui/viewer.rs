@@ -749,6 +749,10 @@ fn paint_pages(cr: &cairo::Context, view: &DocumentView) {
             let tile_x = page.x + f64::from(key.tx * key.tile_size);
             let tile_y = page.y + f64::from(key.ty * key.tile_size);
             if let Some(bmp) = view.shared.doc.paint_tile(key) {
+                // Tile is in cache, so the worker already finished. Pin
+                // `ui_first_tile_rendered_ms` first (no-op if poll() won)
+                // so `ui_first_tile_ms` cannot land earlier.
+                crate::measure::mark_first_tile_rendered();
                 paint_rgba(cr, tile_x, tile_y, bmp.width, bmp.height, &bmp.rgba, true);
             } else if let Some(low) = view.shared.doc.paint_tile(&key.preview()) {
                 let _ = cr.save();
@@ -816,7 +820,9 @@ fn maybe_mark_startup(view: &DocumentView) {
     if ready.thumb_ready >= MIN_THUMB_TILES && ready.thumb_total >= MIN_THUMB_TILES {
         crate::measure::mark_thumbs_done();
     }
-    if ready.is_complete() {
+    // Never pin startup from a thumbs-only draw: that left
+    // `ui_first_tile_ms` at 0 when cache was already full.
+    if ready.is_complete() && crate::measure::ui_first_tile_painted_ms() > 0 {
         crate::measure::mark_all_visible();
     }
 }
@@ -875,6 +881,9 @@ pub(crate) fn paint_rgba(
         let _ = cr.set_source_surface(&surface, x, y);
         let _ = cr.paint();
         if real_page_tile {
+            // Set-once, process-start Instant, only after a real page tile
+            // surface is painted in the DrawingArea draw func.
+            crate::measure::mark_first_tile_rendered();
             crate::measure::mark_first_tile_painted();
         }
     }

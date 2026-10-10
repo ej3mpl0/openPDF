@@ -406,6 +406,7 @@ fn ensure_engine(ctx: &Ctx) -> Option<Engine> {
     let mut slot = ctx.engine.borrow_mut();
     if slot.is_none() {
         *slot = Engine::new().ok();
+        crate::measure::mark_pdfium_loaded();
     }
     slot.clone()
 }

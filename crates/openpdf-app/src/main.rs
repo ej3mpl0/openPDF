@@ -119,10 +119,13 @@ All --measure marks are milliseconds from one process-start Instant \
   ui_activate_ms                  GTK activate callback
   ui_window_present_ms            window.present()
   ui_window_build_ms              OpenPdfWindow::new returns
+  ui_pango_init_ms                fontconfig + Pango fontmap warmup (before adw::init)
   ui_adw_init_ms                  adw::init + icon GResource
   ui_css_ms                       application CSS load
   ui_doc_load_start_ms            document open begins
   ui_doc_loaded_ms                Engine::open / Session::open returned
+  pdfium_load_ms                  Engine::new / bind_pdfium finished
+  pdfium_sha256                   SHA-256 of the bound libpdfium.so
 The first-tile → startup gap is remaining visible tiles plus thumbs.";
 
 fn main() {

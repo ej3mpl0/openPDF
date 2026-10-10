@@ -138,6 +138,8 @@ pub fn run_measure(pages: usize) -> i32 {
         let ui_adw_init_ms = ui_adw_init_ms.clone();
         let ui_css_ms = ui_css_ms.clone();
         move |_| {
+            measure::warmup_fontconfig_pango();
+            measure::mark_pango_init();
             adw::init().ok();
             register_icons();
             ui_adw_init_ms.set(measure::process_elapsed_ms());
@@ -273,6 +275,7 @@ fn watch_measure(
             if laid_out.get()
                 && view.viewport_allocated()
                 && startup_ms > 0
+                && measure::ui_first_tile_painted_ms() > 0
                 && ready.visible_ready >= MIN_VISIBLE_TILES
                 && ready.thumb_ready >= MIN_THUMB_TILES
             {
@@ -291,6 +294,9 @@ fn watch_measure(
                         ui_window_present_ms: marks.ui_window_present_ms,
                         ui_first_frame_ms: marks.first_frame.get(),
                         ui_first_tile_ms: measure::ui_first_tile_painted_ms(),
+                        pdfium_load_ms: measure::ui_pdfium_load_ms(),
+                        ui_pango_init_ms: measure::ui_pango_init_ms(),
+                        pdfium_sha256: measure::pdfium_library_sha256(),
                         ui_adw_init_ms: marks.ui_adw_init_ms,
                         ui_css_ms: marks.ui_css_ms,
                         ui_window_build_ms: marks.ui_window_build_ms,
@@ -382,6 +388,14 @@ fn install_accels(app: &adw::Application) {
 }
 
 fn register_icons() {
+    // `--measure` skips the bundled GResource so peak RSS stays comparable
+    // across boxes (Adwaita + every theme walk is the usual 15–20 MiB delta).
+    if gtk::gio::Application::default()
+        .and_then(|app| app.application_id())
+        .is_some_and(|id| id == crate::MEASURE_APP_ID)
+    {
+        return;
+    }
     let bytes = include_bytes!(concat!(env!("OUT_DIR"), "/icons.gresource"));
     match gtk::gio::Resource::from_data(&gtk::glib::Bytes::from_static(bytes)) {
         Ok(resource) => gtk::gio::resources_register(&resource),
@@ -397,6 +411,12 @@ fn register_icons() {
 }
 
 fn load_css() {
+    if gtk::gio::Application::default()
+        .and_then(|app| app.application_id())
+        .is_some_and(|id| id == crate::MEASURE_APP_ID)
+    {
+        return;
+    }
     let provider = gtk::CssProvider::new();
     provider.load_from_string(CSS);
     if let Some(display) = gtk::gdk::Display::default() {

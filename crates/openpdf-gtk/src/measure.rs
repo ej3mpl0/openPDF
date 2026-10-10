@@ -4,7 +4,9 @@ use std::path::PathBuf;
 use std::sync::OnceLock;
 use std::time::Instant;
 
+use gtk4 as gtk;
 use openpdf_core::{merge, Document};
+use pangocairo::prelude::*;
 
 /// Single `--measure` time origin. Set first thing in `main`; every `ui_*`
 /// mark and `startup_ms` is milliseconds from this Instant.
@@ -35,6 +37,8 @@ static SURFACE_READY: OnceLock<u128> = OnceLock::new();
 static TILE_PAINTED: OnceLock<u128> = OnceLock::new();
 static THUMBS_DONE: OnceLock<u128> = OnceLock::new();
 static ALL_VISIBLE: OnceLock<u128> = OnceLock::new();
+static PDFIUM_LOADED: OnceLock<u128> = OnceLock::new();
+static PANGO_INIT: OnceLock<u128> = OnceLock::new();
 
 pub fn mark_doc_load_start() {
     let _ = DOC_LOAD_START.get_or_init(process_elapsed_ms);
@@ -53,6 +57,12 @@ pub fn mark_first_surface_ready() {
 }
 pub fn mark_first_tile_painted() {
     let _ = TILE_PAINTED.get_or_init(process_elapsed_ms);
+}
+pub fn mark_pdfium_loaded() {
+    let _ = PDFIUM_LOADED.get_or_init(process_elapsed_ms);
+}
+pub fn mark_pango_init() {
+    let _ = PANGO_INIT.get_or_init(process_elapsed_ms);
 }
 pub fn mark_thumbs_done() {
     let _ = THUMBS_DONE.get_or_init(process_elapsed_ms);
@@ -78,6 +88,17 @@ pub fn ui_first_surface_ready_ms() -> u128 {
 }
 pub fn ui_first_tile_painted_ms() -> u128 {
     TILE_PAINTED.get().copied().unwrap_or(0)
+}
+pub fn ui_pdfium_load_ms() -> u128 {
+    PDFIUM_LOADED.get().copied().unwrap_or(0)
+}
+pub fn ui_pango_init_ms() -> u128 {
+    PANGO_INIT.get().copied().unwrap_or(0)
+}
+
+/// `ui_first_tile_ms` must be a real draw-path paint, not before the worker mark.
+pub fn first_tile_mark_valid(painted_ms: u128, rendered_ms: u128) -> bool {
+    painted_ms > 0 && painted_ms >= rendered_ms
 }
 pub fn ui_thumbs_done_ms() -> u128 {
     THUMBS_DONE.get().copied().unwrap_or(0)
@@ -160,6 +181,12 @@ pub struct BudgetReport {
     pub ui_first_frame_ms: u128,
     /// First real page tile painted in the DrawingArea draw func.
     pub ui_first_tile_ms: u128,
+    /// `Engine::new` / `bind_pdfium` finished, from process start.
+    pub pdfium_load_ms: u128,
+    /// Fontconfig + Pango fontmap warmup, from process start (before `adw::init`).
+    pub ui_pango_init_ms: u128,
+    /// SHA-256 of the `libpdfium.so` that `--measure` will bind.
+    pub pdfium_sha256: String,
     /// `adw::init` + icon GResource registration, from process start.
     pub ui_adw_init_ms: u128,
     /// Application CSS provider load, from process start.
@@ -207,6 +234,9 @@ impl Display for BudgetReport {
         writeln!(f, "ui_window_present_ms={}", self.ui_window_present_ms)?;
         writeln!(f, "ui_first_frame_ms={}", self.ui_first_frame_ms)?;
         writeln!(f, "ui_first_tile_ms={}", self.ui_first_tile_ms)?;
+        writeln!(f, "ui_pango_init_ms={}", self.ui_pango_init_ms)?;
+        writeln!(f, "pdfium_load_ms={}", self.pdfium_load_ms)?;
+        writeln!(f, "pdfium_sha256={}", self.pdfium_sha256)?;
         writeln!(f, "ui_adw_init_ms={}", self.ui_adw_init_ms)?;
         writeln!(f, "ui_css_ms={}", self.ui_css_ms)?;
         writeln!(f, "ui_window_build_ms={}", self.ui_window_build_ms)?;
@@ -266,6 +296,14 @@ impl BudgetReport {
                 format!("peak RSS {} exceeds {MAX_RSS_BYTES}", self.rss_bytes)
             });
         }
+        if !first_tile_mark_valid(self.ui_first_tile_ms, self.ui_first_tile_rendered_ms) {
+            error.get_or_insert_with(|| {
+                format!(
+                    "ui_first_tile_ms {} must be >0 and >= first_tile_rendered {}",
+                    self.ui_first_tile_ms, self.ui_first_tile_rendered_ms
+                )
+            });
+        }
         self.ok = error.is_none();
         self.error = error;
         self
@@ -285,6 +323,51 @@ fn proc_status_bytes(key: &str) -> u64 {
         return 0;
     };
     parse_status_kb(&text, key).saturating_mul(1024)
+}
+
+/// Path `--measure` / `Engine` will bind, matching `OPENPDF_PDFIUM` first.
+pub fn pdfium_library_path() -> Option<PathBuf> {
+    if let Ok(p) = std::env::var("OPENPDF_PDFIUM") {
+        if !p.is_empty() {
+            let path = PathBuf::from(p);
+            if path.is_file() {
+                return Some(path);
+            }
+        }
+    }
+    [
+        "/usr/local/lib/libpdfium.so",
+        "/usr/lib/libpdfium.so",
+        "/usr/lib/x86_64-linux-gnu/libpdfium.so",
+    ]
+    .into_iter()
+    .map(PathBuf::from)
+    .find(|p| p.is_file())
+}
+
+/// SHA-256 (hex) of [`pdfium_library_path`], or empty if the file is missing.
+pub fn pdfium_library_sha256() -> String {
+    let Some(path) = pdfium_library_path() else {
+        return String::new();
+    };
+    sha256_file(&path).unwrap_or_default()
+}
+
+fn sha256_file(path: &std::path::Path) -> Option<String> {
+    let bytes = std::fs::read(path).ok()?;
+    use sha2::{Digest, Sha256};
+    let digest = Sha256::digest(bytes);
+    Some(digest.iter().map(|b| format!("{b:02x}")).collect())
+}
+
+/// Load fontconfig + a Pango "Sans 11" fontset (in-process, no GTK display).
+pub fn warmup_fontconfig_pango() {
+    let fontmap = pangocairo::FontMap::default();
+    let ctx = fontmap.create_context();
+    let desc = gtk::pango::FontDescription::from_string("Sans 11");
+    let _ = ctx.load_font(&desc);
+    let lang = gtk::pango::Language::from_string("en-US");
+    let _ = ctx.load_fontset(&desc, &lang);
 }
 
 fn parse_status_kb(status: &str, key: &str) -> u64 {
@@ -409,12 +492,68 @@ mod tests {
         assert!(text.contains("ui_window_present_ms=20"));
         assert!(text.contains("ui_first_frame_ms=30"));
         assert!(text.contains("ui_first_tile_ms=40"));
+        assert!(text.contains("ui_pango_init_ms="));
+        assert!(text.contains("pdfium_load_ms="));
+        assert!(text.contains("pdfium_sha256="));
         assert!(text.contains("ui_adw_init_ms="));
         assert!(text.contains("ui_css_ms="));
         assert!(text.contains("ui_window_build_ms="));
         assert!(text.contains("ui_doc_load_start_ms="));
         assert!(text.contains("ui_first_tile_requested_ms="));
         assert!(text.contains("ui_first_surface_ready_ms="));
+    }
+
+    #[test]
+    fn first_tile_ms_is_positive_and_not_before_rendered() {
+        assert!(!first_tile_mark_valid(0, 209));
+        assert!(!first_tile_mark_valid(0, 0));
+        assert!(!first_tile_mark_valid(376, 382));
+        assert!(first_tile_mark_valid(230, 209));
+        assert!(first_tile_mark_valid(376, 376));
+        let missing = BudgetReport {
+            pages: 32,
+            startup_ms: 200,
+            rss_bytes: 10 * 1024 * 1024,
+            visible_ready: 16,
+            visible_total: 16,
+            thumb_ready: 4,
+            thumb_total: 4,
+            ui_first_tile_ms: 0,
+            ui_first_tile_rendered_ms: 209,
+            ..Default::default()
+        }
+        .evaluate();
+        assert!(!missing.ok);
+        assert!(missing.error.unwrap().contains("ui_first_tile_ms"));
+        let early = BudgetReport {
+            pages: 32,
+            startup_ms: 400,
+            rss_bytes: 10 * 1024 * 1024,
+            visible_ready: 16,
+            visible_total: 16,
+            thumb_ready: 4,
+            thumb_total: 4,
+            ui_first_tile_ms: 376,
+            ui_first_tile_rendered_ms: 382,
+            ..Default::default()
+        }
+        .evaluate();
+        assert!(!early.ok);
+        assert!(early.error.unwrap().contains("ui_first_tile_ms"));
+        let ok = BudgetReport {
+            pages: 32,
+            startup_ms: 230,
+            rss_bytes: 10 * 1024 * 1024,
+            visible_ready: 16,
+            visible_total: 16,
+            thumb_ready: 4,
+            thumb_total: 4,
+            ui_first_tile_ms: 230,
+            ui_first_tile_rendered_ms: 209,
+            ..Default::default()
+        }
+        .evaluate();
+        assert!(ok.ok, "{:?}", ok.error);
     }
 
     #[test]
