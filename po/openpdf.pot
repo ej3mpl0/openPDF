@@ -710,3 +710,6 @@ msgstr ""
 
 msgid "Certificates stay on this computer. openPDF does not send them anywhere."
 msgstr ""
+
+msgid "{level} signatures are not supported yet"
+msgstr ""

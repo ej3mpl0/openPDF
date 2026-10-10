@@ -716,3 +716,6 @@ msgstr "Se guarda una copia firmada. El original no se modifica."
 
 msgid "Certificates stay on this computer. openPDF does not send them anywhere."
 msgstr "Los certificados se quedan en este equipo. openPDF no los envía a ninguna parte."
+
+msgid "{level} signatures are not supported yet"
+msgstr "las firmas {level} todavía no están soportadas"

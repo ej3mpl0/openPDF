@@ -33,6 +33,10 @@ pub enum Error {
     /// Unit variant — no payload. The token was not touched. UIs treat
     /// this as a silent cancel. The CLI prints a neutral status, not an error.
     PinCancelled,
+    /// The signer backend cannot produce this PAdES level yet. Never downgraded.
+    SignLevelUnsupported {
+        level: crate::signer::PadesLevel,
+    },
     /// The PDF already has a signature; `op` would invalidate it.
     Signed {
         op: SignedOp,
@@ -137,6 +141,10 @@ impl Error {
             ),
             Error::EmptyDocument => tr("document has no pages"),
             Error::Invalid(kind) => kind.to_locale_string(),
+            Error::SignLevelUnsupported { level } => tr_args(
+                "{level} signatures are not supported yet",
+                &[("level", level.label())],
+            ),
             Error::Sign(m) => tr_args("sign: {detail}", &[("detail", &tr(m))]),
             Error::SignerUnavailable { reason } => describe_signer_unavailable(reason),
             Error::PinCancelled => tr("PIN entry was cancelled"),
