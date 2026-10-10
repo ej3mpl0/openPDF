@@ -40,3 +40,46 @@ jobs:
           test -n "$(find bindings/swift -type f | head -n 1)"
           test -n "$(find bindings/csharp -type f | head -n 1)"
 
+
+  macos-app:
+    runs-on: macos-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - name: Install PDFium
+        run: |
+          set -euo pipefail
+          curl -fsSL -o /tmp/pdfium.tgz \
+            "https://github.com/bblanchon/pdfium-binaries/releases/download/chromium%2F8035/pdfium-mac-arm64.tgz"
+          mkdir -p "$HOME/pdfium"
+          tar -xzf /tmp/pdfium.tgz -C "$HOME/pdfium"
+          if [ -f "$HOME/pdfium/lib/libpdfium.dylib" ]; then
+            echo "OPENPDF_PDFIUM=$HOME/pdfium/lib/libpdfium.dylib" >> "$GITHUB_ENV"
+          else
+            echo "OPENPDF_PDFIUM=$HOME/pdfium/bin/libpdfium.dylib" >> "$GITHUB_ENV"
+          fi
+      - name: Build openpdf-macos
+        run: |
+          set -euo pipefail
+          chmod +x apps/macos/build.sh
+          ./apps/macos/build.sh
+      - name: xcodebuild (SwiftPM scheme)
+        run: |
+          set -euo pipefail
+          cd apps/macos
+          SCHEME="$(xcodebuild -list 2>/dev/null | awk '/Schemes:/{f=1;next} f&&NF{print $1; exit}')"
+          SCHEME="${SCHEME:-OpenPDF}"
+          xcodebuild -scheme "$SCHEME" -destination 'generic/platform=macOS' \
+            -derivedDataPath .derived CODE_SIGNING_ALLOWED=NO \
+            OTHER_LDFLAGS="-L$(pwd)/lib -lopenpdf_ffi" \
+            LD_RUNPATH_SEARCH_PATHS="$(pwd)/lib"
+      - name: Measure (headless)
+        run: |
+          set -euo pipefail
+          BIN="$(cd apps/macos && swift build -c release --show-bin-path)/openpdf-macos"
+          test -x "$BIN"
+          "$BIN" --measure 32
+        env:
+          OPENPDF_CORPUS: ${{ github.workspace }}/corpus
+          OPENPDF_PDFIUM: ${{ env.OPENPDF_PDFIUM }}
+
