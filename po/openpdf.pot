@@ -232,6 +232,9 @@ msgstr ""
 msgid "{subject} — {usage} — {validity}"
 msgstr ""
 
+msgid "{usage} — {validity}"
+msgstr ""
+
 msgid "Enter PIN for token \"{token}\""
 msgstr ""
 
