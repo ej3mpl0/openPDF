@@ -1,21 +1,9 @@
 use std::env;
 use std::path::{Path, PathBuf};
-use std::sync::atomic::{AtomicU64, Ordering};
 
 use pdfium_render::prelude::*;
 
 use crate::error::{Error, Result};
-
-/// Incremented only when [`render_tile`] actually rasterizes (not cache hits).
-static RENDER_TILE_CALLS: AtomicU64 = AtomicU64::new(0);
-
-pub fn render_tile_calls() -> u64 {
-    RENDER_TILE_CALLS.load(Ordering::Relaxed)
-}
-
-pub fn reset_render_tile_calls() {
-    RENDER_TILE_CALLS.store(0, Ordering::Relaxed);
-}
 
 /// Resolve and load `libpdfium` from a bundled path, `OPENPDF_PDFIUM`, or the system.
 pub fn bind_pdfium(bundled: Option<&Path>) -> Result<Pdfium> {
@@ -74,7 +62,6 @@ pub fn render_tile(
     tile_y: u32,
     tile_size: u32,
 ) -> Result<(u32, u32, Vec<u8>)> {
-    RENDER_TILE_CALLS.fetch_add(1, Ordering::Relaxed);
     let pages = document.pages();
     if page_index >= pages.len() as u32 {
         return Err(Error::PageOutOfRange {

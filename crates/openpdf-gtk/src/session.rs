@@ -1142,8 +1142,10 @@ mod tests {
     /// again. Peak RSS is informational (no assert).
     #[test]
     fn viewport_cache_reuses_tiles_at_3840x2160_and_1920x1080_scale_2() {
-        let Ok(engine) = Engine::new() else {
-            eprintln!("viewport cache reuse: Engine::new skipped (no PDFium)");
+        // Own worker + counter: the process-wide Engine shares RENDER calls
+        // and set_cache_bytes with other --lib tests.
+        let Ok(engine) = Engine::isolated() else {
+            eprintln!("viewport cache reuse: Engine::isolated skipped (no PDFium)");
             return;
         };
         let path = match crate::measure::write_measure_pdf(8) {
@@ -1246,9 +1248,9 @@ mod tests {
             "{logical_w}x{logical_h}@{scale} must request tiles"
         );
 
-        Engine::reset_render_tile_calls();
+        engine.reset_render_tile_calls();
         wait_cached(session, &keys_top, std::time::Duration::from_secs(45));
-        let calls_top = Engine::render_tile_calls();
+        let calls_top = engine.render_tile_calls();
         assert!(
             calls_top > 0,
             "{logical_w}x{logical_h}@{scale}: first fill must render"
@@ -1267,11 +1269,11 @@ mod tests {
             0,
         );
         wait_cached(session, &keys_mid, std::time::Duration::from_secs(45));
-        let calls_mid = Engine::render_tile_calls();
+        let calls_mid = engine.render_tile_calls();
 
         scroll.vadjustment().set_value(0.0);
         wait_cached(session, &keys_top, std::time::Duration::from_secs(45));
-        let calls_back = Engine::render_tile_calls();
+        let calls_back = engine.render_tile_calls();
         assert_eq!(
             calls_back, calls_mid,
             "{logical_w}x{logical_h}@{scale}: scroll-back re-rendered cached tiles ({calls_back} > {calls_mid})"
