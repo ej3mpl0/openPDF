@@ -9,7 +9,7 @@
 //! texture or an INVALID_SIZE cairo node.
 
 use std::collections::{HashMap, VecDeque};
-use std::sync::atomic::{AtomicUsize, Ordering};
+use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
 
 use gtk::cairo;
 use gtk::gdk;
@@ -104,19 +104,32 @@ pub fn image_surface_from_rgba(
 
 /// Host bytes currently held by GTK [`TextureCache`] instances (w×h×4).
 static TEXTURE_CACHE_BYTES: AtomicUsize = AtomicUsize::new(0);
+static TEXTURE_CREATES: AtomicU64 = AtomicU64::new(0);
 
 pub fn texture_cache_bytes() -> usize {
     TEXTURE_CACHE_BYTES.load(Ordering::Relaxed)
+}
+
+pub fn texture_create_count() -> u64 {
+    TEXTURE_CREATES.load(Ordering::Relaxed)
+}
+
+pub fn reset_texture_create_count() {
+    TEXTURE_CREATES.store(0, Ordering::Relaxed);
 }
 
 fn publish_texture_bytes(bytes: usize) {
     TEXTURE_CACHE_BYTES.store(bytes, Ordering::Relaxed);
 }
 
-/// RGBA/BGRA bytes → [`gdk::MemoryTexture`] with no extra pixel copy.
+/// Core sets `FPDF_REVERSE_BYTE_ORDER`, so tiles are RGBA, opaque white fill.
+/// Never BGRA / Premultiplied — those force a CPU convert or swap red/blue.
+pub const TILE_MEMORY_FORMAT: gdk::MemoryFormat = gdk::MemoryFormat::R8g8b8x8;
+
+/// RGBA bytes → [`gdk::MemoryTexture`] with no extra pixel copy.
 ///
 /// `pixels` is moved into `glib::Bytes::from_owned`. 0 / oversize / short
-/// buffers return `None`.
+/// buffers return `None`. Call when the tile arrives, never from snapshot.
 pub fn memory_texture_from_owned(
     width: u32,
     height: u32,
@@ -140,11 +153,16 @@ pub fn memory_texture_from_owned(
         valid_cairo_size(width as i32, height as i32, 1),
         "tile texture {width}x{height} must be a valid size"
     );
+    debug_assert!(
+        pixels.as_ref()[..need].chunks_exact(4).all(|p| p[3] == 255),
+        "R8g8b8x8 requires opaque tiles (alpha 255); core fills white"
+    );
     let bytes = glib::Bytes::from_owned(pixels);
+    TEXTURE_CREATES.fetch_add(1, Ordering::Relaxed);
     Some(gdk::MemoryTexture::new(
         width as i32,
         height as i32,
-        gdk::MemoryFormat::R8g8b8a8,
+        TILE_MEMORY_FORMAT,
         &bytes,
         stride,
     ))
@@ -172,6 +190,10 @@ impl TextureCache {
         self.bytes
     }
 
+    pub fn len(&self) -> usize {
+        self.map.len()
+    }
+
     pub fn set_max_bytes(&mut self, max_bytes: usize) {
         self.max_bytes = max_bytes.max(1);
         self.evict();
@@ -183,6 +205,10 @@ impl TextureCache {
         self.order.clear();
         self.bytes = 0;
         publish_texture_bytes(0);
+    }
+
+    pub fn peek(&self, key: &TileKey) -> Option<gdk::Texture> {
+        self.map.get(key).cloned()
     }
 
     pub fn get(&mut self, key: &TileKey) -> Option<gdk::Texture> {
@@ -415,8 +441,64 @@ mod tests {
             let tex = memory_texture_from_owned(1, 1, pix).expect("1x1 texture");
             assert_eq!(tex.width(), 1);
             assert_eq!(tex.height(), 1);
+            assert_eq!(TILE_MEMORY_FORMAT, gdk::MemoryFormat::R8g8b8x8);
         }) else {
             eprintln!("memory_texture sizes: skipped (no GTK display)");
+            return;
+        };
+    }
+
+    /// Core RGBA red + `R8g8b8x8` through GSK must stay red (not blue).
+    #[test]
+    fn gsk_red_rect_stays_red_not_blue() {
+        let Ok(engine) = openpdf_core::Engine::new() else {
+            eprintln!("gsk red rect: Engine::new skipped (no PDFium)");
+            return;
+        };
+        let doc = openpdf_core::red_rect_document().unwrap();
+        engine.bind(&doc).unwrap();
+        let raster = engine.render_page(doc.id(), 0, 2.0).unwrap();
+        assert!(
+            raster.rgba.chunks_exact(4).all(|p| p[3] == 255),
+            "tile alpha must be 255 for R8g8b8x8"
+        );
+        let cx = (raster.width / 2) as usize;
+        let cy = (raster.height / 2) as usize;
+        let i = (cy * raster.width as usize + cx) * 4;
+        assert!(
+            raster.rgba[i] > 200 && raster.rgba[i + 2] < 40,
+            "core bytes must be RGBA red, got R={} B={}",
+            raster.rgba[i],
+            raster.rgba[i + 2]
+        );
+
+        let Some(()) = crate::test_gtk::on_gtk_thread(move || {
+            let w = raster.width;
+            let h = raster.height;
+            let tex = memory_texture_from_owned(w, h, raster.rgba).expect("red texture");
+            let snapshot = gtk::Snapshot::new();
+            append_texture(&snapshot, tex.upcast_ref(), 0.0, 0.0, w as f32, h as f32);
+            let node = snapshot.to_node().expect("gsk node");
+            let mut surf = cairo::ImageSurface::create(cairo::Format::ARgb32, w as i32, h as i32)
+                .expect("cairo target");
+            {
+                let cr = cairo::Context::new(&surf).unwrap();
+                cr.set_source_rgb(0.0, 0.0, 0.0);
+                let _ = cr.paint();
+                node.draw(&cr);
+            }
+            surf.flush();
+            let stride = surf.stride() as usize;
+            let data = surf.data().expect("cairo pixels");
+            let off = cy * stride + cx * 4;
+            let (b, g, r, a) = (data[off], data[off + 1], data[off + 2], data[off + 3]);
+            assert_eq!(a, 255);
+            assert!(
+                r > 200 && b < 40,
+                "GSK pixel must stay red not blue (cairo ARgb32 B={b} G={g} R={r})"
+            );
+        }) else {
+            eprintln!("gsk red rect: skipped (no GTK display)");
             return;
         };
     }

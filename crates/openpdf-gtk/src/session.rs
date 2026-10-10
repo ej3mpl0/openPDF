@@ -423,16 +423,33 @@ impl Session {
         dirty
     }
 
-    /// Take at most one finished tile so the UI can `queue_draw` per arrival.
+    /// Take at most one finished event so the UI can `queue_draw` per arrival.
     pub fn poll_one(&self) -> bool {
+        self.take_event().is_some()
+    }
+
+    /// Ingest path: `Some` when the next event is a ready tile.
+    pub fn poll_ready(&self) -> Option<ViewTile> {
+        match self.take_event() {
+            Some(Some(key)) => Some(key),
+            _ => None,
+        }
+    }
+
+    fn take_event(&self) -> Option<Option<ViewTile>> {
         match self.engine.try_recv() {
-            Some(openpdf_core::TileEvent::Ready(_)) => {
+            Some(openpdf_core::TileEvent::Ready(tile)) => {
                 crate::measure::mark_first_tile_rendered();
-                true
+                Some(Some(ViewTile::new(
+                    tile.key.page,
+                    f64::from(tile.key.zoom()),
+                    tile.key.x,
+                    tile.key.y,
+                    openpdf_core::TILE_SIZE,
+                )))
             }
             Some(openpdf_core::TileEvent::Failed { key, message }) => {
                 if crate::i18n::is_tile_out_of_range_message(&message) {
-                    // Draft #51: do not paint, do not toast.
                     if cfg!(debug_assertions) {
                         eprintln!(
                             "openpdf-gtk: tile out of range, skip paint page={} x={} y={}: {message}",
@@ -440,10 +457,10 @@ impl Session {
                         );
                     }
                 }
-                true
+                Some(None)
             }
-            Some(openpdf_core::TileEvent::Cancelled(_)) => true,
-            None => false,
+            Some(openpdf_core::TileEvent::Cancelled(_)) => Some(None),
+            None => None,
         }
     }
 
@@ -697,6 +714,13 @@ impl Opened {
         match self {
             Self::Core(s) => s.poll_one(),
             Self::Mock(_) => false,
+        }
+    }
+
+    pub fn poll_ready(&self) -> Option<ViewTile> {
+        match self {
+            Self::Core(s) => s.poll_ready(),
+            Self::Mock(_) => None,
         }
     }
 

@@ -5,7 +5,7 @@ use std::rc::Rc;
 use crate::i18n::t;
 use crate::measure::{MIN_THUMB_TILES, MIN_VISIBLE_TILES};
 use crate::paint;
-use crate::session::{Opened, PaintTile};
+use crate::session::Opened;
 use crate::settings::{PageLayoutMode, Settings, ZoomMode};
 use crate::tiles::{
     layout_continuous, layout_single, thumb_request_viewport, visible_tiles, PageLayout, TileKey,
@@ -15,6 +15,7 @@ use crate::ui::canvas::Canvas;
 use crate::{Lang, PageSize};
 use gtk::cairo;
 use gtk::gdk;
+use gtk::gdk::prelude::TextureExt;
 use gtk::glib::{self, clone};
 use gtk::prelude::*;
 use gtk4 as gtk;
@@ -164,6 +165,7 @@ impl DocumentView {
                 thumbs.queue_draw();
             },
         );
+        self.shared.textures.borrow_mut().clear();
         self.relayout();
     }
 
@@ -193,10 +195,14 @@ impl DocumentView {
             )
         });
         self.shared.doc.request_tiles(&[key], Priority::Visible);
-        if self.shared.doc.poll_one() {
+        if let Some(ready) = self.shared.doc.poll_ready() {
+            ingest_arrived_texture(self, &ready);
             self.pages_area.queue_draw();
         }
+        // Mock / already-cached: create the texture on arrival, never in snapshot.
+        ingest_arrived_texture(self, &key);
         let doc = self.shared.doc.clone();
+        let shared = self.shared.clone();
         let area = self.pages_area.clone();
         let spins = Rc::new(Cell::new(0u32));
         glib::idle_add_local_full(glib::Priority::HIGH, move || {
@@ -205,8 +211,11 @@ impl DocumentView {
             if crate::measure::ui_first_tile_painted_ms() > 0 {
                 return glib::ControlFlow::Break;
             }
-            if crate::measure::ui_first_tile_rendered_ms() == 0 && doc.poll_one() {
-                area.queue_draw();
+            if crate::measure::ui_first_tile_rendered_ms() == 0 {
+                if let Some(key) = doc.poll_ready() {
+                    ingest_arrived_texture_shared(&shared, &key);
+                    area.queue_draw();
+                }
             } else if crate::measure::ui_first_tile_rendered_ms() > 0 {
                 area.queue_draw();
             }
@@ -332,7 +341,6 @@ impl DocumentView {
         self.thumbs_area
             .set_content_height(thumbs.content_height.ceil().max(1.0) as i32);
         *self.shared.thumb_layout.borrow_mut() = thumbs;
-        self.shared.textures.borrow_mut().clear();
         self.pages_area.queue_draw();
         self.thumbs_area.queue_draw();
         self.update_chrome();
@@ -365,6 +373,20 @@ impl DocumentView {
     #[cfg(test)]
     pub(crate) fn thumbs_canvas(&self) -> &Canvas {
         &self.thumbs_area
+    }
+
+    /// Drain ready events and create textures for tiles already in the pixel cache.
+    #[cfg(test)]
+    pub(crate) fn ingest_ready_tiles(&self) {
+        while let Some(key) = self.shared.doc.poll_ready() {
+            ingest_arrived_texture(self, &key);
+        }
+        ingest_cached_keys(self);
+    }
+
+    #[cfg(test)]
+    pub(crate) fn cached_texture_count(&self) -> usize {
+        self.shared.textures.borrow().len()
     }
 
     fn update_chrome(&self) {
@@ -666,7 +688,8 @@ fn schedule_tile_pump(view: Rc<DocumentView>) {
                     );
                     return glib::ControlFlow::Break;
                 }
-                if view.shared.doc.poll_one() {
+                if let Some(key) = view.shared.doc.poll_ready() {
+                    ingest_arrived_texture(&view, &key);
                     view.pages_area.queue_draw();
                     view.thumbs_area.queue_draw();
                     let again = view.clone();
@@ -680,6 +703,7 @@ fn schedule_tile_pump(view: Rc<DocumentView>) {
                     });
                     glib::ControlFlow::Break
                 } else {
+                    ingest_cached_keys(&view);
                     let again = view.clone();
                     glib::timeout_add_local_once(std::time::Duration::from_millis(1), move || {
                         tick(again);
@@ -817,7 +841,7 @@ fn snapshot_pages(snapshot: &gtk::Snapshot, view: &DocumentView) {
         view.shared.doc.request_tiles(&preview, Priority::Adjacent);
     }
 
-    let mut textures = view.shared.textures.borrow_mut();
+    let textures = view.shared.textures.borrow();
     for page in &layout.pages {
         if page.width <= 0.0 || page.height <= 0.0 {
             continue;
@@ -844,33 +868,26 @@ fn snapshot_pages(snapshot: &gtk::Snapshot, view: &DocumentView) {
         for key in keys.iter().filter(|k| k.page == page.page) {
             let tile_x = page.x + f64::from(key.tx * key.tile_size);
             let tile_y = page.y + f64::from(key.ty * key.tile_size);
-            if let Some(bmp) = view.shared.doc.paint_tile(key) {
+            if let Some(tex) = textures.peek(key) {
                 crate::measure::mark_first_tile_rendered();
-                if let Some(tex) = tile_texture(&mut textures, key, &bmp) {
-                    paint::append_texture(
-                        snapshot,
-                        &tex,
-                        tile_x as f32,
-                        tile_y as f32,
-                        bmp.width as f32,
-                        bmp.height as f32,
-                    );
-                    mark_tile_painted(true);
-                }
-            } else if let Some(low) = view.shared.doc.paint_tile(&key.preview()) {
-                if low.width == 0 || low.height == 0 {
-                    continue;
-                }
-                if let Some(tex) = tile_texture(&mut textures, &key.preview(), &low) {
-                    paint::append_scaled_texture(
-                        snapshot,
-                        &tex,
-                        tile_x as f32,
-                        tile_y as f32,
-                        key.tile_size as f32,
-                        key.tile_size as f32,
-                    );
-                }
+                paint::append_texture(
+                    snapshot,
+                    &tex,
+                    tile_x as f32,
+                    tile_y as f32,
+                    tex.width() as f32,
+                    tex.height() as f32,
+                );
+                mark_tile_painted(true);
+            } else if let Some(tex) = textures.peek(&key.preview()) {
+                paint::append_scaled_texture(
+                    snapshot,
+                    &tex,
+                    tile_x as f32,
+                    tile_y as f32,
+                    key.tile_size as f32,
+                    key.tile_size as f32,
+                );
             }
         }
     }
@@ -890,7 +907,7 @@ fn snapshot_thumbs(snapshot: &gtk::Snapshot, view: &DocumentView) {
     let keys = thumb_tile_keys(view);
     view.shared.doc.request_tiles(&keys, Priority::Thumbnail);
 
-    let mut textures = view.shared.textures.borrow_mut();
+    let textures = view.shared.textures.borrow();
     for page in &layout.pages {
         if page.page == current {
             snapshot.append_color(
@@ -915,17 +932,15 @@ fn snapshot_thumbs(snapshot: &gtk::Snapshot, view: &DocumentView) {
         for key in keys.iter().filter(|k| k.page == page.page) {
             let tile_x = page.x + f64::from(key.tx * key.tile_size);
             let tile_y = page.y + f64::from(key.ty * key.tile_size);
-            if let Some(bmp) = view.shared.doc.paint_tile(key) {
-                if let Some(tex) = tile_texture(&mut textures, key, &bmp) {
-                    paint::append_texture(
-                        snapshot,
-                        &tex,
-                        tile_x as f32,
-                        tile_y as f32,
-                        bmp.width as f32,
-                        bmp.height as f32,
-                    );
-                }
+            if let Some(tex) = textures.peek(key) {
+                paint::append_texture(
+                    snapshot,
+                    &tex,
+                    tile_x as f32,
+                    tile_y as f32,
+                    tex.width() as f32,
+                    tex.height() as f32,
+                );
             }
         }
         let label = format!("{}", page.page + 1);
@@ -948,18 +963,32 @@ fn snapshot_thumbs(snapshot: &gtk::Snapshot, view: &DocumentView) {
     maybe_mark_startup(view);
 }
 
-fn tile_texture(
-    cache: &mut paint::TextureCache,
-    key: &TileKey,
-    tile: &PaintTile,
-) -> Option<gdk::Texture> {
-    if let Some(hit) = cache.get(key) {
-        return Some(hit);
+fn ingest_cached_keys(view: &DocumentView) {
+    for key in page_tile_keys(view) {
+        ingest_arrived_texture(view, &key);
     }
-    let tex = paint::memory_texture_from_owned(tile.width, tile.height, tile.pixel_owner())?;
+    for key in thumb_tile_keys(view) {
+        ingest_arrived_texture(view, &key);
+    }
+}
+
+fn ingest_arrived_texture(view: &DocumentView, key: &TileKey) {
+    ingest_arrived_texture_shared(&view.shared, key);
+}
+
+fn ingest_arrived_texture_shared(shared: &Shared, key: &TileKey) {
+    if shared.textures.borrow().peek(key).is_some() {
+        return;
+    }
+    let Some(tile) = shared.doc.paint_tile(key) else {
+        return;
+    };
+    let Some(tex) = paint::memory_texture_from_owned(tile.width, tile.height, tile.pixel_owner())
+    else {
+        return;
+    };
     let tex: gdk::Texture = tex.upcast();
-    cache.insert(*key, tex.clone());
-    Some(tex)
+    shared.textures.borrow_mut().insert(*key, tex);
 }
 
 /// `TileReady::is_complete` gates `startup_ms` only, and only from the draw
@@ -1141,5 +1170,63 @@ mod tests {
             eprintln!("snapshot sizes: skipped (no GTK display)");
             return;
         };
+    }
+
+    /// Texture is created when the tile arrives, never again across N snapshots.
+    #[test]
+    fn snapshot_frames_create_zero_new_textures() {
+        let Ok(engine) = Engine::isolated() else {
+            eprintln!("texture reuse: Engine::isolated skipped (no PDFium)");
+            return;
+        };
+        let mut doc = openpdf_core::red_rect_document().expect("red rect PDF");
+        let path = std::env::temp_dir().join(format!(
+            "openpdf-reuse-{}-{}.pdf",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        doc.save(&path).expect("write red rect");
+        let session = crate::session::Session::open(&engine, &path).expect("open red rect");
+        let Some(()) = crate::test_gtk::on_gtk_thread(move || {
+            let opened = Rc::new(crate::session::Opened::Core(session));
+            let mut settings = crate::settings::Settings::default();
+            settings.zoom_mode = crate::settings::ZoomMode::Percent;
+            settings.zoom_percent = 100;
+            settings.show_thumbnails = false;
+            let view = build(opened, &settings, crate::Lang::En);
+            view.ensure_laid_out();
+            view.request_first_tile();
+            let t0 = std::time::Instant::now();
+            while t0.elapsed() < std::time::Duration::from_secs(8) {
+                view.ingest_ready_tiles();
+                if view.cached_texture_count() > 0 {
+                    break;
+                }
+                std::thread::sleep(std::time::Duration::from_millis(10));
+            }
+            assert!(
+                view.cached_texture_count() > 0,
+                "expected at least one texture after tile arrival"
+            );
+            paint::reset_texture_create_count();
+            let (w, h) = (128.0, 128.0);
+            for _ in 0..8 {
+                let snap = paint::snapshot_widget(view.pages_canvas(), w, h);
+                let _ = snap.to_node();
+            }
+            assert_eq!(
+                paint::texture_create_count(),
+                0,
+                "snapshot must reuse textures; creating per frame was the 2071 ms first_tile"
+            );
+        }) else {
+            let _ = std::fs::remove_file(&path);
+            eprintln!("texture reuse: skipped (no GTK display)");
+            return;
+        };
+        let _ = std::fs::remove_file(&path);
     }
 }

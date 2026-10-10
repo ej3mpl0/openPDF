@@ -29,7 +29,9 @@ mod signer;
 pub mod test_support;
 
 pub use command::{Command, History};
-pub use convert::{blank_document, images_to_pdf, pdf_to_rasters, raster_to_png};
+pub use convert::{
+    blank_document, images_to_pdf, pdf_to_rasters, raster_to_png, red_rect_document,
+};
 pub use document::{Document, DocumentId, PageInfo};
 pub use error::{
     describe_signer_unavailable, Error, InvalidKind, Result, SignedOp, SignerUnavailableReason,
