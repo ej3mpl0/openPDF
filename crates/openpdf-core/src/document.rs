@@ -105,6 +105,30 @@ pub(crate) fn load_lopdf(bytes: &[u8], password: Option<&str>) -> Result<LopdfDo
     Ok(doc)
 }
 
+/// Whether an encrypted document needs a non-empty user password: test the
+/// empty password against /U (and /UE for R6) with lopdf's standard security
+/// handler. Only the trailer /ID and the /Encrypt dictionary are involved: a
+/// two-entry scratch document carries the /Encrypt dictionary re-encoded from
+/// the state lopdf decoded at load, so no object tree is parsed again.
+///
+/// If the state cannot be re-encoded we answer `true` (the stricter choice:
+/// a merge then keeps requiring a password rather than dropping it).
+pub(crate) fn needs_user_password(doc: &LopdfDocument) -> bool {
+    let Some(state) = doc.encryption_state.as_ref() else {
+        return false;
+    };
+    let Ok(encrypt) = state.encode() else {
+        return true;
+    };
+    let mut probe = LopdfDocument::with_version(doc.version.clone());
+    let id = probe.add_object(Object::Dictionary(encrypt));
+    probe.trailer.set("Encrypt", Object::Reference(id));
+    if let Ok(file_id) = doc.trailer.get(b"ID") {
+        probe.trailer.set("ID", file_id.clone());
+    }
+    probe.authenticate_user_password("").is_err()
+}
+
 /// Re-apply the document's encryption before writing, so a document opened
 /// with a password is never written out in plaintext by accident.
 pub(crate) fn reencrypt_for_write(doc: &mut LopdfDocument) -> Result<()> {
@@ -227,8 +251,7 @@ impl Document {
         // ops that change encryption (protect -> per its user password,
         // unprotect -> false, merge -> its chosen source, derived ops ->
         // same state as their source) get the flag of their own output.
-        let requires_user_password = inner.was_encrypted()
-            && matches!(load_lopdf(&original, None), Err(Error::PasswordRequired));
+        let requires_user_password = needs_user_password(&inner);
         Ok(Self {
             id: DocumentId::next(),
             path,
@@ -637,6 +660,46 @@ fn number(obj: &Object) -> Result<f32> {
 mod tests {
     use super::*;
     use crate::test_support::corpus;
+
+    /// qpdf-made fixtures (corpus/encrypted/README.md): R2 RC4-40, R3 RC4-128,
+    /// R4 AES-128, R6 AES-256, each with an empty and a non-empty user password.
+    #[test]
+    fn requires_user_password_from_u_and_ue_on_qpdf_fixtures() {
+        for algo in ["rc4-40", "rc4-128", "aes-128", "aes-256"] {
+            for (kind, needs) in [("empty", false), ("user", true)] {
+                let name = format!("{algo}-{kind}");
+                let bytes = std::fs::read(corpus(&format!("encrypted/{name}.pdf"))).unwrap();
+                let pw = |p: &str| Zeroizing::new(p.to_string());
+
+                // Whichever password was supplied, the answer is the file's.
+                let by_owner =
+                    Document::from_bytes_with_password(bytes.clone(), None, pw("owner-pw"))
+                        .unwrap_or_else(|e| panic!("{name}: {e:?}"));
+                assert!(by_owner.is_encrypted(), "{name}");
+                assert_eq!(
+                    by_owner.requires_user_password(),
+                    needs,
+                    "{name} (owner pw)"
+                );
+                assert_eq!(needs_user_password(&by_owner.inner), needs, "{name}");
+
+                if needs {
+                    let by_user =
+                        Document::from_bytes_with_password(bytes.clone(), None, pw("user-pw"))
+                            .unwrap();
+                    assert!(by_user.requires_user_password(), "{name} (user pw)");
+                    assert!(matches!(
+                        Document::from_bytes(bytes, None),
+                        Err(Error::PasswordRequired)
+                    ));
+                } else {
+                    let open = Document::from_bytes(bytes, None).unwrap();
+                    assert!(open.is_encrypted(), "{name}");
+                    assert!(!open.requires_user_password(), "{name} (no pw)");
+                }
+            }
+        }
+    }
 
     #[test]
     fn open_hello_and_sizes() {
