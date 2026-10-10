@@ -435,3 +435,6 @@ msgstr ""
 
 msgid "Signing cancelled"
 msgstr ""
+
+msgid "document changed during signing"
+msgstr ""

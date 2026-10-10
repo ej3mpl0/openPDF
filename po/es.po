@@ -435,3 +435,6 @@ msgstr "Quedan pocos intentos de PIN"
 
 msgid "Signing cancelled"
 msgstr "Firma cancelada"
+
+msgid "document changed during signing"
+msgstr "el documento cambió durante la firma"

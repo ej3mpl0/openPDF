@@ -18,6 +18,7 @@ bindgen = ["uniffi/cli"]
 [dependencies]
 openpdf-core = { workspace = true }
 openpdf-sign = { workspace = true }
+sha2 = "0.10"
 thiserror = "2"
 uniffi = { workspace = true }
 zeroize = { version = "1", features = ["alloc"] }

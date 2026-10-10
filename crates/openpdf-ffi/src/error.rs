@@ -37,6 +37,8 @@ pub enum FfiError {
     LockPoisoned { message: String },
     #[error("{message}")]
     EngineUnavailable { message: String },
+    #[error("{message}")]
+    DocumentChanged { message: String },
 }
 
 impl FfiError {
@@ -58,6 +60,13 @@ impl FfiError {
         crate::ensure_i18n();
         Self::EngineUnavailable {
             message: openpdf_core::tr("PDFium is not available"),
+        }
+    }
+
+    pub(crate) fn document_changed() -> Self {
+        crate::ensure_i18n();
+        Self::DocumentChanged {
+            message: openpdf_core::tr("document changed during signing"),
         }
     }
 
@@ -132,6 +141,9 @@ impl FfiError {
                 message: redact_msg(message),
             },
             Self::EngineUnavailable { message } => Self::EngineUnavailable {
+                message: redact_msg(message),
+            },
+            Self::DocumentChanged { message } => Self::DocumentChanged {
                 message: redact_msg(message),
             },
         }

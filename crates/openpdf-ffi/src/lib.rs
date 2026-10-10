@@ -91,6 +91,7 @@ pub(crate) fn ensure_i18n() {
 mod tests {
     use super::*;
     use std::path::{Path, PathBuf};
+    use std::sync::Arc;
 
     fn corpus(name: &str) -> PathBuf {
         Path::new(env!("CARGO_MANIFEST_DIR"))
@@ -233,5 +234,178 @@ mod tests {
             .insert_pages(2, doc.clone(), vec![PageRange { start: 0, end: 0 }])
             .expect("self-insert");
         assert_eq!(inserted.page_count().unwrap(), 3);
+    }
+
+    struct SleepPin {
+        started: std::sync::Arc<std::sync::Barrier>,
+        delay: std::time::Duration,
+    }
+
+    impl PinProvider for SleepPin {
+        fn request_pin(&self, _token_label: String) -> Result<Arc<SecretPin>, FfiError> {
+            self.started.wait();
+            std::thread::sleep(self.delay);
+            Err(FfiError::pin_cancelled())
+        }
+    }
+
+    struct PinThenIdentity {
+        pin: SleepPin,
+    }
+
+    impl openpdf_core::Signer for PinThenIdentity {
+        fn list_certificates(&self) -> openpdf_core::Result<Vec<openpdf_core::CertificateInfo>> {
+            Ok(Vec::new())
+        }
+
+        fn sign(
+            &self,
+            pdf: &[u8],
+            _request: &openpdf_core::SignRequest,
+        ) -> openpdf_core::Result<Vec<u8>> {
+            match self.pin.request_pin("tok".into()) {
+                Ok(_) => Ok(pdf.to_vec()),
+                Err(FfiError::PinCancelled { .. }) => Err(openpdf_core::Error::PinCancelled),
+                Err(e) => Err(openpdf_core::Error::Sign(e.to_string())),
+            }
+        }
+
+        fn verify(&self, _pdf: &[u8]) -> openpdf_core::Result<Vec<openpdf_core::SignatureInfo>> {
+            Ok(Vec::new())
+        }
+    }
+
+    struct DelayedIdentitySigner {
+        started: std::sync::Arc<std::sync::Barrier>,
+        delay: std::time::Duration,
+    }
+
+    impl openpdf_core::Signer for DelayedIdentitySigner {
+        fn list_certificates(&self) -> openpdf_core::Result<Vec<openpdf_core::CertificateInfo>> {
+            Ok(Vec::new())
+        }
+
+        fn sign(
+            &self,
+            pdf: &[u8],
+            _request: &openpdf_core::SignRequest,
+        ) -> openpdf_core::Result<Vec<u8>> {
+            self.started.wait();
+            std::thread::sleep(self.delay);
+            Ok(pdf.to_vec())
+        }
+
+        fn verify(&self, _pdf: &[u8]) -> openpdf_core::Result<Vec<openpdf_core::SignatureInfo>> {
+            Ok(Vec::new())
+        }
+    }
+
+    fn identity_request() -> openpdf_core::SignRequest {
+        openpdf_core::SignRequest {
+            cert_id: "test-cert".into(),
+            reason: None,
+            location: None,
+            contact: None,
+            appearance: None,
+        }
+    }
+
+    #[test]
+    fn sign_does_not_block_render_while_pin_provider_sleeps() {
+        require_pdfium_in_ci();
+        if !engine_available() {
+            return;
+        }
+        let doc = PdfDocument::open(corpus_path("hello.pdf")).unwrap();
+        let started = std::sync::Arc::new(std::sync::Barrier::new(2));
+        let pin = SleepPin {
+            started: started.clone(),
+            delay: std::time::Duration::from_secs(2),
+        };
+        let sign_doc = doc.clone();
+        let handle = std::thread::spawn(move || {
+            sign_doc.sign_with_signer(&PinThenIdentity { pin }, &identity_request())
+        });
+        started.wait();
+        let t0 = std::time::Instant::now();
+        let tile = doc.render_tile(0, 1.0, 0, 0).expect("render during PIN");
+        let elapsed = t0.elapsed();
+        assert!(tile.width > 0 && tile.height > 0);
+        assert!(
+            elapsed < std::time::Duration::from_millis(1500),
+            "render_tile blocked for {elapsed:?} while PinProvider slept"
+        );
+        let err = handle.join().expect("sign thread");
+        assert!(
+            matches!(err, Err(FfiError::PinCancelled { .. })),
+            "got {err:?}"
+        );
+    }
+
+    #[test]
+    fn sign_fails_if_page_rotated_during_signing() {
+        let doc = PdfDocument::open(corpus_path("hello.pdf")).unwrap();
+        let before = doc.signer_bytes_hash().unwrap();
+        let started = std::sync::Arc::new(std::sync::Barrier::new(2));
+        let signer = DelayedIdentitySigner {
+            started: started.clone(),
+            delay: std::time::Duration::from_millis(400),
+        };
+        let sign_doc = doc.clone();
+        let handle =
+            std::thread::spawn(move || sign_doc.sign_with_signer(&signer, &identity_request()));
+        started.wait();
+        doc.rotate(0, 90).expect("rotate during sign");
+        let err = handle.join().expect("sign thread");
+        assert!(
+            matches!(err, Err(FfiError::DocumentChanged { .. })),
+            "got {err:?}"
+        );
+        assert_eq!(doc.pages().unwrap()[0].rotation, 90);
+        assert!(!doc.is_signed().unwrap());
+        assert_ne!(
+            doc.signer_bytes_hash().unwrap(),
+            before,
+            "rotation must change signer bytes"
+        );
+    }
+
+    #[test]
+    fn annotation_add_undo_restores_signer_hash_then_sign_succeeds() {
+        let doc = PdfDocument::open(corpus_path("hello.pdf")).unwrap();
+        let before = doc.signer_bytes_hash().unwrap();
+        let previous = doc
+            .add_header_annotation("review note")
+            .expect("annotation add");
+        doc.restore_document(previous).expect("annotation undo");
+        let after_undo = doc.signer_bytes_hash().unwrap();
+        assert_eq!(
+            before, after_undo,
+            "assumption failed: annotation add+undo must restore the signer-byte SHA-256 (not a signature failure)"
+        );
+
+        let started = std::sync::Arc::new(std::sync::Barrier::new(2));
+        let signer = DelayedIdentitySigner {
+            started: started.clone(),
+            delay: std::time::Duration::from_millis(400),
+        };
+        let sign_doc = doc.clone();
+        let handle =
+            std::thread::spawn(move || sign_doc.sign_with_signer(&signer, &identity_request()));
+        started.wait();
+        let previous = doc
+            .add_header_annotation("review note")
+            .expect("annotation add during sign");
+        doc.restore_document(previous)
+            .expect("annotation undo during sign");
+        handle
+            .join()
+            .expect("sign thread")
+            .expect("sign must succeed when add+undo restores the snapshot hash");
+        assert_eq!(
+            doc.signer_bytes_hash().unwrap(),
+            before,
+            "successful identity sign must keep the restored snapshot bytes"
+        );
     }
 }

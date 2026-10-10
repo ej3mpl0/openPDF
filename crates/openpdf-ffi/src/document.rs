@@ -323,6 +323,11 @@ impl PdfDocument {
 
     /// PKCS#11 PAdES sign via [`openpdf_sign::Pkcs11Signer`]. The PIN comes
     /// from the foreign [`PinProvider`] dialog — never as a string argument.
+    ///
+    /// The document mutex is **not** held across `PinProvider` / `C_Sign`.
+    /// Bytes are snapshotted under the lock, signed after release, then
+    /// swapped back only if a SHA-256 of the current signer bytes still
+    /// matches the snapshot.
     pub fn sign(
         &self,
         pin: Box<dyn PinProvider>,
@@ -338,9 +343,7 @@ impl PdfDocument {
             contact: None,
             appearance: None,
         };
-        let mut doc = self.lock()?;
-        doc.apply_signer(&signer, &request)?;
-        self.refresh(&doc)
+        self.sign_with_signer(&signer, &request)
     }
 }
 
@@ -410,6 +413,60 @@ impl PdfDocument {
         overlay.pages = convert_ranges(&ranges)?;
         let doc = self.lock()?;
         self.wrap_new(apply_overlay(&doc, &overlay)?)
+    }
+
+    /// Snapshot → release → sign → re-lock and CAS on SHA-256 of signer bytes.
+    pub(crate) fn sign_with_signer(
+        &self,
+        signer: &dyn Signer,
+        request: &SignRequest,
+    ) -> Result<(), FfiError> {
+        if request.cert_id.trim().is_empty() {
+            return Err(
+                openpdf_core::Error::invalid(openpdf_core::InvalidKind::CertIdRequired).into(),
+            );
+        }
+        let (snapshot, path) = {
+            let doc = self.lock()?;
+            (doc.bytes_for_signer()?, doc.path().map(|p| p.to_path_buf()))
+        };
+        let snapshot_hash = sha256_bytes(&snapshot);
+        let signed = signer.sign(&snapshot, request)?;
+        let mut doc = self.lock()?;
+        let current = doc.bytes_for_signer()?;
+        if sha256_bytes(&current) != snapshot_hash {
+            return Err(FfiError::document_changed());
+        }
+        *doc = Document::from_bytes(signed, path)?;
+        self.refresh(&doc)
+    }
+}
+
+fn sha256_bytes(bytes: &[u8]) -> [u8; 32] {
+    use sha2::{Digest, Sha256};
+    Sha256::digest(bytes).into()
+}
+
+#[cfg(test)]
+impl PdfDocument {
+    pub(crate) fn signer_bytes_hash(&self) -> Result<[u8; 32], FfiError> {
+        Ok(sha256_bytes(&self.lock()?.bytes_for_signer()?))
+    }
+
+    /// In-place header overlay used as a PDF annotation stand-in for CAS tests.
+    pub(crate) fn add_header_annotation(&self, text: &str) -> Result<Document, FfiError> {
+        let overlay = Overlay::new(OverlayKind::Header, text)?;
+        let mut doc = self.lock()?;
+        let previous = doc.clone();
+        *doc = apply_overlay(&doc, &overlay)?;
+        self.refresh(&doc)?;
+        Ok(previous)
+    }
+
+    pub(crate) fn restore_document(&self, previous: Document) -> Result<(), FfiError> {
+        let mut doc = self.lock()?;
+        *doc = previous;
+        self.refresh(&doc)
     }
 }
 
