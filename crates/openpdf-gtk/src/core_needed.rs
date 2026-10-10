@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: MPL-2.0
 //! What `openpdf-gtk` uses from the workspace `openpdf-core` crate.
 //!
 //! This crate depends on `openpdf-core` through the workspace (never a path

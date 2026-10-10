@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: MPL-2.0
 use std::fmt::{Display, Formatter};
 use std::path::PathBuf;
 use std::sync::OnceLock;

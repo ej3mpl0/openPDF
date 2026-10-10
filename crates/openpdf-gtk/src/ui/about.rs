@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: MPL-2.0
 use crate::i18n::t;
 use crate::Lang;
 use gtk::prelude::*;
