@@ -473,6 +473,18 @@ impl Engine {
         Some(worker().ok()?.cache.lock().ok()?.cap())
     }
 
+    /// Decoded RGBA bytes currently held by the process-wide tile cache.
+    pub fn cache_bytes_used(&self) -> usize {
+        Self::tile_cache_bytes_used()
+    }
+
+    pub fn tile_cache_bytes_used() -> usize {
+        worker()
+            .ok()
+            .and_then(|h| h.cache.lock().ok().map(|c| c.bytes_used()))
+            .unwrap_or(0)
+    }
+
     /// PDFium `render_tile` calls this process (cache hits excluded).
     pub fn render_tile_calls() -> u64 {
         super::pdfium::render_tile_calls()

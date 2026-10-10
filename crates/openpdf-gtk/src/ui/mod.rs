@@ -1,5 +1,6 @@
 // SPDX-License-Identifier: MPL-2.0
 mod about;
+mod canvas;
 mod home;
 mod password;
 mod preferences;
@@ -475,6 +476,9 @@ const CSS: &str = r#"
 "#;
 
 pub(crate) fn show_toast(overlay: &adw::ToastOverlay, msg: &str) {
+    if msg.is_empty() {
+        return;
+    }
     let t = adw::Toast::new(msg);
     t.set_timeout(3);
     overlay.add_toast(t);

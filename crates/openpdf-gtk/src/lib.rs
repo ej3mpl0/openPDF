@@ -20,6 +20,7 @@ pub mod bind;
 pub mod core_needed;
 pub mod i18n;
 pub mod measure;
+pub mod paint;
 pub mod pin;
 pub mod session;
 pub mod settings;

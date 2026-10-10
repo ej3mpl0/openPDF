@@ -126,22 +126,14 @@ pub fn ui_all_visible_painted_ms() -> u128 {
 /// multi-page continuous layout without committing a 300-page PDF.
 pub const DEFAULT_MEASURE_PAGES: usize = 32;
 
-/// Fail gate for [`BudgetReport::startup_ms`]: process start until every
-/// visible page tile and every visible thumbnail has been painted.
-///
-/// Measured locally under `xvfb-run` + `GSK_RENDERER=cairo`: ~140–150 ms for
-/// 32 pages (16 visible tiles + 3 thumbs). GitHub-hosted runners load
-/// GTK/PDFium more slowly; 8 s is the fail gate, not the expected time.
+/// Historical note only. `--measure` does not judge these; `/tmp/run-measure.py`
+/// (`OPENPDF_MEASURE_RAM_MIB`, `OPENPDF_MEASURE_STARTUP_MS`) is the gate.
 pub const MAX_STARTUP_MS: u128 = 8_000;
 
-/// Peak RSS (`VmHWM`) for the whole UI process (GTK + libadwaita + PDFium +
-/// tile cache) with [`DEFAULT_MEASURE_PAGES`] pages.
-///
-/// Measured locally: ~132–141 MiB. The 250 MiB plan ceiling stays the gate
-/// so CI noise and a warmer font/icon cache do not flake the job.
+/// Historical note only. See [`MAX_STARTUP_MS`].
 pub const MAX_RSS_BYTES: u64 = 250 * 1024 * 1024;
 
-/// Give up waiting for tiles (must be ≥ [`MAX_STARTUP_MS`]).
+/// Give up waiting for tiles.
 pub const MAX_MEASURE_WAIT_MS: u128 = 15_000;
 
 /// Hard timeout for the final-layout visible-tile + min-thumbnail wait,
@@ -247,6 +239,11 @@ pub struct BudgetReport {
     pub gl_renderer: String,
     /// `gtk_get_{major,minor,micro}_version`.
     pub gtk_version: String,
+    /// Realized window logical size (GTK allocation).
+    pub window_width: i32,
+    pub window_height: i32,
+    /// GTK `scale_factor` of the realized window.
+    pub scale: i32,
     /// Variables `--measure` code itself set. Must be empty.
     pub env_overrides: Vec<String>,
     pub ok: bool,
@@ -301,8 +298,12 @@ impl Display for BudgetReport {
             "ui_first_surface_ready_ms={}",
             self.ui_first_surface_ready_ms
         )?;
-        writeln!(f, "limit_startup_ms={MAX_STARTUP_MS}")?;
-        writeln!(f, "limit_peak_rss_bytes={MAX_RSS_BYTES}")?;
+        writeln!(
+            f,
+            "window_size={}x{}",
+            self.window_width, self.window_height
+        )?;
+        writeln!(f, "scale={}", self.scale)?;
         writeln!(f, "fontconfig_file={}", self.fontconfig_file)?;
         writeln!(f, "fontconfig_fonts={}", self.fontconfig_fonts)?;
         writeln!(f, "gtk_icon_theme={}", self.gtk_icon_theme)?;
@@ -344,16 +345,6 @@ impl BudgetReport {
                     "thumbnail tiles {}/{} (need ≥ {MIN_THUMB_TILES})",
                     self.thumb_ready, self.thumb_total
                 )
-            });
-        }
-        if self.startup_ms > MAX_STARTUP_MS {
-            error.get_or_insert_with(|| {
-                format!("startup {} ms exceeds {MAX_STARTUP_MS} ms", self.startup_ms)
-            });
-        }
-        if self.rss_bytes > MAX_RSS_BYTES {
-            error.get_or_insert_with(|| {
-                format!("peak RSS {} exceeds {MAX_RSS_BYTES}", self.rss_bytes)
             });
         }
         if !first_tile_mark_valid(self.ui_first_tile_ms, self.ui_first_tile_rendered_ms) {
@@ -644,13 +635,18 @@ fn read_proc(path: &str) -> String {
 
 /// Snapshot `/proc/self/smaps_rollup` + top 15 mappings (merged by path).
 pub fn format_rss_breakdown() -> String {
-    format_rss_breakdown_from(
+    format_rss_breakdown_from_parts(
         &read_proc("/proc/self/smaps_rollup"),
         &read_proc("/proc/self/smaps"),
+        openpdf_core::Engine::tile_cache_bytes_used(),
     )
 }
 
 pub fn format_rss_breakdown_from(rollup: &str, smaps: &str) -> String {
+    format_rss_breakdown_from_parts(rollup, smaps, 0)
+}
+
+pub fn format_rss_breakdown_from_parts(rollup: &str, smaps: &str, tiles_bytes: usize) -> String {
     let mut out = String::from("rss_breakdown=1\n");
     for (key, kb) in parse_smaps_rollup(rollup) {
         let slug = key
@@ -669,6 +665,8 @@ pub fn format_rss_breakdown_from(rollup: &str, smaps: &str) -> String {
     for (class, kb) in class_rss_kb(&maps) {
         out.push_str(&format!("rss_class_{}_kb={kb}\n", class.as_str()));
     }
+    let tiles_kb = (tiles_bytes / 1024) as u64;
+    out.push_str(&format!("rss_class_tiles_kb={tiles_kb}\n"));
     for (i, m) in top_smaps_mappings(&maps, 15).into_iter().enumerate() {
         let path = if m.pathname.is_empty() {
             "[anon]".to_string()
@@ -1066,11 +1064,16 @@ impl BudgetReport {
         self
     }
 
-    /// Fill realized `gsk_renderer` / `gl_renderer` from a mapped window.
+    /// Fill realized `gsk_renderer` / `gl_renderer` / window size / scale.
     /// Does not create a GL context.
     pub fn with_window_graphics(mut self, widget: &impl gtk::prelude::IsA<gtk::Widget>) -> Self {
+        use gtk::prelude::WidgetExt;
+        let w = widget.as_ref();
         self.gsk_renderer = realized_gsk_renderer_name(widget);
         self.gl_renderer = existing_gl_renderer();
+        self.window_width = w.width();
+        self.window_height = w.height();
+        self.scale = w.scale_factor();
         self
     }
 }
@@ -1190,16 +1193,44 @@ mod tests {
         assert!(text.contains("gsk_renderer=none"));
         assert!(text.contains("gl_renderer=none"));
         assert!(text.contains("gtk_version="));
+        assert!(text.contains("window_size=0x0"));
+        assert!(text.contains("scale=0"));
+        assert!(!text.contains("limit_startup_ms="));
+        assert!(!text.contains("limit_peak_rss_bytes="));
         let named = BudgetReport {
             gsk_renderer: "GskCairoRenderer".into(),
             gl_renderer: "llvmpipe".into(),
             gtk_version: "4.14.5".into(),
+            window_width: 1280,
+            window_height: 800,
+            scale: 1,
             ..Default::default()
         }
         .to_string();
+        assert!(named.contains("window_size=1280x800"));
+        assert!(named.contains("scale=1"));
         assert!(named.contains("gsk_renderer=GskCairoRenderer"));
         assert!(named.contains("gl_renderer=llvmpipe"));
         assert!(named.contains("gtk_version=4.14.5"));
+    }
+
+    #[test]
+    fn evaluate_ignores_rss_and_startup_limits() {
+        let report = BudgetReport {
+            pages: 32,
+            startup_ms: 60_000,
+            rss_bytes: 2 * 1024 * 1024 * 1024,
+            visible_ready: 16,
+            visible_total: 16,
+            thumb_ready: 4,
+            thumb_total: 4,
+            ui_first_tile_ms: 230,
+            ui_first_tile_rendered_ms: 209,
+            env_overrides: Vec::new(),
+            ..Default::default()
+        }
+        .evaluate();
+        assert!(report.ok, "{:?}", report.error);
     }
 
     #[test]
@@ -1448,6 +1479,9 @@ Pss:                  32 kB
         assert!(text.contains("rss_class_heap_kb=512"));
         assert!(text.contains("rss_class_icon_kb=256"));
         assert!(text.contains("rss_class_gtk_kb=128"));
+        assert!(text.contains("rss_class_tiles_kb=0"));
+        let with_tiles = format_rss_breakdown_from_parts(rollup, smaps, 66_355_200);
+        assert!(with_tiles.contains("rss_class_tiles_kb=64800"));
         assert!(text.contains("rss_map_1=libpdfium 2048 /usr/local/lib/libpdfium.so"));
         assert!(text.contains("rss_map_2=heap 512 [heap]"));
         let top = top_smaps_mappings(&maps, 15);

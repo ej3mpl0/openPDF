@@ -121,8 +121,22 @@ pub fn format_core_error(err: &Error) -> String {
         Error::PinCancelled => tr("PIN entry was cancelled"),
         Error::PasswordRequired => tr("password is required"),
         Error::WrongPassword => tr("wrong password"),
+        other if is_tile_out_of_range(other) => String::new(),
         _ => err.to_locale_string(),
     }
+}
+
+/// Draft #51 (`TileOutOfRange`). Do not toast; skip paint.
+pub fn is_tile_out_of_range(err: &Error) -> bool {
+    is_tile_out_of_range_message(&format!("{err:?}"))
+        || is_tile_out_of_range_message(&err.to_string())
+}
+
+/// Worker `TileEvent::Failed` carries `Error::to_string()`.
+pub fn is_tile_out_of_range_message(msg: &str) -> bool {
+    let lower = msg.to_ascii_lowercase();
+    let compact: String = lower.chars().filter(|c| !c.is_whitespace()).collect();
+    compact.contains("tileoutofrange") || (lower.contains("tile") && lower.contains("out of range"))
 }
 
 fn format_invalid_kind(kind: &InvalidKind) -> String {
@@ -243,5 +257,17 @@ mod tests {
             "PIN entry was cancelled"
         );
         assert!(!matches!(Error::PinCancelled, Error::Sign(_)));
+    }
+
+    #[test]
+    fn tile_out_of_range_is_not_a_toast() {
+        assert!(is_tile_out_of_range_message("TileOutOfRange"));
+        assert!(is_tile_out_of_range_message(
+            "tile (3,4) is out of range (0..2 x 0..3)"
+        ));
+        assert!(!is_tile_out_of_range_message(
+            "page 3 is out of range (0..2)"
+        ));
+        assert!(!is_tile_out_of_range_message("PDFium: render failed"));
     }
 }

@@ -379,6 +379,8 @@ impl Session {
     }
 
     pub fn request_view_tiles(&self, keys: &[ViewTile], priority: Priority) {
+        let sizes = self.pages();
+        let keys = crate::tiles::filter_keys_in_grid(keys, &sizes);
         if keys.is_empty() {
             return;
         }
@@ -423,11 +425,25 @@ impl Session {
 
     /// Take at most one finished tile so the UI can `queue_draw` per arrival.
     pub fn poll_one(&self) -> bool {
-        if self.engine.try_recv().is_some() {
-            crate::measure::mark_first_tile_rendered();
-            true
-        } else {
-            false
+        match self.engine.try_recv() {
+            Some(openpdf_core::TileEvent::Ready(_)) => {
+                crate::measure::mark_first_tile_rendered();
+                true
+            }
+            Some(openpdf_core::TileEvent::Failed { key, message }) => {
+                if crate::i18n::is_tile_out_of_range_message(&message) {
+                    // Draft #51: do not paint, do not toast.
+                    if cfg!(debug_assertions) {
+                        eprintln!(
+                            "openpdf-gtk: tile out of range, skip paint page={} x={} y={}: {message}",
+                            key.page, key.x, key.y
+                        );
+                    }
+                }
+                true
+            }
+            Some(openpdf_core::TileEvent::Cancelled(_)) => true,
+            None => false,
         }
     }
 
@@ -509,10 +525,12 @@ impl MockView {
     }
 
     pub fn request_view_tiles(&self, keys: &[ViewTile], _priority: Priority) {
+        let sizes = self.pages();
+        let keys = crate::tiles::filter_keys_in_grid(keys, &sizes);
         let Ok(mut cache) = self.cache.lock() else {
             return;
         };
-        for key in keys {
+        for key in &keys {
             if cache.get(key).is_some() {
                 continue;
             }
@@ -684,16 +702,8 @@ impl Opened {
 
     pub fn paint_tile(&self, key: &ViewTile) -> Option<PaintTile> {
         match self {
-            Self::Core(s) => s.cache_get(key).map(|t| PaintTile {
-                width: t.width,
-                height: t.height,
-                rgba: t.rgba.clone(),
-            }),
-            Self::Mock(s) => s.cache_bitmap(key).map(|t| PaintTile {
-                width: t.width,
-                height: t.height,
-                rgba: t.pixels.clone(),
-            }),
+            Self::Core(s) => s.cache_get(key).map(PaintTile::from_core),
+            Self::Mock(s) => s.cache_bitmap(key).map(PaintTile::from_mock),
         }
     }
 
@@ -909,7 +919,38 @@ impl Opened {
 pub struct PaintTile {
     pub width: u32,
     pub height: u32,
-    pub rgba: Vec<u8>,
+    pixels: PaintPixels,
+}
+
+enum PaintPixels {
+    Core(Arc<Tile>),
+    Mock(Arc<TileBitmap>),
+}
+
+impl PaintTile {
+    fn from_core(tile: Arc<Tile>) -> Self {
+        Self {
+            width: tile.width,
+            height: tile.height,
+            pixels: PaintPixels::Core(tile),
+        }
+    }
+
+    fn from_mock(tile: Arc<TileBitmap>) -> Self {
+        Self {
+            width: tile.width,
+            height: tile.height,
+            pixels: PaintPixels::Mock(tile),
+        }
+    }
+
+    /// Borrowed RGBA. Do not clone the buffer on the paint path.
+    pub fn rgba(&self) -> &[u8] {
+        match &self.pixels {
+            PaintPixels::Core(t) => &t.rgba,
+            PaintPixels::Mock(t) => &t.pixels,
+        }
+    }
 }
 
 pub fn sample_pdf_path() -> Option<PathBuf> {
@@ -1123,9 +1164,15 @@ mod tests {
             }
         };
 
-        if gtk::init().is_err() && !gtk::is_initialized() {
+        if !gtk::is_initialized() {
+            if gtk::init().is_err() {
+                let _ = std::fs::remove_file(&path);
+                eprintln!("viewport cache reuse: skipped (no GTK display)");
+                return;
+            }
+        } else if !gtk::is_initialized_main_thread() {
             let _ = std::fs::remove_file(&path);
-            eprintln!("viewport cache reuse: skipped (no GTK display)");
+            eprintln!("viewport cache reuse: skipped (GTK initialized on another thread)");
             return;
         }
         let scroll = gtk::ScrolledWindow::new();
