@@ -666,3 +666,21 @@ msgstr "El diálogo de PIN necesita una pantalla"
 
 msgid "PIN entry was cancelled"
 msgstr "Se canceló la introducción del PIN"
+
+msgid "--measure opens the real libadwaita window (needs a display or xvfb-run), loads a multi-page PDF, waits for visible tiles and thumbnails, then prints startup time and peak RSS and exits non-zero if over the documented limits."
+msgstr "--measure abre la ventana real de libadwaita (hace falta una pantalla o xvfb-run), carga un PDF de varias páginas, espera teselas visibles y miniaturas, imprime el tiempo de arranque y el RSS de pico y sale distinto de cero si se superan los límites."
+
+msgid "Signing cancelled"
+msgstr "Firma cancelada"
+
+msgid "Apply"
+msgstr "Aplicar"
+
+msgid "Document updated."
+msgstr "Documento actualizado."
+
+msgid "Open a PDF before using this tool."
+msgstr "Abre un PDF antes de usar esta herramienta."
+
+msgid "Choose a source PDF."
+msgstr "Elige un PDF de origen."

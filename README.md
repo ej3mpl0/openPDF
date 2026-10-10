@@ -39,6 +39,9 @@ GTK4 + libadwaita (no webview). Opens documents and asks `openpdf-core::Engine` 
 Does not depend on `openpdf-sign`; signing goes through `Signer::list_certificates` and
 `SignRequest.cert_id`. Signed documents (`Document::is_signed`) are read-only. The PIN
 is asked by the token via `PinProvider` (UI dialog), never as a field on `SignRequest`.
+Organize / optimize / protect / convert tools use libadwaita dialogs. Signed documents
+disable rewrite tools with an explanation; extract and image conversion stay available.
+Password fields use `GtkPasswordEntry` and are never written to logs or toasts.
 
 ```
 sudo apt install libgtk-4-dev libadwaita-1-dev pkg-config

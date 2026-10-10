@@ -3,6 +3,7 @@ mod about;
 mod home;
 mod preferences;
 mod sign;
+mod tools;
 mod viewer;
 mod window;
 
