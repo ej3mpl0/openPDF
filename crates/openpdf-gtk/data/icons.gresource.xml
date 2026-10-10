@@ -1,0 +1,11 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<gresources>
+  <!-- IconTheme::add_resource_path("/io/github/ej3mpl0/openpdf/icons") looks up
+       $prefix/scalable/actions/<name>.svg. Keep aliases so the on-disk tree
+       can stay under data/icons/. -->
+  <gresource prefix="/io/github/ej3mpl0/openpdf/icons">
+    <file alias="scalable/actions/document-open-symbolic.svg">icons/scalable/actions/document-open-symbolic.svg</file>
+    <file alias="scalable/actions/sidebar-show-symbolic.svg">icons/scalable/actions/sidebar-show-symbolic.svg</file>
+    <file alias="scalable/actions/open-menu-symbolic.svg">icons/scalable/actions/open-menu-symbolic.svg</file>
+  </gresource>
+</gresources>

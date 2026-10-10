@@ -5,7 +5,11 @@ use crate::i18n::{tr, tr_args};
 
 /// Crate-wide error type. Variants are stable so the GTK UI can localize them
 /// itself; [`Display`] uses the shared gettext catalog.
+///
+/// `#[non_exhaustive]` so additive variants (`PinCancelled`, …) do not break
+/// downstream `match` expressions that include a wildcard arm.
 #[derive(Debug)]
+#[non_exhaustive]
 pub enum Error {
     Io(io::Error),
     Structure(String),
@@ -25,10 +29,28 @@ pub enum Error {
     WrongPassword,
     Invalid(InvalidKind),
     Sign(String),
+    /// PKCS#11 (or another token backend) could not be loaded.
+    SignerUnavailable {
+        reason: SignerUnavailableReason,
+    },
+    /// The user dismissed the PIN dialog or submitted an empty field.
+    /// Unit variant — no payload. The token was not touched. UIs treat
+    /// this as a silent cancel. The CLI prints a neutral status, not an error.
+    PinCancelled,
     /// The PDF already has a signature; `op` would invalidate it.
     Signed {
         op: SignedOp,
     },
+}
+
+/// Why [`Error::SignerUnavailable`] fired. Match this; do not parse [`Display`].
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[non_exhaustive]
+pub enum SignerUnavailableReason {
+    /// No PKCS#11 module on the search path / `OPENPDF_PKCS11_MODULE`.
+    ModuleNotFound,
+    /// A module path was found but loading it failed.
+    LoadFailed,
 }
 
 /// User-facing invalid-input cases. Match this instead of parsing [`Display`].
@@ -105,6 +127,8 @@ impl Error {
             Error::WrongPassword => tr("wrong password"),
             Error::Invalid(kind) => kind.to_locale_string(),
             Error::Sign(m) => tr_args("sign: {detail}", &[("detail", &tr(m))]),
+            Error::SignerUnavailable { reason } => describe_signer_unavailable(reason),
+            Error::PinCancelled => tr("PIN entry was cancelled"),
             Error::Signed { op } => tr_args(
                 "document is signed; {op} would invalidate the signature (incremental save only)",
                 &[("op", &tr(op.msgid()))],
@@ -185,6 +209,18 @@ impl Error {
     pub fn signed(op: SignedOp) -> Self {
         Error::Signed { op }
     }
+
+    pub fn signer_unavailable(reason: SignerUnavailableReason) -> Self {
+        Error::SignerUnavailable { reason }
+    }
+}
+
+/// Translated text for [`Error::SignerUnavailable`]. The UI must not build this.
+pub fn describe_signer_unavailable(reason: &SignerUnavailableReason) -> String {
+    match reason {
+        SignerUnavailableReason::ModuleNotFound => tr("PKCS#11 module not available"),
+        SignerUnavailableReason::LoadFailed => tr("Could not load the PKCS#11 module"),
+    }
 }
 
 #[cfg(test)]
@@ -208,6 +244,7 @@ mod tests {
 
     #[test]
     fn ui_can_match_structured_errors() {
+        let _g = crate::test_support::locale_test_guard();
         let err = Error::signed(SignedOp::Rotate);
         assert!(matches!(
             err,
@@ -217,5 +254,43 @@ mod tests {
         ));
         let err = Error::invalid(InvalidKind::CertIdRequired);
         assert!(matches!(err, Error::Invalid(InvalidKind::CertIdRequired)));
+        let err = Error::signer_unavailable(SignerUnavailableReason::ModuleNotFound);
+        assert!(matches!(
+            err,
+            Error::SignerUnavailable {
+                reason: SignerUnavailableReason::ModuleNotFound
+            }
+        ));
+        set_locale("en");
+        assert_eq!(err.to_string(), "PKCS#11 module not available");
+        assert_eq!(
+            describe_signer_unavailable(&SignerUnavailableReason::LoadFailed),
+            "Could not load the PKCS#11 module"
+        );
+        set_locale("es");
+        assert_ne!(
+            describe_signer_unavailable(&SignerUnavailableReason::ModuleNotFound),
+            "PKCS#11 module not available"
+        );
+        set_locale("en");
+        assert!(matches!(Error::PinCancelled, Error::PinCancelled));
+    }
+
+    #[test]
+    fn pin_cancelled_is_structured_not_sign() {
+        let _g = crate::test_support::locale_test_guard();
+        set_locale("en");
+        // Unit variant: no payload. `Error::PinCancelled` (not `PinCancelled(_)`).
+        let err = Error::PinCancelled;
+        assert!(matches!(err, Error::PinCancelled));
+        assert_eq!(err.to_string(), "PIN entry was cancelled");
+        assert!(!matches!(err, Error::Sign(_)));
+        set_locale("es");
+        assert_eq!(
+            Error::PinCancelled.to_string(),
+            tr("PIN entry was cancelled")
+        );
+        assert_ne!(Error::PinCancelled.to_string(), "PIN entry was cancelled");
+        set_locale("en");
     }
 }
