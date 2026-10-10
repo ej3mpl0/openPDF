@@ -416,3 +416,5 @@ fn unknown_cert_id_fails() {
 fn can_use(c: &openpdf_core::CertificateInfo) -> bool {
     c.usage.is_empty() || c.usage.contains(&CertificateUsage::Signing)
 }
+
+mod byterange;

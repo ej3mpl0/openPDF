@@ -414,3 +414,33 @@ msgstr "--at empieza en 1"
 
 msgid "crop box must be llx,lly,urx,ury"
 msgstr "el recorte debe ser llx,lly,urx,ury"
+
+msgid "Signed again later"
+msgstr "Firmado de nuevo más tarde"
+
+msgid "Comments were added after signing"
+msgstr "Se añadieron comentarios después de firmar"
+
+msgid "Warning: the document was modified after signing; what you see may not be what was signed"
+msgstr "Aviso: el documento se modificó después de firmarlo; lo que ves puede no ser lo que se firmó"
+
+msgid "signature ByteRange must have exactly 4 integers (found {count})"
+msgstr "el ByteRange de la firma debe tener exactamente 4 enteros (tiene {count})"
+
+msgid "signature ByteRange has a negative value"
+msgstr "el ByteRange de la firma tiene un valor negativo"
+
+msgid "signature ByteRange must start at offset 0 (starts at {offset})"
+msgstr "el ByteRange de la firma debe empezar en el desplazamiento 0 (empieza en {offset})"
+
+msgid "signature ByteRange is outside the file"
+msgstr "el ByteRange de la firma queda fuera del archivo"
+
+msgid "signature ByteRange ranges overlap"
+msgstr "los rangos del ByteRange de la firma se solapan"
+
+msgid "signature ByteRange gap is not exactly the signature Contents"
+msgstr "el hueco del ByteRange de la firma no coincide exactamente con el Contents de la firma"
+
+msgid "signature ByteRange does not end at the end of the signed revision"
+msgstr "el ByteRange de la firma no termina al final de la revisión firmada"

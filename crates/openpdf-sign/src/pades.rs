@@ -3,7 +3,10 @@
 use std::io::Write;
 
 use lopdf::{Dictionary, Document, Object, ObjectId};
-use openpdf_core::{tr_args, Error, Result, SignRequest, SignatureInfo, VisibleAppearance};
+use openpdf_core::{
+    tr_args, ByteRangeError, Error, LaterModification, Result, SignRequest, SignatureInfo,
+    VisibleAppearance,
+};
 use sha2::{Digest, Sha256};
 
 use crate::cades;
@@ -130,56 +133,288 @@ pub(crate) fn verify_signatures(pdf: &[u8]) -> Result<Vec<SignatureInfo>> {
         if !is_signature_value(dict) {
             continue;
         }
-        out.push(verify_one(pdf, dict));
+        out.push(verify_one(pdf, &doc, dict)?);
     }
     Ok(out)
 }
 
-fn verify_one(pdf: &[u8], dict: &Dictionary) -> SignatureInfo {
+/// Structural ByteRange checks. Returns the four offsets and the end of the
+/// signed revision (`c + d`).
+pub(crate) fn check_byte_range(
+    pdf: &[u8],
+    dict: &Dictionary,
+) -> std::result::Result<[usize; 4], ByteRangeError> {
+    let arr = match dict.get(b"ByteRange") {
+        Ok(Object::Array(arr)) => arr,
+        _ => return Err(ByteRangeError::NotFourIntegers { count: 0 }),
+    };
+    let ints: Vec<i64> = arr
+        .iter()
+        .filter_map(|o| match o {
+            Object::Integer(i) => Some(*i),
+            _ => None,
+        })
+        .collect();
+    if arr.len() != 4 || ints.len() != 4 {
+        return Err(ByteRangeError::NotFourIntegers { count: arr.len() });
+    }
+    if ints.iter().any(|v| *v < 0) {
+        return Err(ByteRangeError::Negative);
+    }
+    if ints[0] != 0 {
+        return Err(ByteRangeError::FirstOffsetNotZero { offset: ints[0] });
+    }
+    let v: Vec<usize> = ints
+        .iter()
+        .map(|i| usize::try_from(*i).map_err(|_| ByteRangeError::OutOfBounds))
+        .collect::<std::result::Result<_, _>>()?;
+    let (a, b, c, d) = (v[0], v[1], v[2], v[3]);
+    let first_end = a.checked_add(b).ok_or(ByteRangeError::OutOfBounds)?;
+    let second_end = c.checked_add(d).ok_or(ByteRangeError::OutOfBounds)?;
+    if first_end > pdf.len() || second_end > pdf.len() {
+        return Err(ByteRangeError::OutOfBounds);
+    }
+    if c < first_end {
+        return Err(ByteRangeError::Overlapping);
+    }
+    // The gap must be exactly `<hex>` of this dictionary's /Contents.
+    let gap = &pdf[first_end..c];
+    let expected = match dict.get(b"Contents") {
+        Ok(Object::String(bytes, _)) => bytes,
+        _ => return Err(ByteRangeError::GapNotContents),
+    };
+    if gap.len() < 2 || gap[0] != b'<' || gap[gap.len() - 1] != b'>' {
+        return Err(ByteRangeError::GapNotContents);
+    }
+    let inner = &gap[1..gap.len() - 1];
+    let decoded = std::str::from_utf8(inner)
+        .ok()
+        .and_then(|h| hex_decode(h).ok());
+    if decoded.as_deref() != Some(expected.as_slice()) {
+        return Err(ByteRangeError::GapNotContents);
+    }
+    if Some(second_end) != revision_end(pdf, c) {
+        return Err(ByteRangeError::NotRevisionEnd);
+    }
+    Ok([a, b, c, d])
+}
+
+/// End of the incremental update that contains offset `from`: just past its
+/// first `%%EOF` marker plus one optional end-of-line.
+fn revision_end(pdf: &[u8], from: usize) -> Option<usize> {
+    let mut end = from + find_subslice(&pdf[from..], b"%%EOF")? + 5;
+    if pdf[end..].starts_with(b"\r\n") {
+        end += 2;
+    } else if pdf[end..].starts_with(b"\n") || pdf[end..].starts_with(b"\r") {
+        end += 1;
+    }
+    Some(end)
+}
+
+fn verify_one(pdf: &[u8], doc: &Document, dict: &Dictionary) -> Result<SignatureInfo> {
     let reason = dict_text(dict, b"Reason");
     let location = dict_text(dict, b"Location");
     let name = dict_text(dict, b"Name");
 
-    let Some(ranges) = byte_range(dict) else {
-        return SignatureInfo {
-            name,
-            reason,
-            location,
-            valid: Some(false),
-        };
+    let [a, b, c, d] = check_byte_range(pdf, dict).map_err(Error::ByteRange)?;
+    let signed_end = c + d;
+    let modified_after = if pdf[signed_end..].iter().all(|b| b.is_ascii_whitespace()) {
+        None
+    } else {
+        Some(classify_later_updates(&pdf[..signed_end], doc))
+    };
+    let invalid = |name| SignatureInfo {
+        name,
+        reason: reason.clone(),
+        location: location.clone(),
+        valid: Some(false),
+        modified_after,
     };
     let Some(contents) = contents_bytes(dict) else {
-        return SignatureInfo {
-            name,
-            reason,
-            location,
-            valid: Some(false),
-        };
+        return Ok(invalid(name));
     };
     if contents.iter().all(|b| *b == 0) {
-        return SignatureInfo {
-            name,
-            reason,
-            location,
-            valid: Some(false),
-        };
+        return Ok(invalid(name));
     }
-    let Ok(message) = byterange_bytes(pdf, &ranges) else {
-        return SignatureInfo {
-            name,
-            reason,
-            location,
-            valid: Some(false),
-        };
+    let Ok(message) = byterange_bytes(pdf, &[a as i64, b as i64, c as i64, d as i64]) else {
+        return Ok(invalid(name));
     };
     // Integrity of the claimed ranges: SHA-256 is also pinned inside CMS.
     let _ = Sha256::digest(&message);
     let check = cades::verify_detached(&contents, &message);
-    SignatureInfo {
+    Ok(SignatureInfo {
         name: name.or(check.signer),
         reason,
         location,
         valid: Some(check.valid),
+        modified_after,
+    })
+}
+
+/// Compare the signed revision with the final document and classify every
+/// object that was added or changed afterwards. Anything not provably benign
+/// is [`LaterModification::Other`].
+fn classify_later_updates(signed: &[u8], full: &Document) -> LaterModification {
+    let Ok(old) = Document::load_mem(signed) else {
+        return LaterModification::Other;
+    };
+    let changed: Vec<ObjectId> = full
+        .objects
+        .iter()
+        .filter(|(id, obj)| old.objects.get(id) != Some(obj))
+        .map(|(id, _)| *id)
+        .collect();
+    if old.objects.keys().any(|id| !full.objects.contains_key(id)) {
+        return LaterModification::Other;
+    }
+    // Objects drawn by new signature widgets (their AP streams and resources).
+    let mut sig_owned: std::collections::HashSet<ObjectId> = Default::default();
+    for id in &changed {
+        let Ok(d) = full.get_object(*id).and_then(Object::as_dict) else {
+            continue;
+        };
+        if is_signature_widget(full, d) {
+            if let Ok(ap) = d.get(b"AP") {
+                collect_refs(full, ap, &mut sig_owned);
+            }
+        }
+    }
+    let mut worst = LaterModification::LaterSignature;
+    for id in changed {
+        if sig_owned.contains(&id) {
+            continue;
+        }
+        let new = &full.objects[&id];
+        let kind = match (old.objects.get(&id), new.as_dict()) {
+            (None, Ok(d)) if is_signature_value(d) || is_signature_widget(full, d) => {
+                LaterModification::LaterSignature
+            }
+            (None, Ok(d)) if is_replacement_acroform(&old, full, id, d) => {
+                LaterModification::LaterSignature
+            }
+            (None, Ok(d)) if is_harmless_comment(d) => LaterModification::Annotations,
+            (Some(prev), Ok(d)) => match prev.as_dict() {
+                Ok(p) if only_keys_changed(p, d, &[b"Annots"]) && annots_only_grew(p, d) => {
+                    LaterModification::LaterSignature
+                }
+                Ok(p) if only_keys_changed(p, d, &[b"AcroForm"]) => {
+                    LaterModification::LaterSignature
+                }
+                Ok(p) if only_keys_changed(p, d, &[b"Fields", b"SigFlags"]) => {
+                    LaterModification::LaterSignature
+                }
+                _ => LaterModification::Other,
+            },
+            _ => LaterModification::Other,
+        };
+        worst = worse(worst, kind);
+    }
+    worst
+}
+
+/// A new AcroForm dictionary (the catalog now points to it) that only
+/// appends to the previous field list and sets SigFlags.
+fn is_replacement_acroform(old: &Document, full: &Document, id: ObjectId, d: &Dictionary) -> bool {
+    let acro_of = |doc: &Document| match doc.catalog().ok()?.get(b"AcroForm").ok()? {
+        Object::Reference(r) => Some(*r),
+        _ => None,
+    };
+    if acro_of(full) != Some(id) || d.iter().any(|(k, _)| k != b"Fields" && k != b"SigFlags") {
+        return false;
+    }
+    let fields = |doc: &Document, dict: Option<&Dictionary>| -> Option<Vec<Object>> {
+        match dict.map(|d| d.get(b"Fields")) {
+            None | Some(Err(_)) => Some(Vec::new()),
+            Some(Ok(Object::Array(a))) => Some(a.clone()),
+            Some(Ok(Object::Reference(r))) => doc.get_object(*r).ok()?.as_array().ok().cloned(),
+            _ => None,
+        }
+    };
+    let old_acro = match old.catalog().ok().and_then(|c| c.get(b"AcroForm").ok()) {
+        Some(Object::Reference(r)) => old.get_object(*r).ok().and_then(|o| o.as_dict().ok()),
+        Some(Object::Dictionary(d)) => Some(d),
+        _ => None,
+    };
+    match (fields(old, old_acro), fields(full, Some(d))) {
+        (Some(o), Some(n)) => n.starts_with(&o),
+        _ => false,
+    }
+}
+
+fn worse(a: LaterModification, b: LaterModification) -> LaterModification {
+    let rank = |m| match m {
+        LaterModification::LaterSignature => 0,
+        LaterModification::Annotations => 1,
+        _ => 2,
+    };
+    if rank(b) > rank(a) {
+        b
+    } else {
+        a
+    }
+}
+
+fn name_is(d: &Dictionary, key: &[u8], value: &[u8]) -> bool {
+    matches!(d.get(key), Ok(Object::Name(n)) if n.as_slice() == value)
+}
+
+/// A widget whose field is a signature field carrying a signature value.
+fn is_signature_widget(doc: &Document, d: &Dictionary) -> bool {
+    if !name_is(d, b"Subtype", b"Widget") || !name_is(d, b"FT", b"Sig") {
+        return false;
+    }
+    match d.get(b"V") {
+        Ok(Object::Reference(id)) => doc
+            .get_object(*id)
+            .and_then(Object::as_dict)
+            .is_ok_and(is_signature_value),
+        _ => false,
+    }
+}
+
+/// Text/Popup comments that draw nothing on the page: no appearance, or
+/// flagged Hidden (2) / NoView (32).
+fn is_harmless_comment(d: &Dictionary) -> bool {
+    let comment = name_is(d, b"Subtype", b"Text") || name_is(d, b"Subtype", b"Popup");
+    let flags = match d.get(b"F") {
+        Ok(Object::Integer(f)) => *f,
+        _ => 0,
+    };
+    comment && (d.get(b"AP").is_err() || flags & (2 | 32) != 0)
+}
+
+fn only_keys_changed(old: &Dictionary, new: &Dictionary, allowed: &[&[u8]]) -> bool {
+    let differs = |k: &[u8]| old.get(k).ok() != new.get(k).ok();
+    old.iter()
+        .chain(new.iter())
+        .all(|(k, _)| allowed.contains(&k.as_slice()) || !differs(k))
+}
+
+fn annots_only_grew(old: &Dictionary, new: &Dictionary) -> bool {
+    let arr = |d: &Dictionary| match d.get(b"Annots") {
+        Ok(Object::Array(a)) => Some(a.clone()),
+        Err(_) => Some(Vec::new()),
+        _ => None,
+    };
+    match (arr(old), arr(new)) {
+        (Some(o), Some(n)) => n.starts_with(&o),
+        _ => false,
+    }
+}
+
+fn collect_refs(doc: &Document, obj: &Object, seen: &mut std::collections::HashSet<ObjectId>) {
+    match obj {
+        Object::Reference(id) => {
+            if seen.insert(*id) {
+                if let Ok(o) = doc.get_object(*id) {
+                    collect_refs(doc, o, seen);
+                }
+            }
+        }
+        Object::Array(a) => a.iter().for_each(|o| collect_refs(doc, o, seen)),
+        Object::Dictionary(d) => d.iter().for_each(|(_, o)| collect_refs(doc, o, seen)),
+        Object::Stream(s) => s.dict.iter().for_each(|(_, o)| collect_refs(doc, o, seen)),
+        _ => {}
     }
 }
 
@@ -189,20 +424,6 @@ fn is_signature_value(dict: &Dictionary) -> bool {
         return false;
     }
     dict.get(b"Contents").is_ok() && dict.get(b"ByteRange").is_ok()
-}
-
-fn byte_range(dict: &Dictionary) -> Option<Vec<i64>> {
-    let arr = dict.get(b"ByteRange").ok()?.as_array().ok()?;
-    if arr.len() < 4 || arr.len() % 2 != 0 {
-        return None;
-    }
-    arr.iter()
-        .map(|o| match o {
-            Object::Integer(i) => Some(*i),
-            Object::Real(r) => Some(*r as i64),
-            _ => None,
-        })
-        .collect()
 }
 
 fn contents_bytes(dict: &Dictionary) -> Option<Vec<u8>> {
@@ -401,7 +622,7 @@ fn write_raw_object(out: &mut Vec<u8>, xref: &mut Vec<(u32, usize)>, id: u32, bo
     out.extend_from_slice(b"endobj\n");
 }
 
-fn write_lopdf_object(
+pub(crate) fn write_lopdf_object(
     out: &mut Vec<u8>,
     xref: &mut Vec<(u32, usize)>,
     id: u32,
@@ -476,7 +697,7 @@ fn encode_object(obj: &Object, out: &mut Vec<u8>) -> Result<()> {
     Ok(())
 }
 
-fn write_xref_and_trailer(
+pub(crate) fn write_xref_and_trailer(
     out: &mut Vec<u8>,
     xref: &[(u32, usize)],
     size: u32,
@@ -550,7 +771,7 @@ fn find_subslice(hay: &[u8], needle: &[u8]) -> Option<usize> {
     hay.windows(needle.len()).position(|w| w == needle)
 }
 
-fn last_startxref(pdf: &[u8]) -> Result<usize> {
+pub(crate) fn last_startxref(pdf: &[u8]) -> Result<usize> {
     let pos = find_last(pdf, b"startxref")
         .ok_or_else(|| Error::Sign("this file has no startxref".into()))?;
     let rest = &pdf[pos + 9..];
@@ -565,11 +786,11 @@ fn last_startxref(pdf: &[u8]) -> Result<usize> {
         .map_err(|e: std::num::ParseIntError| Error::Sign(e.to_string()))
 }
 
-fn find_last(hay: &[u8], needle: &[u8]) -> Option<usize> {
+pub(crate) fn find_last(hay: &[u8], needle: &[u8]) -> Option<usize> {
     hay.windows(needle.len()).rposition(|w| w == needle)
 }
 
-fn trailer_root(doc: &Document) -> Result<ObjectId> {
+pub(crate) fn trailer_root(doc: &Document) -> Result<ObjectId> {
     doc.trailer
         .get(b"Root")
         .map_err(|e| Error::Sign(e.to_string()))?
@@ -577,14 +798,14 @@ fn trailer_root(doc: &Document) -> Result<ObjectId> {
         .map_err(|e| Error::Sign(e.to_string()))
 }
 
-fn trailer_size(doc: &Document) -> u32 {
+pub(crate) fn trailer_size(doc: &Document) -> u32 {
     match doc.trailer.get(b"Size") {
         Ok(Object::Integer(i)) if *i > 0 => *i as u32,
         _ => doc.max_id + 1,
     }
 }
 
-fn next_object_id(doc: &Document) -> u32 {
+pub(crate) fn next_object_id(doc: &Document) -> u32 {
     let from_objects = doc.objects.keys().map(|(id, _)| *id).max().unwrap_or(0);
     from_objects.max(doc.max_id) + 1
 }
@@ -600,7 +821,7 @@ fn pick_page(doc: &Document, appearance: Option<&VisibleAppearance>) -> Result<O
     })
 }
 
-fn get_dict(doc: &Document, id: ObjectId) -> Result<&Dictionary> {
+pub(crate) fn get_dict(doc: &Document, id: ObjectId) -> Result<&Dictionary> {
     doc.get_object(id)
         .map_err(|e| Error::Sign(e.to_string()))?
         .as_dict()
@@ -662,7 +883,6 @@ pub(crate) fn hex_encode_lower(bytes: &[u8]) -> String {
     s
 }
 
-#[cfg(test)]
 pub(crate) fn hex_decode(s: &str) -> Result<Vec<u8>> {
     if !s.len().is_multiple_of(2) {
         return Err(Error::Sign("odd hex length".into()));
@@ -677,7 +897,6 @@ pub(crate) fn hex_decode(s: &str) -> Result<Vec<u8>> {
     Ok(out)
 }
 
-#[cfg(test)]
 fn hex_val(b: u8) -> Result<u8> {
     match b {
         b'0'..=b'9' => Ok(b - b'0'),

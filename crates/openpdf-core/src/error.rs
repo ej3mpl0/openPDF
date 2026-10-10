@@ -2,6 +2,7 @@ use std::fmt;
 use std::io;
 
 use crate::i18n::{tr, tr_args};
+use crate::signer::ByteRangeError;
 
 /// Crate-wide error type. Variants are stable so the GTK UI can localize them
 /// itself; [`Display`] uses the shared gettext catalog.
@@ -21,6 +22,8 @@ pub enum Error {
     EmptyDocument,
     Invalid(InvalidKind),
     Sign(String),
+    /// A signature's /ByteRange is malformed; verification is refused.
+    ByteRange(ByteRangeError),
     /// The PDF already has a signature; `op` would invalidate it.
     Signed {
         op: SignedOp,
@@ -99,6 +102,7 @@ impl Error {
             Error::EmptyDocument => tr("document has no pages"),
             Error::Invalid(kind) => kind.to_locale_string(),
             Error::Sign(m) => tr_args("sign: {detail}", &[("detail", &tr(m))]),
+            Error::ByteRange(kind) => kind.to_locale_string(),
             Error::Signed { op } => tr_args(
                 "document is signed; {op} would invalidate the signature (incremental save only)",
                 &[("op", &tr(op.msgid()))],

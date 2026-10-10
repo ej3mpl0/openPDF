@@ -414,3 +414,33 @@ msgstr ""
 
 msgid "crop box must be llx,lly,urx,ury"
 msgstr ""
+
+msgid "Signed again later"
+msgstr ""
+
+msgid "Comments were added after signing"
+msgstr ""
+
+msgid "Warning: the document was modified after signing; what you see may not be what was signed"
+msgstr ""
+
+msgid "signature ByteRange must have exactly 4 integers (found {count})"
+msgstr ""
+
+msgid "signature ByteRange has a negative value"
+msgstr ""
+
+msgid "signature ByteRange must start at offset 0 (starts at {offset})"
+msgstr ""
+
+msgid "signature ByteRange is outside the file"
+msgstr ""
+
+msgid "signature ByteRange ranges overlap"
+msgstr ""
+
+msgid "signature ByteRange gap is not exactly the signature Contents"
+msgstr ""
+
+msgid "signature ByteRange does not end at the end of the signed revision"
+msgstr ""

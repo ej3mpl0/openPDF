@@ -63,6 +63,79 @@ pub struct SignatureInfo {
     pub reason: Option<String>,
     pub location: Option<String>,
     pub valid: Option<bool>,
+    /// What was appended after the signed revision. `None`: the signature
+    /// covers the whole file.
+    pub modified_after: Option<LaterModification>,
+}
+
+/// Incremental updates appended after a signed revision.
+#[non_exhaustive]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum LaterModification {
+    /// Only further signatures (their dictionaries, widgets and appearances).
+    LaterSignature,
+    /// Comments that cannot cover page content (Text/Popup without a visible
+    /// appearance, or hidden), possibly together with later signatures.
+    Annotations,
+    /// Anything else, e.g. visible annotations or form changes that could
+    /// cover or alter the signed content (shadow attack).
+    Other,
+}
+
+impl LaterModification {
+    pub fn to_locale_string(self) -> String {
+        match self {
+            LaterModification::LaterSignature => tr("Signed again later"),
+            LaterModification::Annotations => tr("Comments were added after signing"),
+            LaterModification::Other => tr(
+                "Warning: the document was modified after signing; what you see may not be what was signed",
+            ),
+        }
+    }
+}
+
+/// Why a signature's /ByteRange was rejected during verification.
+#[non_exhaustive]
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum ByteRangeError {
+    /// Not an array of exactly 4 integers (`count` entries found).
+    NotFourIntegers {
+        count: usize,
+    },
+    Negative,
+    FirstOffsetNotZero {
+        offset: i64,
+    },
+    OutOfBounds,
+    Overlapping,
+    /// The excluded gap is not exactly this dictionary's `/Contents <...>`.
+    GapNotContents,
+    /// The second range does not end at this revision's `%%EOF`.
+    NotRevisionEnd,
+}
+
+impl ByteRangeError {
+    pub fn to_locale_string(&self) -> String {
+        match self {
+            ByteRangeError::NotFourIntegers { count } => tr_args(
+                "signature ByteRange must have exactly 4 integers (found {count})",
+                &[("count", &count.to_string())],
+            ),
+            ByteRangeError::Negative => tr("signature ByteRange has a negative value"),
+            ByteRangeError::FirstOffsetNotZero { offset } => tr_args(
+                "signature ByteRange must start at offset 0 (starts at {offset})",
+                &[("offset", &offset.to_string())],
+            ),
+            ByteRangeError::OutOfBounds => tr("signature ByteRange is outside the file"),
+            ByteRangeError::Overlapping => tr("signature ByteRange ranges overlap"),
+            ByteRangeError::GapNotContents => {
+                tr("signature ByteRange gap is not exactly the signature Contents")
+            }
+            ByteRangeError::NotRevisionEnd => {
+                tr("signature ByteRange does not end at the end of the signed revision")
+            }
+        }
+    }
 }
 
 /// Certificate / PKCS#11 signing is implemented in `openpdf-sign`.
@@ -148,6 +221,9 @@ pub fn format_verify_result(info: &SignatureInfo) -> String {
         Some(false) => tr("Invalid"),
         None => tr("Validity unknown"),
     });
+    if let Some(m) = info.modified_after {
+        parts.push(m.to_locale_string());
+    }
     if parts.len() == 1 {
         parts.insert(0, tr("Signature"));
     }
@@ -501,6 +577,7 @@ mod tests {
             reason: Some("agree".into()),
             location: Some("Madrid".into()),
             valid: Some(true),
+            modified_after: None,
         };
         with_locale("en", || {
             assert_eq!(
