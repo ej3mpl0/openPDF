@@ -40,7 +40,8 @@ pub enum FfiError {
     #[error("{message}")]
     DocumentChanged { message: String },
     /// Catch-all for future `#[non_exhaustive]` core variants. Never used for
-    /// [`Self::CertUnusable`] or [`Self::SignerUnavailable`].
+    /// [`Self::CertUnusable`], [`Self::SignerUnavailable`], [`Self::Timestamp`],
+    /// or [`Self::Cancelled`].
     #[error("{message}")]
     Other { message: String },
     /// Structured unusable-certificate error (reason + RFC 3339 dates, not text).
@@ -59,6 +60,15 @@ pub enum FfiError {
         module: Option<String>,
         detail: Option<String>,
     },
+    /// Structured PAdES B-T timestamp failure. Match [`kind`]; do not parse text.
+    #[error("{message}")]
+    Timestamp {
+        message: String,
+        kind: TimestampErrorKind,
+    },
+    /// Caller cancelled via CancelToken. Distinct from [`Self::PinCancelled`].
+    #[error("{message}")]
+    Cancelled { message: String },
 }
 
 /// Why a certificate cannot produce a PAdES signature. Match this; do not parse text.
@@ -75,6 +85,45 @@ pub enum CertUnusableReason {
 pub enum SignerUnavailableReason {
     ModuleNotFound,
     LoadFailed,
+}
+
+/// Why a PAdES B-T timestamp was refused. Mirrors
+/// [`openpdf_core::TimestampErrorKind`]. Match this; do not parse text.
+#[derive(Debug, Clone, PartialEq, Eq, uniffi::Enum)]
+pub enum TimestampErrorKind {
+    UrlMissing,
+    BadUrl,
+    Network { detail: String },
+    Http { status: u16 },
+    Rejected { status: u8 },
+    Malformed,
+    NonceMismatch,
+    ImprintMismatch,
+    BadSignature,
+    SigningCertMismatch,
+    UntrustedCert,
+}
+
+impl TimestampErrorKind {
+    fn from_core(kind: openpdf_core::TimestampErrorKind) -> Self {
+        use openpdf_core::TimestampErrorKind as Core;
+        match kind {
+            Core::UrlMissing => Self::UrlMissing,
+            Core::BadUrl => Self::BadUrl,
+            Core::Network { detail } => Self::Network { detail },
+            Core::Http { status } => Self::Http { status },
+            Core::Rejected { status } => Self::Rejected { status },
+            Core::Malformed => Self::Malformed,
+            Core::NonceMismatch => Self::NonceMismatch,
+            Core::ImprintMismatch => Self::ImprintMismatch,
+            Core::BadSignature => Self::BadSignature,
+            Core::SigningCertMismatch => Self::SigningCertMismatch,
+            Core::UntrustedCert => Self::UntrustedCert,
+            other => Self::Network {
+                detail: other.to_locale_string(),
+            },
+        }
+    }
 }
 
 impl FfiError {
@@ -124,10 +173,16 @@ impl FfiError {
             CoreError::Sign(_) => Self::Sign { message },
             CoreError::PinCancelled => Self::PinCancelled { message },
             CoreError::Signed { .. } => Self::Signed { message },
+            CoreError::Timestamp(kind) => Self::Timestamp {
+                message,
+                kind: TimestampErrorKind::from_core(kind),
+            },
+            CoreError::Cancelled => Self::Cancelled { message },
             // `Error` is `#[non_exhaustive]`. CertUnusable (#31) and
             // SignerUnavailable (#24) map through their dedicated helpers
             // once those variants exist on this crate's core; the wildcard
-            // is `Other`, never `Sign`.
+            // is `Other`, never `Sign`. Timestamp and Cancelled have dedicated
+            // arms above and must not land here.
             _ => Self::Other { message },
         }
     }
@@ -257,6 +312,18 @@ impl FfiError {
                 reason,
                 module,
                 detail,
+            },
+            Self::Timestamp { message, kind } => Self::Timestamp {
+                message: redact_msg(message),
+                kind: match kind {
+                    TimestampErrorKind::Network { detail } => TimestampErrorKind::Network {
+                        detail: redact(&detail, secrets),
+                    },
+                    other => other,
+                },
+            },
+            Self::Cancelled { message } => Self::Cancelled {
+                message: redact_msg(message),
             },
         }
     }
@@ -393,5 +460,110 @@ mod tests {
             message: "future-core-variant".into(),
         };
         assert!(!matches!(other, FfiError::Sign { .. }));
+    }
+
+    #[test]
+    fn timestamp_from_core_is_structured_not_other() {
+        let kinds = [
+            (
+                openpdf_core::TimestampErrorKind::UrlMissing,
+                TimestampErrorKind::UrlMissing,
+            ),
+            (
+                openpdf_core::TimestampErrorKind::BadUrl,
+                TimestampErrorKind::BadUrl,
+            ),
+            (
+                openpdf_core::TimestampErrorKind::Malformed,
+                TimestampErrorKind::Malformed,
+            ),
+            (
+                openpdf_core::TimestampErrorKind::NonceMismatch,
+                TimestampErrorKind::NonceMismatch,
+            ),
+            (
+                openpdf_core::TimestampErrorKind::ImprintMismatch,
+                TimestampErrorKind::ImprintMismatch,
+            ),
+            (
+                openpdf_core::TimestampErrorKind::BadSignature,
+                TimestampErrorKind::BadSignature,
+            ),
+            (
+                openpdf_core::TimestampErrorKind::SigningCertMismatch,
+                TimestampErrorKind::SigningCertMismatch,
+            ),
+            (
+                openpdf_core::TimestampErrorKind::UntrustedCert,
+                TimestampErrorKind::UntrustedCert,
+            ),
+        ];
+        for (core_kind, ffi_kind) in kinds {
+            let err = FfiError::from_core(Error::Timestamp(core_kind));
+            match &err {
+                FfiError::Timestamp { kind, .. } => assert_eq!(*kind, ffi_kind),
+                FfiError::Other { .. } | FfiError::Sign { .. } => {
+                    panic!("Timestamp fell into the generic arm: {err:?}");
+                }
+                other => panic!("expected Timestamp, got {other:?}"),
+            }
+            assert!(!matches!(err, FfiError::Other { .. }));
+        }
+
+        let http = FfiError::from_core(Error::Timestamp(openpdf_core::TimestampErrorKind::Http {
+            status: 503,
+        }));
+        match http {
+            FfiError::Timestamp {
+                kind: TimestampErrorKind::Http { status },
+                ..
+            } => assert_eq!(status, 503),
+            FfiError::Other { .. } => panic!("Timestamp::Http fell into Other"),
+            other => panic!("expected Timestamp::Http, got {other:?}"),
+        }
+
+        let rejected = FfiError::from_core(Error::Timestamp(
+            openpdf_core::TimestampErrorKind::Rejected { status: 2 },
+        ));
+        match rejected {
+            FfiError::Timestamp {
+                kind: TimestampErrorKind::Rejected { status },
+                ..
+            } => assert_eq!(status, 2),
+            FfiError::Other { .. } => panic!("Timestamp::Rejected fell into Other"),
+            other => panic!("expected Timestamp::Rejected, got {other:?}"),
+        }
+
+        let net = FfiError::from_core(Error::Timestamp(
+            openpdf_core::TimestampErrorKind::Network {
+                detail: "https://alice:ffi-secret-NEVER-ECHO-9f3a@tsa.example.com/rfc3161".into(),
+            },
+        ));
+        match &net {
+            FfiError::Timestamp {
+                kind: TimestampErrorKind::Network { detail },
+                ..
+            } => assert_eq!(
+                detail,
+                "https://alice:ffi-secret-NEVER-ECHO-9f3a@tsa.example.com/rfc3161"
+            ),
+            FfiError::Other { .. } => panic!("Timestamp::Network fell into Other"),
+            other => panic!("expected Timestamp::Network, got {other:?}"),
+        }
+        assert!(!matches!(net, FfiError::Other { .. }));
+        assert!(!matches!(net, FfiError::Sign { .. }));
+    }
+
+    #[test]
+    fn cancelled_from_core_is_not_other() {
+        let err = FfiError::from_core(Error::Cancelled);
+        assert!(
+            matches!(err, FfiError::Cancelled { .. }),
+            "Cancelled must stay Cancelled, got {err:?}"
+        );
+        assert!(!matches!(err, FfiError::Other { .. }));
+        assert!(!matches!(err, FfiError::Sign { .. }));
+        assert!(!matches!(err, FfiError::PinCancelled { .. }));
+        assert_eq!(err.to_string(), openpdf_core::tr("operation cancelled"));
     }
 }

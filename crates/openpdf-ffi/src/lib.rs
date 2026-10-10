@@ -74,7 +74,7 @@ mod pin;
 mod types;
 
 pub use document::{images_to_pdf_paths, list_certificates, tile_size, OpenPdf, PdfDocument};
-pub use error::{CertUnusableReason, FfiError, SignerUnavailableReason};
+pub use error::{CertUnusableReason, FfiError, SignerUnavailableReason, TimestampErrorKind};
 pub use i18n::{describe_pin_status, pin_prompt, translate};
 pub use pin::{PinProvider, SecretPin};
 pub use types::{

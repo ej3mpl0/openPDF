@@ -33,6 +33,7 @@ pub use convert::{blank_document, images_to_pdf, pdf_to_rasters, raster_to_png};
 pub use document::{Document, DocumentId, PageInfo};
 pub use error::{
     describe_signer_unavailable, Error, InvalidKind, Result, SignedOp, SignerUnavailableReason,
+    TimestampErrorKind,
 };
 pub use i18n::{
     available_locales, current_locale, detect_locale, init as init_i18n, set_locale, tr, tr_args,
