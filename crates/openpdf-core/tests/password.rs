@@ -102,42 +102,58 @@ fn engine_renders_protected_pdf_opened_with_password() {
     engine.refresh(&edited).unwrap();
 }
 
-/// qpdf's own verdict, when qpdf is installed: `--requires-password`
-/// exits 0 = needs a password, 2 = not encrypted, 3 = encrypted, no password.
-fn qpdf_requires_password(bytes: &[u8]) -> Option<i32> {
+/// Run qpdf; `None` (skip) only when it is not installed and CI is unset.
+/// In CI a missing qpdf is a test failure.
+fn run_qpdf(args: &[&str], bytes: &[u8]) -> Option<std::process::Output> {
     let path = std::env::temp_dir().join(format!(
         "openpdf-qpdf-{}-{:?}.pdf",
         std::process::id(),
         std::thread::current().id()
     ));
     std::fs::write(&path, bytes).unwrap();
-    let status = std::process::Command::new("qpdf")
-        .arg("--requires-password")
+    // OPENPDF_QPDF overrides the binary (e.g. to check the CI failure path).
+    let qpdf = std::env::var("OPENPDF_QPDF").unwrap_or_else(|_| "qpdf".into());
+    let out = std::process::Command::new(qpdf)
+        .args(args)
         .arg(&path)
-        .status()
-        .ok();
+        .output();
     std::fs::remove_file(&path).ok();
-    status.and_then(|s| s.code())
+    match out {
+        Ok(o) => Some(o),
+        Err(e) if std::env::var_os("CI").is_some() => panic!("qpdf required in CI: {e}"),
+        Err(e) => {
+            eprintln!("skipping qpdf checks: {e}");
+            None
+        }
+    }
+}
+
+/// qpdf's own verdict, when qpdf is installed: `--requires-password`
+/// exits 0 = needs a password, 2 = not encrypted, 3 = encrypted, no password.
+fn qpdf_requires_password(bytes: &[u8]) -> Option<i32> {
+    run_qpdf(&["--requires-password"], bytes).and_then(|o| o.status.code())
 }
 
 /// `qpdf --show-encryption` (algorithm, R, P and permission lines), if qpdf is installed.
-fn qpdf_encryption(bytes: &[u8]) -> Option<String> {
-    let path = std::env::temp_dir().join(format!(
-        "openpdf-qpdf-show-{}-{:?}.pdf",
-        std::process::id(),
-        std::thread::current().id()
-    ));
-    std::fs::write(&path, bytes).unwrap();
-    let out = std::process::Command::new("qpdf")
-        .arg("--show-encryption")
-        .arg(&path)
-        .output()
-        .ok();
-    std::fs::remove_file(&path).ok();
-    out.map(|o| String::from_utf8_lossy(&o.stdout).into_owned())
+fn qpdf_encryption_with(bytes: &[u8], password: &str) -> Option<String> {
+    let arg = format!("--password={password}");
+    run_qpdf(&["--show-encryption", &arg], bytes)
+        .map(|o| String::from_utf8_lossy(&o.stdout).into_owned())
 }
 
-fn assert_locked(name: &str, bytes: Vec<u8>) {
+fn qpdf_encryption(bytes: &[u8]) -> Option<String> {
+    run_qpdf(&["--show-encryption"], bytes).map(|o| String::from_utf8_lossy(&o.stdout).into_owned())
+}
+
+/// `want`: qpdf --show-encryption of the source (algorithm, R, P, methods).
+fn assert_locked(want: &Option<String>, name: &str, bytes: Vec<u8>) {
+    if let Some(want) = want {
+        assert_eq!(
+            qpdf_encryption_with(&bytes, "user-secret").as_ref(),
+            Some(want),
+            "{name}: qpdf --show-encryption differs from the source"
+        );
+    }
     let parsed = lopdf::Document::load_mem(&bytes).unwrap();
     assert!(
         parsed.get_encrypted().is_ok() || parsed.was_encrypted(),
@@ -164,10 +180,14 @@ fn derived_documents_stay_encrypted() {
     let plain = Document::from_bytes(bytes, None).unwrap();
     let opts = ProtectOptions::new("user-secret", "owner-secret").unwrap();
     let locked = protect(&plain, &opts).unwrap().to_bytes().unwrap();
+    let want = qpdf_encryption_with(&locked, "user-secret");
+    if let Some(w) = &want {
+        assert!(w.contains("R = 6"), "{w}");
+    }
     let doc = Document::from_bytes_with_password(locked, None, pw("user-secret")).unwrap();
 
     let optimized = optimize(&doc, &OptimizeOptions::default()).unwrap();
-    assert_locked("optimize", optimized.to_bytes().unwrap());
+    assert_locked(&want, "optimize", optimized.to_bytes().unwrap());
 
     let all = parse_page_ranges("1-2", doc.page_count()).unwrap();
     let crop = CropBox {
@@ -177,12 +197,14 @@ fn derived_documents_stay_encrypted() {
         ury: 200.0,
     };
     assert_locked(
+        &want,
         "crop",
         crop_pages(&doc, &all, crop).unwrap().to_bytes().unwrap(),
     );
 
     let one = parse_page_ranges("2", doc.page_count()).unwrap();
     assert_locked(
+        &want,
         "extract one range",
         extract(&doc, &one).unwrap().to_bytes().unwrap(),
     );
@@ -190,8 +212,9 @@ fn derived_documents_stay_encrypted() {
     let two = parse_page_ranges("1,2", doc.page_count()).unwrap();
     let extracted = extract(&doc, &two).unwrap();
     assert_eq!(extracted.page_count(), 2);
-    assert_locked("extract two ranges", extracted.to_bytes().unwrap());
+    assert_locked(&want, "extract two ranges", extracted.to_bytes().unwrap());
     assert_locked(
+        &want,
         "merge",
         merge(&[doc.clone(), plain]).unwrap().to_bytes().unwrap(),
     );

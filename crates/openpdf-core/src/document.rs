@@ -126,6 +126,8 @@ pub struct Document {
     dirty: bool,
     signed: bool,
     password: PasswordSlot,
+    /// Encrypted with a non-empty user password (not owner-password-only).
+    requires_user_password: bool,
 }
 
 impl Document {
@@ -219,6 +221,14 @@ impl Document {
     ) -> Result<Self> {
         let slots = slots_from(&inner)?;
         let signed = contains_signature(&inner);
+        // Decided from the bytes this Document wraps: does opening them need a
+        // non-empty user password? An owner-password-only file opened *with*
+        // its owner password still does not. Every constructor ends here, so
+        // ops that change encryption (protect -> per its user password,
+        // unprotect -> false, merge -> its chosen source, derived ops ->
+        // same state as their source) get the flag of their own output.
+        let requires_user_password = inner.was_encrypted()
+            && matches!(load_lopdf(&original, None), Err(Error::PasswordRequired));
         Ok(Self {
             id: DocumentId::next(),
             path,
@@ -229,6 +239,7 @@ impl Document {
             dirty: false,
             signed,
             password,
+            requires_user_password,
         })
     }
 
@@ -288,6 +299,13 @@ impl Document {
     /// True when the file is encrypted (whether or not it was opened with a password).
     pub fn is_encrypted(&self) -> bool {
         self.inner.is_encrypted() || self.inner.was_encrypted()
+    }
+
+    /// True when the file needs a (non-empty) user password to open, as
+    /// opposed to unencrypted or owner-password-only files. Independent of
+    /// which password, if any, was supplied.
+    pub(crate) fn requires_user_password(&self) -> bool {
+        self.requires_user_password
     }
 
     /// Password this document was opened with, for the render engine and saves.

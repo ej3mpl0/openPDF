@@ -182,13 +182,14 @@ pub enum EncryptionSourceKind {
 /// otherwise the first owner-password-only input; otherwise `None` (plaintext
 /// output).
 ///
-/// This looks at each file's encryption, not only at whether a password was
-/// typed, so owner-only PDFs are not silently decrypted by a merge.
+/// This looks at each file's encryption (decided when it was loaded), never at
+/// which password was typed: an owner-only PDF opened with its owner password
+/// is still `OwnerOnly`, so it cannot outrank a real user-password input.
 ///
 /// This is the single rule `merge` (and multi-range `extract`) apply; UIs can
 /// call it to tell the user up front which file's protection the result gets.
 pub fn merge_encryption_source(inputs: &[Document]) -> Option<(usize, EncryptionSourceKind)> {
-    if let Some(i) = inputs.iter().position(|d| d.password().get().is_some()) {
+    if let Some(i) = inputs.iter().position(Document::requires_user_password) {
         return Some((i, EncryptionSourceKind::UserPassword));
     }
     inputs
@@ -557,16 +558,125 @@ mod encryption_tests {
         assert_eq!(doc.page_count(), 4);
     }
 
+    fn open_with(bytes: Vec<u8>, pw: &str) -> crate::Result<Document> {
+        Document::from_bytes_with_password(bytes, None, Zeroizing::new(pw.into()))
+    }
+
     #[test]
     fn two_user_password_inputs_use_the_first() {
         let a = aes256();
-        let b = aes128();
+        let mut opts = ProtectOptions::new("b-secret", "b-owner").unwrap();
+        opts.permissions = PdfPermissions::parse_list("print").unwrap();
+        let b = open_with(
+            protect(&plain(), &opts).unwrap().to_bytes().unwrap(),
+            "b-secret",
+        )
+        .unwrap();
         assert_eq!(
             merge_encryption_source(&[a.clone(), b.clone()]),
             Some((0, EncryptionSourceKind::UserPassword))
         );
         let bytes = merge(&[a.clone(), b]).unwrap().to_bytes().unwrap();
         assert_eq!(encrypt_profile(&bytes), encrypt_profile(a.original_bytes()));
+        assert!(matches!(
+            Document::from_bytes(bytes.clone(), None),
+            Err(crate::Error::PasswordRequired)
+        ));
+        assert_eq!(open_with(bytes.clone(), PW).unwrap().page_count(), 4);
+        assert!(matches!(
+            open_with(bytes, "b-secret"),
+            Err(crate::Error::WrongPassword)
+        ));
+    }
+
+    /// The flag follows encryption changes made in-session, without saving:
+    /// protect / unprotect / merge all produce documents whose flag comes
+    /// from their own (re-encrypted or plain) bytes.
+    #[test]
+    fn protect_unprotect_then_merge_in_session() {
+        use EncryptionSourceKind::{OwnerOnly, UserPassword};
+        let user_opts = ProtectOptions::new(PW, "owner").unwrap();
+        let locked = protect(&plain(), &user_opts).unwrap();
+        assert_eq!(
+            merge_encryption_source(&[plain(), locked.clone()]),
+            Some((1, UserPassword))
+        );
+        let merged = merge(&[plain(), locked.clone()]).unwrap();
+        assert_eq!(
+            merge_encryption_source(std::slice::from_ref(&merged)),
+            Some((0, UserPassword))
+        );
+        assert!(matches!(
+            Document::from_bytes(merged.to_bytes().unwrap(), None),
+            Err(crate::Error::PasswordRequired)
+        ));
+
+        let owner_opts = ProtectOptions::new("", "owner").unwrap();
+        let owner_only = protect(&plain(), &owner_opts).unwrap();
+        assert_eq!(
+            merge_encryption_source(&[plain(), owner_only.clone()]),
+            Some((1, OwnerOnly))
+        );
+        let merged = merge(&[plain(), owner_only]).unwrap();
+        assert_eq!(
+            merge_encryption_source(std::slice::from_ref(&merged)),
+            Some((0, OwnerOnly))
+        );
+        assert!(Document::from_bytes(merged.to_bytes().unwrap(), None)
+            .unwrap()
+            .is_encrypted());
+
+        let opened = crate::protect::unprotect(&locked, PW).unwrap();
+        assert_eq!(merge_encryption_source(&[plain(), opened.clone()]), None);
+        let merged = merge(&[plain(), opened]).unwrap();
+        assert!(!merged.is_encrypted());
+        assert!(!Document::from_bytes(merged.to_bytes().unwrap(), None)
+            .unwrap()
+            .is_encrypted());
+    }
+
+    /// Gilfoye's regression: an owner-only file opened *with* its owner
+    /// password must not count as a user-password input.
+    #[test]
+    fn owner_only_opened_with_owner_password_does_not_outrank_user_password() {
+        let src = owner_only().original_bytes().to_vec();
+        let owner_opened = open_with(src, "owner").unwrap();
+        assert!(owner_opened.is_encrypted());
+        let user = aes256();
+        assert_eq!(
+            merge_encryption_source(&[owner_opened.clone(), user.clone()]),
+            Some((1, EncryptionSourceKind::UserPassword))
+        );
+        let bytes = merge(&[owner_opened.clone(), user.clone()])
+            .unwrap()
+            .to_bytes()
+            .unwrap();
+        assert!(matches!(
+            Document::from_bytes(bytes.clone(), None),
+            Err(crate::Error::PasswordRequired)
+        ));
+        assert_eq!(
+            encrypt_profile(&bytes),
+            encrypt_profile(user.original_bytes())
+        );
+
+        // Alone (or with plain inputs) it stays owner-only: empty user
+        // password, same owner key and /P, opens without a password.
+        assert_eq!(
+            merge_encryption_source(&[owner_opened.clone(), plain()]),
+            Some((0, EncryptionSourceKind::OwnerOnly))
+        );
+        for out in [
+            merge(&[owner_opened.clone(), plain()]).unwrap(),
+            optimize(&owner_opened, &OptimizeOptions::default()).unwrap(),
+        ] {
+            let bytes = out.to_bytes().unwrap();
+            assert_eq!(
+                encrypt_profile(&bytes),
+                encrypt_profile(owner_opened.original_bytes())
+            );
+            assert!(Document::from_bytes(bytes, None).unwrap().is_encrypted());
+        }
     }
 
     #[test]
