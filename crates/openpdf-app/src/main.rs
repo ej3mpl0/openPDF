@@ -118,6 +118,7 @@ All --measure marks are milliseconds from one process-start Instant \
 (set first thing in main):
   startup_ms / ui_all_visible_ms  all visible page tiles + visible thumbs painted (draw path)
   ui_thumbs_done_ms               thumbnail strip meets the gate (MIN_THUMB_TILES)
+  ui_idle_loads_done_ms           menus / tool / sign / zoom icons after first frame
   ui_first_tile_ms                first real page tile painted (DrawingArea draw func)
   ui_first_surface_ready_ms       first cairo ImageSurface created
   ui_first_tile_requested_ms      first request_tiles

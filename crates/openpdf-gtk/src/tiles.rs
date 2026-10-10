@@ -252,6 +252,17 @@ impl TileCache {
         self.order.clear();
         self.bytes = 0;
     }
+
+    pub fn remove(&mut self, key: &TileKey) -> bool {
+        let Some(old) = self.map.remove(key) else {
+            return false;
+        };
+        self.bytes = self.bytes.saturating_sub(old.byte_len());
+        if let Some(pos) = self.order.iter().position(|k| k == key) {
+            self.order.remove(pos);
+        }
+        true
+    }
 }
 
 /// Place a tile onto a page-sized RGBA buffer at the same origin the GTK

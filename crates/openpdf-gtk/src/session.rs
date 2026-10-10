@@ -275,6 +275,14 @@ impl Session {
         let _ = self.engine.cancel_except(id, keep);
     }
 
+    pub fn drop_tiles(&self, keys: &[ViewTile]) {
+        let id = self.doc_id();
+        self.engine.drop_tiles(
+            keys.iter()
+                .map(|k| TileKey::new(id, k.page, k.zoom() as f32, k.tx, k.ty)),
+        );
+    }
+
     pub fn cache_get(&self, key: &ViewTile) -> Option<Arc<Tile>> {
         let core = TileKey::new(self.doc_id(), key.page, key.zoom() as f32, key.tx, key.ty);
         self.engine.cache_get(&core)
@@ -472,6 +480,19 @@ impl Opened {
     pub fn cancel_except(&self, keep: &[ViewTile]) {
         if let Self::Core(s) = self {
             s.cancel_except(keep);
+        }
+    }
+
+    pub fn drop_tiles(&self, keys: &[ViewTile]) {
+        match self {
+            Self::Core(s) => s.drop_tiles(keys),
+            Self::Mock(s) => {
+                if let Ok(mut cache) = s.cache.lock() {
+                    for key in keys {
+                        cache.remove(key);
+                    }
+                }
+            }
         }
     }
 

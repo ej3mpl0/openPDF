@@ -1,0 +1,6 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<gresources>
+  <gresource prefix="/io/github/ej3mpl0/openpdf/icons">
+    <file alias="scalable/actions/open-menu-symbolic.svg">icons/scalable/actions/open-menu-symbolic.svg</file>
+  </gresource>
+</gresources>

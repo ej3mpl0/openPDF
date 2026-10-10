@@ -83,7 +83,6 @@ impl OpenPdfWindow {
         header.pack_start(&sidebar_btn);
 
         let menu_btn = gtk::MenuButton::new();
-        menu_btn.set_icon_name("open-menu-symbolic");
         menu_btn.set_menu_model(Some(&app_menu(lang)));
         header.pack_end(&menu_btn);
 
@@ -160,6 +159,17 @@ impl OpenPdfWindow {
             }
             true
         });
+
+        crate::measure::note_idle_load_pending();
+        window.add_tick_callback(clone!(@strong menu_btn => move |_, _| {
+            let menu_btn = menu_btn.clone();
+            glib::idle_add_local_once(move || {
+                super::register_deferred_icons();
+                menu_btn.set_icon_name("open-menu-symbolic");
+                crate::measure::note_idle_load_finished();
+            });
+            glib::ControlFlow::Break
+        }));
 
         Self { window, ctx }
     }

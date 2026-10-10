@@ -31,6 +31,7 @@ struct Shared {
     layout: RefCell<PageLayout>,
     thumb_layout: RefCell<PageLayout>,
     last_visible: RefCell<Vec<TileKey>>,
+    last_thumbs: RefCell<Vec<TileKey>>,
 }
 
 pub struct DocumentView {
@@ -47,6 +48,10 @@ pub struct DocumentView {
     search_entry: gtk::SearchEntry,
     rotate_btn: gtk::Button,
     delete_btn: gtk::Button,
+    prev_btn: gtk::Button,
+    next_btn: gtk::Button,
+    zoom_out_btn: gtk::Button,
+    zoom_in_btn: gtk::Button,
     locked_banner: gtk::Label,
     lang: Lang,
 }
@@ -380,6 +385,7 @@ pub fn build(doc: Rc<Opened>, settings: &Settings, lang: Lang) -> Rc<DocumentVie
             10.0,
         )),
         last_visible: RefCell::new(Vec::new()),
+        last_thumbs: RefCell::new(Vec::new()),
         doc,
     });
 
@@ -445,21 +451,21 @@ pub fn build(doc: Rc<Opened>, settings: &Settings, lang: Lang) -> Rc<DocumentVie
     chrome.set_margin_end(8);
     chrome.set_margin_top(6);
     chrome.set_margin_bottom(6);
-    let prev = gtk::Button::from_icon_name("go-up-symbolic");
+    let prev = gtk::Button::new();
     prev.add_css_class("flat");
-    let next = gtk::Button::from_icon_name("go-down-symbolic");
+    let next = gtk::Button::new();
     next.add_css_class("flat");
     let page_label = gtk::Label::new(None);
     page_label.add_css_class("dim-label");
-    let rotate_btn = gtk::Button::from_icon_name("object-rotate-right-symbolic");
+    let rotate_btn = gtk::Button::new();
     rotate_btn.add_css_class("flat");
     rotate_btn.set_tooltip_text(Some(t(lang, "Rotate page")));
-    let delete_btn = gtk::Button::from_icon_name("edit-delete-symbolic");
+    let delete_btn = gtk::Button::new();
     delete_btn.add_css_class("flat");
     delete_btn.set_tooltip_text(Some(t(lang, "Delete page")));
-    let zoom_out = gtk::Button::from_icon_name("zoom-out-symbolic");
+    let zoom_out = gtk::Button::new();
     zoom_out.add_css_class("flat");
-    let zoom_in = gtk::Button::from_icon_name("zoom-in-symbolic");
+    let zoom_in = gtk::Button::new();
     zoom_in.add_css_class("flat");
     let zoom_label = gtk::Label::new(None);
     zoom_label.add_css_class("dim-label");
@@ -508,11 +514,25 @@ pub fn build(doc: Rc<Opened>, settings: &Settings, lang: Lang) -> Rc<DocumentVie
         search_entry: search_entry.clone(),
         rotate_btn: rotate_btn.clone(),
         delete_btn: delete_btn.clone(),
+        prev_btn: prev.clone(),
+        next_btn: next.clone(),
+        zoom_out_btn: zoom_out.clone(),
+        zoom_in_btn: zoom_in.clone(),
         locked_banner: locked_banner.clone(),
         lang,
     });
     view.update_chrome();
     view.refresh_lock_chrome();
+    crate::measure::note_idle_load_pending();
+    glib::idle_add_local_once(clone!(@strong view => move || {
+        view.prev_btn.set_icon_name("go-up-symbolic");
+        view.next_btn.set_icon_name("go-down-symbolic");
+        view.rotate_btn.set_icon_name("object-rotate-right-symbolic");
+        view.delete_btn.set_icon_name("edit-delete-symbolic");
+        view.zoom_out_btn.set_icon_name("zoom-out-symbolic");
+        view.zoom_in_btn.set_icon_name("zoom-in-symbolic");
+        crate::measure::note_idle_load_finished();
+    }));
 
     pages_area.set_draw_func(clone!(@strong view => move |_, cr, _, _| {
         paint_pages(cr, &view);
@@ -716,7 +736,9 @@ fn thumb_tile_keys(view: &DocumentView) -> Vec<TileKey> {
     let allocated = vadj.page_size().max(view.thumbs_scroll.height() as f64);
     // Before the strip is allocated (first frames / Xvfb) `page_size` is 0, so
     // a 1 px viewport would request only page 1 and the rest never appear.
-    let cover_all = layout.pages.len() <= 32 || allocated < 32.0;
+    // Once allocated, only the visible thumbs are created; off-screen tiles
+    // are dropped in `paint_thumbs`.
+    let cover_all = allocated < 32.0;
     let view_y = if cover_all { 0.0 } else { vadj.value() };
     let view_h = if cover_all {
         layout.content_height.max(1.0)
@@ -785,7 +807,26 @@ fn paint_thumbs(cr: &cairo::Context, view: &DocumentView) {
     let _ = cr.paint();
 
     let keys = thumb_tile_keys(view);
+    if *view.shared.last_thumbs.borrow() != keys {
+        let dropped: Vec<TileKey> = view
+            .shared
+            .last_thumbs
+            .borrow()
+            .iter()
+            .filter(|k| !keys.contains(k))
+            .copied()
+            .collect();
+        if !dropped.is_empty() {
+            view.shared.doc.drop_tiles(&dropped);
+        }
+        *view.shared.last_thumbs.borrow_mut() = keys.clone();
+    }
     view.shared.doc.request_tiles(&keys, Priority::Thumbnail);
+    let mut keep = page_tile_keys(view);
+    keep.extend(keys.iter().copied());
+    let previews: Vec<TileKey> = keep.iter().map(|k| k.preview()).collect();
+    keep.extend(previews);
+    view.shared.doc.cancel_except(&keep);
 
     for page in &layout.pages {
         if page.page == current {

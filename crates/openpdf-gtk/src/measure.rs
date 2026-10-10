@@ -1,6 +1,7 @@
 // SPDX-License-Identifier: MPL-2.0
 use std::fmt::{Display, Formatter};
 use std::path::PathBuf;
+use std::sync::atomic::{AtomicU32, Ordering};
 use std::sync::OnceLock;
 use std::time::Instant;
 
@@ -35,6 +36,8 @@ static SURFACE_READY: OnceLock<u128> = OnceLock::new();
 static TILE_PAINTED: OnceLock<u128> = OnceLock::new();
 static THUMBS_DONE: OnceLock<u128> = OnceLock::new();
 static ALL_VISIBLE: OnceLock<u128> = OnceLock::new();
+static IDLE_LOADS_DONE: OnceLock<u128> = OnceLock::new();
+static IDLE_LOADS_PENDING: AtomicU32 = AtomicU32::new(0);
 
 pub fn mark_doc_load_start() {
     let _ = DOC_LOAD_START.get_or_init(process_elapsed_ms);
@@ -85,6 +88,32 @@ pub fn ui_thumbs_done_ms() -> u128 {
 pub fn ui_all_visible_painted_ms() -> u128 {
     ALL_VISIBLE.get().copied().unwrap_or(0)
 }
+
+/// One deferred icon / idle load still outstanding.
+pub fn note_idle_load_pending() {
+    IDLE_LOADS_PENDING.fetch_add(1, Ordering::SeqCst);
+}
+
+/// A deferred load finished. The last one pins [`ui_idle_loads_done_ms`].
+pub fn note_idle_load_finished() {
+    let prev = IDLE_LOADS_PENDING.fetch_sub(1, Ordering::SeqCst);
+    if prev == 1 {
+        let _ = IDLE_LOADS_DONE.get_or_init(process_elapsed_ms);
+    }
+}
+
+pub fn mark_idle_loads_done() {
+    let _ = IDLE_LOADS_DONE.get_or_init(process_elapsed_ms);
+}
+
+pub fn ui_idle_loads_done_ms() -> u128 {
+    IDLE_LOADS_DONE.get().copied().unwrap_or(0)
+}
+
+/// Deferred icon loads must finish within this window after the first frame.
+pub const MAX_IDLE_LOAD_MS: u128 = 2_000;
+/// After idle loads, wait this long before reading `peak_rss`.
+pub const IDLE_LOAD_SETTLE_MS: u128 = 500;
 
 /// Pages in the `--measure` fixture. Enough for a thumbnail strip plus a
 /// multi-page continuous layout without committing a 300-page PDF.
@@ -152,6 +181,8 @@ pub struct BudgetReport {
     pub ui_all_visible_ms: u128,
     /// Thumbnail strip meets the measure gate (`MIN_THUMB_TILES`).
     pub ui_thumbs_done_ms: u128,
+    /// Menus / tool / sign / zoom icons finished loading after the first frame.
+    pub ui_idle_loads_done_ms: u128,
     pub ok: bool,
     pub error: Option<String>,
 }
@@ -163,6 +194,7 @@ impl Display for BudgetReport {
         writeln!(f, "startup_ms={}", self.startup_ms)?;
         writeln!(f, "ui_all_visible_ms={}", self.ui_all_visible_ms)?;
         writeln!(f, "ui_thumbs_done_ms={}", self.ui_thumbs_done_ms)?;
+        writeln!(f, "ui_idle_loads_done_ms={}", self.ui_idle_loads_done_ms)?;
         writeln!(f, "peak_rss_bytes={}", self.rss_bytes)?;
         writeln!(
             f,
@@ -236,6 +268,11 @@ impl BudgetReport {
         if self.rss_bytes > MAX_RSS_BYTES {
             error.get_or_insert_with(|| {
                 format!("peak RSS {} exceeds {MAX_RSS_BYTES}", self.rss_bytes)
+            });
+        }
+        if self.ui_idle_loads_done_ms == 0 {
+            error.get_or_insert_with(|| {
+                format!("deferred loads did not finish within {MAX_IDLE_LOAD_MS} ms")
             });
         }
         self.ok = error.is_none();
@@ -467,12 +504,14 @@ mod tests {
             ui_first_tile_ms: 40,
             ui_all_visible_ms: 200,
             ui_thumbs_done_ms: 180,
+            ui_idle_loads_done_ms: 190,
             ..Default::default()
         }
         .to_string();
         assert!(text.contains("startup_ms=200"));
         assert!(text.contains("ui_all_visible_ms=200"));
         assert!(text.contains("ui_thumbs_done_ms=180"));
+        assert!(text.contains("ui_idle_loads_done_ms=190"));
         assert!(text.contains("peak_rss_bytes=1024"));
         assert!(text.contains("ui_activate_ms=10"));
         assert!(text.contains("ui_window_present_ms=20"));

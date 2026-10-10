@@ -12,7 +12,8 @@ use std::rc::Rc;
 use std::sync::Arc;
 
 use crate::measure::{
-    self, peak_rss_bytes, BudgetReport, DEFAULT_MEASURE_PAGES, MAX_MEASURE_WAIT_MS,
+    self, peak_rss_bytes, BudgetReport, DEFAULT_MEASURE_PAGES, IDLE_LOAD_SETTLE_MS,
+    MAX_IDLE_LOAD_MS, MAX_MEASURE_WAIT_MS,
 };
 use crate::settings::{Settings, Theme};
 use crate::sign::{NoopVerifier, UnavailableSigner};
@@ -260,7 +261,28 @@ fn watch_measure(
             }
             // startup_ms is marked from the DrawingArea draw path, not here.
             let startup_ms = measure::ui_all_visible_painted_ms();
-            if laid_out.get() && view.viewport_allocated() && startup_ms > 0 {
+            let idle_done = measure::ui_idle_loads_done_ms();
+            let first_frame = marks.first_frame.get();
+            if first_frame > 0 && idle_done == 0 && elapsed.saturating_sub(first_frame) > MAX_IDLE_LOAD_MS
+            {
+                finish_measure(
+                    &app,
+                    &report,
+                    failed_report(
+                        view.opened().page_count(),
+                        elapsed,
+                        peak.get(),
+                        &format!("deferred loads did not finish within {MAX_IDLE_LOAD_MS} ms"),
+                    ),
+                );
+                return glib::ControlFlow::Break;
+            }
+            if laid_out.get()
+                && view.viewport_allocated()
+                && startup_ms > 0
+                && idle_done > 0
+                && elapsed >= idle_done + IDLE_LOAD_SETTLE_MS
+            {
                 finish_measure(
                     &app,
                     &report,
@@ -274,7 +296,7 @@ fn watch_measure(
                         thumb_total: ready.thumb_total,
                         ui_activate_ms: marks.ui_activate_ms,
                         ui_window_present_ms: marks.ui_window_present_ms,
-                        ui_first_frame_ms: marks.first_frame.get(),
+                        ui_first_frame_ms: first_frame,
                         ui_first_tile_ms: measure::ui_first_tile_painted_ms(),
                         ui_adw_init_ms: marks.ui_adw_init_ms,
                         ui_css_ms: marks.ui_css_ms,
@@ -286,6 +308,7 @@ fn watch_measure(
                         ui_first_surface_ready_ms: measure::ui_first_surface_ready_ms(),
                         ui_all_visible_ms: startup_ms,
                         ui_thumbs_done_ms: measure::ui_thumbs_done_ms(),
+                        ui_idle_loads_done_ms: idle_done,
                         ok: false,
                         error: None,
                     }
@@ -371,17 +394,35 @@ fn install_accels(app: &adw::Application) {
 }
 
 fn register_icons() {
-    let bytes = include_bytes!(concat!(env!("OUT_DIR"), "/icons.gresource"));
-    match gtk::gio::Resource::from_data(&gtk::glib::Bytes::from_static(bytes)) {
-        Ok(resource) => gtk::gio::resources_register(&resource),
-        Err(err) => eprintln!("openpdf-gtk: icons GResource: {err}"),
-    }
+    register_icon_blob(
+        include_bytes!(concat!(env!("OUT_DIR"), "/icons-chrome.gresource")),
+        "icons-chrome",
+    );
     if let Some(display) = gtk::gdk::Display::default() {
         let theme = gtk::IconTheme::for_display(&display);
         theme.add_resource_path("/io/github/ej3mpl0/openpdf/icons");
         // Do not call set_theme_name on the display singleton (GTK 4 asserts).
         // add_resource_path is enough for the bundled header icons; Adwaita
         // remains the default theme so GTK does not walk every installed theme.
+    }
+}
+
+/// Menus / leftover chrome icons. Safe to call more than once.
+pub(crate) fn register_deferred_icons() {
+    use std::sync::Once;
+    static ONCE: Once = Once::new();
+    ONCE.call_once(|| {
+        register_icon_blob(
+            include_bytes!(concat!(env!("OUT_DIR"), "/icons-deferred.gresource")),
+            "icons-deferred",
+        );
+    });
+}
+
+fn register_icon_blob(bytes: &'static [u8], label: &str) {
+    match gtk::gio::Resource::from_data(&gtk::glib::Bytes::from_static(bytes)) {
+        Ok(resource) => gtk::gio::resources_register(&resource),
+        Err(err) => eprintln!("openpdf-gtk: {label} GResource: {err}"),
     }
 }
 
