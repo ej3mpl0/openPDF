@@ -379,5 +379,15 @@ mod tests {
             "structured Timestamp must be formatted, got {missing}"
         );
         assert!(!missing.contains("://"), "{missing}");
+
+        set_locale("es");
+        let es = format_core_error(&Error::Timestamp(TimestampErrorKind::Network {
+            detail: format!("https://{user}:{secret}@tsa.example.com/rfc3161"),
+        }));
+        assert!(!es.contains(user), "ES toast leaked user: {es}");
+        assert!(!es.contains(secret), "ES toast leaked credentials: {es}");
+        assert!(es.contains("tsa.example.com"), "{es}");
+        assert!(!es.contains("://"), "{es}");
+        set_locale("en");
     }
 }
