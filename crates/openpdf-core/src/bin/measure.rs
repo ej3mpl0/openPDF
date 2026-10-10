@@ -290,10 +290,11 @@ fn main() {
         }
     };
 
-    let font_warmup_ms = Engine::new()
-        .ok()
-        .and_then(|e| e.font_warmup_ms())
-        .unwrap_or(-1.0);
+    let font_warmup_ms = openpdf_core::font_warmup_ms().unwrap_or(if cfg!(target_os = "linux") {
+        -1.0
+    } else {
+        0.0
+    });
     let rss = peak_rss_bytes();
     let rss_s = rss.map(|v| v.to_string()).unwrap_or_else(|| "na".into());
 
