@@ -331,7 +331,8 @@ impl Document {
     }
 
     /// Cheap memory accounting for this document: O(objects), no stream
-    /// clone or decode, no heap allocation. See [`DocMemory`].
+    /// clone or decode. The only allocation is the explicit walk stack (a
+    /// small `Vec`, a few KiB, capped); see [`DocMemory`].
     pub fn memory_usage(&self) -> DocMemory {
         let objects = &self.inner.objects;
         let est = objects.len() * (BTREE_ENTRY_OVERHEAD + std::mem::size_of::<ObjectId>())

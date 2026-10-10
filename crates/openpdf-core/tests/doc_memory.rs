@@ -28,6 +28,9 @@ unsafe impl GlobalAlloc for Counting {
 static A: Counting = Counting;
 
 /// Bytes `memory_usage()` allocates for its walk stack on the test doc.
+/// The exact value depends on std's `Vec` growth strategy and on the size of
+/// lopdf's `Object`, so it may change with a Rust or lopdf upgrade; if this
+/// assert fails after one, re-measure and update it (the 64 KiB cap still holds).
 #[cfg(target_pointer_width = "64")]
 const EXPECTED_STACK_BYTES: usize = 3304;
 
