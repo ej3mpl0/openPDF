@@ -160,13 +160,20 @@ pub fn merge(docs: &[Document]) -> Result<Document> {
     // new file while no longer matching any ByteRange.
     strip_signatures(&mut out);
 
-    // If any input was opened with a password, the merged file is encrypted
-    // with the first such input's key and password instead of going out in
-    // plaintext.
-    match docs.iter().find(|d| d.password().get().is_some()) {
-        Some(src) => src.derive_encrypted(out),
+    match merge_encryption_source(docs) {
+        Some(i) => docs[i].derive_encrypted(out),
         None => Document::from_lopdf(out, None),
     }
+}
+
+/// Which input's encryption a [`merge`] output inherits: the first input that
+/// was opened with a password (its algorithm, key, permissions and password),
+/// or `None` when no input is protected and the output is plaintext.
+///
+/// This is the single rule `merge` (and multi-range `extract`) apply; UIs can
+/// call it to tell the user up front which file's protection the result gets.
+pub fn merge_encryption_source(inputs: &[Document]) -> Option<usize> {
+    inputs.iter().position(|d| d.password().get().is_some())
 }
 
 pub fn merge_paths<P: AsRef<Path>>(paths: &[P]) -> Result<Document> {
@@ -300,5 +307,183 @@ mod tests {
             std::process::id()
         )))
         .unwrap();
+    }
+}
+
+#[cfg(test)]
+mod encryption_tests {
+    use std::collections::BTreeMap;
+    use std::sync::Arc;
+
+    use lopdf::encryption::crypt_filters::{Aes128CryptFilter, CryptFilter};
+    use lopdf::{EncryptionState, EncryptionVersion, Object, Permissions};
+    use zeroize::Zeroizing;
+
+    use super::*;
+    use crate::optimize::{optimize, OptimizeOptions};
+    use crate::protect::{protect, PdfPermissions, ProtectOptions};
+    use crate::test_support::corpus;
+
+    const PW: &str = "user-secret";
+
+    fn plain() -> Document {
+        Document::open(corpus("two_page.pdf")).unwrap()
+    }
+
+    fn reopen(bytes: Vec<u8>) -> Document {
+        Document::from_bytes_with_password(bytes, None, Zeroizing::new(PW.into())).unwrap()
+    }
+
+    fn perms() -> Permissions {
+        Permissions::PRINTABLE | Permissions::COPYABLE_FOR_ACCESSIBILITY
+    }
+
+    /// AES-256 (V5/R6) via our own `protect`, with restricted permissions.
+    fn aes256() -> Document {
+        let mut opts = ProtectOptions::new(PW, "owner").unwrap();
+        opts.permissions = PdfPermissions::parse_list("print").unwrap();
+        reopen(protect(&plain(), &opts).unwrap().to_bytes().unwrap())
+    }
+
+    /// Encrypt with an older lopdf version (RC4 / AES-128), which needs /ID.
+    fn legacy(make: impl Fn(&lopdf::Document) -> EncryptionVersion<'_>) -> Document {
+        let mut inner = plain().assembled_lopdf().unwrap();
+        inner.trailer.set(
+            "ID",
+            vec![
+                Object::string_literal(b"0123456789abcdef".to_vec()),
+                Object::string_literal(b"0123456789abcdef".to_vec()),
+            ],
+        );
+        let state = EncryptionState::try_from(make(&inner)).unwrap();
+        inner.encrypt(&state).unwrap();
+        let mut bytes = Vec::new();
+        inner.save_to(&mut bytes).unwrap();
+        reopen(bytes)
+    }
+
+    fn rc4_128() -> Document {
+        legacy(|d| EncryptionVersion::V2 {
+            document: d,
+            owner_password: "owner",
+            user_password: PW,
+            key_length: 128,
+            permissions: perms(),
+        })
+    }
+
+    fn aes128() -> Document {
+        legacy(|d| {
+            let f: Arc<dyn CryptFilter> = Arc::new(Aes128CryptFilter);
+            EncryptionVersion::V4 {
+                document: d,
+                encrypt_metadata: true,
+                crypt_filters: BTreeMap::from([(b"StdCF".to_vec(), f)]),
+                stream_filter: b"StdCF".to_vec(),
+                string_filter: b"StdCF".to_vec(),
+                owner_password: "owner",
+                user_password: PW,
+                permissions: perms(),
+            }
+        })
+    }
+
+    /// The parts of /Encrypt that define algorithm, key and permissions.
+    fn encrypt_profile(bytes: &[u8]) -> Vec<(String, String)> {
+        let doc = lopdf::Document::load_mem(bytes).unwrap();
+        let enc = doc.get_encrypted().expect("output must be encrypted");
+        let mut out = Vec::new();
+        for key in [
+            &b"Filter"[..],
+            b"V",
+            b"R",
+            b"Length",
+            b"P",
+            b"O",
+            b"U",
+            b"OE",
+            b"UE",
+            b"Perms",
+            b"StmF",
+            b"StrF",
+            b"EncryptMetadata",
+        ] {
+            let v = enc.get(key).map(|o| format!("{o:?}")).unwrap_or_default();
+            out.push((String::from_utf8_lossy(key).into_owned(), v));
+        }
+        if let Ok(cf) = enc.get(b"CF").and_then(Object::as_dict) {
+            for (name, f) in cf.iter() {
+                let cfm = f
+                    .as_dict()
+                    .ok()
+                    .and_then(|d| d.get(b"CFM").ok())
+                    .map(|o| format!("{o:?}"))
+                    .unwrap_or_default();
+                out.push((format!("CF/{}", String::from_utf8_lossy(name)), cfm));
+            }
+        }
+        out
+    }
+
+    fn p_value(bytes: &[u8]) -> i64 {
+        lopdf::Document::load_mem(bytes)
+            .unwrap()
+            .get_encrypted()
+            .unwrap()
+            .get(b"P")
+            .unwrap()
+            .as_i64()
+            .unwrap()
+    }
+
+    #[test]
+    fn merge_encryption_source_rule() {
+        assert_eq!(merge_encryption_source(&[plain(), plain()]), None);
+        assert_eq!(merge_encryption_source(&[plain(), aes256()]), Some(1));
+        assert_eq!(merge_encryption_source(&[aes256(), rc4_128()]), Some(0));
+        assert_eq!(merge_encryption_source(&[]), None);
+    }
+
+    #[test]
+    fn merge_uses_the_source_inputs_key() {
+        let src = aes128();
+        let merged = merge(&[plain(), src.clone()]).unwrap();
+        let bytes = merged.to_bytes().unwrap();
+        assert_eq!(
+            encrypt_profile(&bytes),
+            encrypt_profile(src.original_bytes())
+        );
+        assert_eq!(reopen(bytes).page_count(), 4);
+    }
+
+    #[test]
+    fn derived_and_merged_output_preserve_algorithm_key_length_and_permissions() {
+        for (name, src) in [
+            ("aes256", aes256()),
+            ("aes128", aes128()),
+            ("rc4-128", rc4_128()),
+        ] {
+            let want = encrypt_profile(src.original_bytes());
+            // The source really is restricted (no "modify", bit 4) and /P is
+            // the usual negative 32-bit value.
+            let p = p_value(src.original_bytes());
+            assert!(p < 0 && p & 8 == 0, "{name}: /P {p}");
+            let all = parse_page_ranges("1-2", 2).unwrap();
+            let two = parse_page_ranges("1,2", 2).unwrap();
+            let outputs = [
+                (
+                    "optimize",
+                    optimize(&src, &OptimizeOptions::default()).unwrap(),
+                ),
+                ("extract 1", crate::pages::extract(&src, &all).unwrap()),
+                ("extract 2", crate::pages::extract(&src, &two).unwrap()),
+                ("merge", merge(&[plain(), src.clone()]).unwrap()),
+            ];
+            for (op, out) in outputs {
+                let bytes = out.to_bytes().unwrap();
+                assert_eq!(encrypt_profile(&bytes), want, "{name} {op}");
+                assert!(reopen(bytes).is_encrypted(), "{name} {op}");
+            }
+        }
     }
 }

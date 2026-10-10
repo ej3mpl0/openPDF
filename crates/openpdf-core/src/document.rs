@@ -185,6 +185,11 @@ impl Document {
     /// with this document's key and reopened with this document's password.
     pub(crate) fn derive_encrypted(&self, mut inner: LopdfDocument) -> Result<Self> {
         inner.encryption_state = self.inner.encryption_state.clone();
+        // RC4 / AES-128 (V < 5) keys and the /U check are derived from the
+        // first file ID, so the output must carry the source's /ID.
+        if let Ok(id) = self.inner.trailer.get(b"ID") {
+            inner.trailer.set("ID", id.clone());
+        }
         self.derive(inner)
     }
 
