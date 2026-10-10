@@ -730,20 +730,20 @@ jobs:
               out.append(f"| {v} | {' '.join(first) or '-'} | {med} | {' '.join(second) or '-'} | {' '.join(extra)} |")
           out += ["", "`*` = under strace (slower; not in the median). `default` = GTK-chosen renderer, informational only; the limit stays on cairo. `nogl` is diagnostic only.",
                   "Crash gate: `default-wayland` (weston headless, GL) and `default-nodri3` gate (must use a GL GSK renderer); `vulkan-wayland` (weston headless, lavapipe) gates and must use a Vulkan GSK renderer; a crash in Xvfb `default` is informational (reason: Xvfb lacks DRI3)."]
-          out += ["", "### Peak RSS (MiB) per launch, informational (no limit on GL/Vulkan; cairo keeps its own limit)", "",
-                  "| variant | shard | first | second | smaps classes, first launch (KiB; mesa = top-15 mappings matching mesa/gallium/llvm/lvp) |", "|---|---|---:|---:|---|"]
+          out += ["", "### Peak RSS (MiB) + ui_first_tile_ms per launch, informational (no limit on GL/Vulkan; cairo keeps its own limit)", "",
+                  "| variant | shard | peak RSS first | peak RSS second | ui_first_tile_ms first | ui_first_tile_ms second | smaps classes, first launch (KiB; mesa = top-15 mappings matching mesa/gallium/llvm/lvp) |", "|---|---|---:|---:|---:|---:|---|"]
           def mib(d):
               if "peak_rss_mb" in d: return d["peak_rss_mb"]
               if "peak_rss_bytes" in d: return f"{float(d['peak_rss_bytes'])/1048576:.1f}"
               return "-"
-          for v in ["plain", "default-wayland", "vulkan-wayland"]:
+          for v in variants:
               for f in mine(v, ".txt"):
                   d = kv(f)
                   if d.get("skipped"): continue
                   sh = os.path.basename(f)[len(v) + 1:-4]
                   d2 = kv(f[:-4] + ".second") if os.path.exists(f[:-4] + ".second") else {}
-                  cls = " ".join(f"{k[4:]}={d[k]}" for k in ("rss_heap_kb", "rss_tiles_kb", "rss_pdfium_kb", "rss_mesa_kb", "rss_other_kb") if k in d) or "-"
-                  out.append(f"| {v}{' (cairo)' if v == 'plain' else ''} | {sh} | {mib(d)} | {mib(d2)} | {cls} |")
+                  cls = " ".join(f"{k[4:]}={d[k]}" for k in ("rss_heap_kb", "rss_tiles_kb", "rss_textures_kb", "rss_pdfium_kb", "rss_mesa_kb", "rss_other_kb") if k in d) or "-"
+                  out.append(f"| {v}{' (cairo)' if v == 'plain' else ''} | {sh} | {mib(d)} | {mib(d2)} | {d.get('ui_first_tile_ms','-')} | {d2.get('ui_first_tile_ms','-')} | {cls} |")
           if skipped: out.append(f"{skipped} job(s) skipped (GUI placeholder).")
           text = "\n".join(out) + "\n"
           print(text)
