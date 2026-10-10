@@ -413,7 +413,7 @@ Linux, Windows, and macOS.
 - **Native UIs** share core through an `openpdf-ffi` crate (UniFFI):
   GTK4/libadwaita on Linux, SwiftUI/AppKit in `apps/macos`, WinUI 3 + C#
   in `apps/windows` (MSIX).
-- **CI** matrix on the three platforms, with RAM and performance limits.
+- **CI** matrix on the three platforms.
 - **Releases:** one package per platform.
 
 ## Status
