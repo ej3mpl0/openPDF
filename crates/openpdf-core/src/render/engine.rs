@@ -695,6 +695,36 @@ mod drop_tests {
         }
     }
 
+    /// Release builds have no debug_assert: Bind from an unregistered engine
+    /// must be refused with an error and must not leave an unowned document.
+    #[cfg(not(debug_assertions))]
+    #[test]
+    fn bind_from_unregistered_engine_is_refused_in_release() {
+        let Some(live) = engine_or_skip() else {
+            return;
+        };
+        let ghost: EngineId = NEXT_ENGINE_ID.fetch_add(1, Ordering::Relaxed);
+        let doc = Document::open(crate::test_support::corpus("hello.pdf")).unwrap();
+        let (tx, rx) = mpsc::channel();
+        worker()
+            .unwrap()
+            .cmd
+            .send(WorkerCmd::Bind {
+                engine: ghost,
+                id: doc.id(),
+                bytes: doc.original_bytes().to_vec(),
+                reply: tx,
+            })
+            .unwrap();
+        let err = rx.recv().unwrap().unwrap_err();
+        assert!(
+            matches!(&err, Error::Pdfium(m) if m == "render engine is not registered"),
+            "{err:?}"
+        );
+        assert_eq!(probe(ghost, doc.id()), (false, false));
+        drop(live);
+    }
+
     #[test]
     fn concurrent_drop_of_last_two_clones_unregisters_once() {
         if engine_or_skip().is_none() {
