@@ -41,6 +41,7 @@ pub enum InvalidKind {
         value: String,
     },
     DocumentNotBound,
+    TileOutOfRange,
     CropInverted,
     PasswordRequired,
     WrongPassword,
@@ -138,6 +139,7 @@ impl InvalidKind {
                 tr_args("not a page number: {value}", &[("value", value)])
             }
             InvalidKind::DocumentNotBound => tr("document is not bound to the render engine"),
+            InvalidKind::TileOutOfRange => tr("tile is outside the page"),
             InvalidKind::CropInverted => tr("crop box is inverted"),
             InvalidKind::PasswordRequired => tr("password is required"),
             InvalidKind::WrongPassword => tr("wrong password"),

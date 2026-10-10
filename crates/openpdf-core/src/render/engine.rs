@@ -596,3 +596,139 @@ impl Drop for Engine {
         }
     }
 }
+
+#[cfg(test)]
+mod no_empty_tiles_tests {
+    use super::*;
+    use crate::render::{
+        page_pixel_size, quantize_zoom, tile_grid, tile_rect, zoom_from_q, TILE_SIZE,
+    };
+
+    const SIZES: &[f32] = &[
+        0.1, 0.5, 1.0, 1.5, 2.0, 3.0, 72.0, 100.0, 255.0, 256.0, 256.5, 511.0, 512.0, 595.0, 612.0,
+        842.0, 1000.0, 14400.0,
+    ];
+    fn zooms() -> Vec<f32> {
+        let mut z = vec![
+            0.0, -1.0, 0.001, 0.004, 0.005, 0.0051, 0.01, 0.015, 1.47, 1.4749, 1.475, 8.0,
+        ];
+        let mut v = 0.01f32;
+        while v <= 8.0 {
+            z.push(v);
+            v += 0.037;
+        }
+        z
+    }
+
+    #[test]
+    fn grid_never_yields_empty_tiles() {
+        for &w in SIZES {
+            for &h in SIZES {
+                for z in zooms() {
+                    let zq = zoom_from_q(quantize_zoom(z));
+                    let (pw, ph) = page_pixel_size(w, h, zq);
+                    assert!(pw > 0 && ph > 0, "{w}x{h}@{z}");
+                    let (c, r) = tile_grid(pw, ph, TILE_SIZE);
+                    assert!(c > 0 && r > 0);
+                    for (x, y) in [(0, 0), (c - 1, r - 1), (c - 1, 0), (0, r - 1)] {
+                        let (tw, th, x0, y0) = tile_rect(pw, ph, x, y, TILE_SIZE);
+                        assert!(
+                            tw > 0 && th > 0 && x0 + tw <= pw && y0 + th <= ph,
+                            "{w}x{h}@{z} tile {x},{y}"
+                        );
+                    }
+                }
+            }
+        }
+    }
+
+    fn doc_with(w: f32, h: f32, rotate: i64) -> Option<(Engine, Document)> {
+        use lopdf::{dictionary, Object};
+        let engine = match Engine::new() {
+            Ok(e) => e,
+            Err(e) if std::env::var("CI").is_err() => {
+                eprintln!("skipping: {e}");
+                return None;
+            }
+            Err(e) => panic!("{e}"),
+        };
+        let mut d = lopdf::Document::with_version("1.4");
+        let pages = d.new_object_id();
+        let page = d.add_object(dictionary! {
+            "Type" => "Page", "Parent" => pages, "Rotate" => rotate,
+            "MediaBox" => vec![0.into(), 0.into(), Object::Real(w), Object::Real(h)],
+        });
+        d.objects.insert(
+            pages,
+            Object::Dictionary(
+                dictionary! { "Type" => "Pages", "Kids" => vec![page.into()], "Count" => 1 },
+            ),
+        );
+        let cat = d.add_object(dictionary! { "Type" => "Catalog", "Pages" => pages });
+        d.trailer.set("Root", cat);
+        let mut out = Vec::new();
+        d.save_to(&mut out).unwrap();
+        let doc = Document::from_bytes(out, None).unwrap();
+        engine.bind(&doc).unwrap();
+        Some((engine, doc))
+    }
+
+    #[test]
+    fn rendered_images_are_never_empty() {
+        let mut bad = Vec::new();
+        for &(w, h) in &[
+            (1.0, 1.0),
+            (0.5, 0.5),
+            (3.0, 842.0),
+            (612.0, 792.0),
+            (512.0, 512.0),
+        ] {
+            for rot in [0, 90, 270] {
+                let Some((engine, doc)) = doc_with(w, h, rot) else {
+                    return;
+                };
+                for z in [0.0, 0.001, 0.01, 0.05, 1.0, 1.47, 8.0] {
+                    match engine.render_page(doc.id(), 0, z) {
+                        Ok(r)
+                            if r.width == 0
+                                || r.height == 0
+                                || r.rgba.len() != (r.width * r.height * 4) as usize =>
+                        {
+                            bad.push(format!(
+                                "page {w}x{h} r{rot} @{z}: {}x{}",
+                                r.width, r.height
+                            ))
+                        }
+                        _ => {}
+                    }
+                    let zq = zoom_from_q(quantize_zoom(z));
+                    let (rw, rh) = if rot % 180 == 0 { (w, h) } else { (h, w) };
+                    let (pw, ph) = page_pixel_size(rw, rh, zq);
+                    let (c, r) = tile_grid(pw, ph, TILE_SIZE);
+                    for (x, y) in [(c - 1, r - 1), (c, 0), (0, r)] {
+                        match engine.render_tile_blocking(TileKey::new(doc.id(), 0, z, x, y)) {
+                            Err(Error::Invalid(InvalidKind::TileOutOfRange))
+                                if x >= c || y >= r => {}
+                            Ok(t) if x >= c || y >= r => bad.push(format!(
+                                "out-of-grid tile {w}x{h} r{rot} @{z} ({x},{y}) -> Ok {}x{}",
+                                t.width, t.height
+                            )),
+                            Ok(t) if t.width == 0 || t.height == 0 => bad.push(format!(
+                                "tile {w}x{h} r{rot} @{z}: {}x{}",
+                                t.width, t.height
+                            )),
+                            Err(e) if x >= c || y >= r => {
+                                bad.push(format!("out-of-grid tile ({x},{y}) wrong error {e}"))
+                            }
+                            Err(e) if x < c && y < r => {
+                                bad.push(format!("tile {w}x{h} r{rot} @{z} ({x},{y}) err {e}"))
+                            }
+                            _ => {}
+                        }
+                    }
+                }
+            }
+        }
+        assert!(bad.is_empty(), "{}", bad.join("\n"));
+    }
+}

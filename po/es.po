@@ -67,6 +67,9 @@ msgstr "no es un número de página: {value}"
 msgid "document is not bound to the render engine"
 msgstr "el documento no está vinculado al motor de renderizado"
 
+msgid "tile is outside the page"
+msgstr "la tesela está fuera de la página"
+
 msgid "missing Catalog"
 msgstr "falta el Catalog"
 

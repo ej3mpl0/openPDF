@@ -166,6 +166,12 @@ pub fn render_tile(
     let page_w = page.width().value;
     let page_h = page.height().value;
     let (full_w, full_h) = super::page_pixel_size(page_w, page_h, zoom);
+    // Reject keys outside the tile grid: tile_rect clamps to 1 px, which would
+    // otherwise return a 1-px sliver of nothing instead of an error.
+    let (cols, rows) = super::tile_grid(full_w, full_h, tile_size);
+    if tile_size == 0 || tile_x >= cols || tile_y >= rows {
+        return Err(Error::invalid(crate::error::InvalidKind::TileOutOfRange));
+    }
     let (tw, th, x0, y0) = super::tile_rect(full_w, full_h, tile_x, tile_y, tile_size);
 
     let config = PdfRenderConfig::new()
