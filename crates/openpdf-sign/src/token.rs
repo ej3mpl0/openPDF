@@ -353,10 +353,6 @@ fn key_usage(cert: &Certificate) -> Vec<CertificateUsage> {
         }
         if ku.digital_signature() && !ku.non_repudiation() {
             usage.push(CertificateUsage::Authentication);
-        } else if ku.digital_signature() && ku.non_repudiation() {
-            if !usage.contains(&CertificateUsage::Signing) {
-                usage.push(CertificateUsage::Signing);
-            }
         }
         if ku.key_encipherment() || ku.data_encipherment() {
             usage.push(CertificateUsage::Encryption);
