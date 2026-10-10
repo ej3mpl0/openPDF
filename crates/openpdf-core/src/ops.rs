@@ -5,7 +5,40 @@ use lopdf::{Dictionary, Document as LopdfDocument, Object, ObjectId};
 
 use crate::document::Document;
 use crate::error::{Error, InvalidKind, Result};
+use crate::i18n::tr_args;
 use crate::signer::strip_signatures;
+
+/// How a [`merge`] / multi-range [`crate::extract`] output inherits encryption
+/// from an input. `#[non_exhaustive]` so later kinds do not break UI `match`es
+/// that include a wildcard arm.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[non_exhaustive]
+pub enum EncryptionSourceKind {
+    /// Opened with a user (or owner) password. The result stays password-protected.
+    UserPassword,
+    /// Encrypted with an empty user password. The result opens without a
+    /// password but keeps that file's permission restrictions.
+    OwnerOnly,
+}
+
+/// Localized warning for the merge/extract save dialog. Unknown future
+/// [`EncryptionSourceKind`] variants use the generic sentence.
+pub fn describe_merge_encryption(kind: EncryptionSourceKind, file: &str) -> String {
+    let file = &[("file", file)];
+    // `#[non_exhaustive]`: keep a wildcard so later kinds get a generic sentence.
+    #[allow(unreachable_patterns)]
+    match kind {
+        EncryptionSourceKind::UserPassword => tr_args(
+            "The result will be protected with the password of «{file}»",
+            file,
+        ),
+        EncryptionSourceKind::OwnerOnly => tr_args(
+            "The result will open without a password but keep the restrictions of «{file}»",
+            file,
+        ),
+        _ => tr_args("The result will keep the protection of «{file}»", file),
+    }
+}
 
 /// Inclusive 0-based page range.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -71,9 +104,11 @@ pub fn parse_page_ranges(spec: &str, page_count: u32) -> Result<Vec<PageRange>> 
 }
 
 fn parse_one(s: &str) -> Result<u32> {
-    s.trim()
-        .parse()
-        .map_err(|_| Error::invalid(InvalidKind::NotAPageNumber { value: s.to_string() }))
+    s.trim().parse().map_err(|_| {
+        Error::invalid(InvalidKind::NotAPageNumber {
+            value: s.to_string(),
+        })
+    })
 }
 
 /// Concatenate documents in order. Uses lopdf (not PDFium) so gtk/sign stay off this path.
@@ -161,19 +196,27 @@ pub fn merge(docs: &[Document]) -> Result<Document> {
     strip_signatures(&mut out);
 
     match merge_encryption_source(docs) {
-        Some(i) => docs[i].derive_encrypted(out),
+        Some((i, _)) => docs[i].derive_encrypted(out),
         None => Document::from_lopdf(out, None),
     }
 }
 
-/// Which input's encryption a [`merge`] output inherits: the first input that
-/// was opened with a password (its algorithm, key, permissions and password),
-/// or `None` when no input is protected and the output is plaintext.
+/// Which input's encryption a [`merge`] output inherits: the first protected
+/// input (user password or owner-only restrictions), or `None` when every
+/// input is plaintext.
 ///
-/// This is the single rule `merge` (and multi-range `extract`) apply; UIs can
-/// call it to tell the user up front which file's protection the result gets.
-pub fn merge_encryption_source(inputs: &[Document]) -> Option<usize> {
-    inputs.iter().position(|d| d.password().get().is_some())
+/// This is the single rule `merge` (and multi-range `extract`) apply; UIs call
+/// it plus [`describe_merge_encryption`] before saving.
+pub fn merge_encryption_source(inputs: &[Document]) -> Option<(usize, EncryptionSourceKind)> {
+    inputs.iter().enumerate().find_map(|(i, d)| {
+        if d.password().get().is_some() {
+            Some((i, EncryptionSourceKind::UserPassword))
+        } else if d.is_encrypted() {
+            Some((i, EncryptionSourceKind::OwnerOnly))
+        } else {
+            None
+        }
+    })
 }
 
 pub fn merge_paths<P: AsRef<Path>>(paths: &[P]) -> Result<Document> {
@@ -282,11 +325,7 @@ mod tests {
         let parts = split_all(&merged).unwrap();
         assert_eq!(parts.len(), 3);
         assert_eq!(parts[0].page_count(), 1);
-        let first_two = split(
-            &merged,
-            &[PageRange { start: 0, end: 1 }],
-        )
-        .unwrap();
+        let first_two = split(&merged, &[PageRange { start: 0, end: 1 }]).unwrap();
         assert_eq!(first_two[0].page_count(), 2);
     }
 
@@ -302,11 +341,12 @@ mod tests {
         assert!(!merged.is_signed());
         assert!(!merged.is_read_only());
         merged.rotate_page(0, 90).unwrap();
-        merged.save(std::env::temp_dir().join(format!(
-            "openpdf-merge-signed-{}.pdf",
-            std::process::id()
-        )))
-        .unwrap();
+        merged
+            .save(
+                std::env::temp_dir()
+                    .join(format!("openpdf-merge-signed-{}.pdf", std::process::id())),
+            )
+            .unwrap();
     }
 }
 
@@ -343,6 +383,14 @@ mod encryption_tests {
         let mut opts = ProtectOptions::new(PW, "owner").unwrap();
         opts.permissions = PdfPermissions::parse_list("print").unwrap();
         reopen(protect(&plain(), &opts).unwrap().to_bytes().unwrap())
+    }
+
+    /// Empty user password, owner restrictions. Opens without a password.
+    fn owner_only() -> Document {
+        let mut opts = ProtectOptions::new("", "owner-secret").unwrap();
+        opts.permissions = PdfPermissions::parse_list("print").unwrap();
+        let bytes = protect(&plain(), &opts).unwrap().to_bytes().unwrap();
+        Document::from_bytes(bytes, None).unwrap()
     }
 
     /// Encrypt with an older lopdf version (RC4 / AES-128), which needs /ID.
@@ -439,9 +487,89 @@ mod encryption_tests {
     #[test]
     fn merge_encryption_source_rule() {
         assert_eq!(merge_encryption_source(&[plain(), plain()]), None);
-        assert_eq!(merge_encryption_source(&[plain(), aes256()]), Some(1));
-        assert_eq!(merge_encryption_source(&[aes256(), rc4_128()]), Some(0));
+        assert_eq!(
+            merge_encryption_source(&[plain(), aes256()]),
+            Some((1, EncryptionSourceKind::UserPassword))
+        );
+        assert_eq!(
+            merge_encryption_source(&[aes256(), rc4_128()]),
+            Some((0, EncryptionSourceKind::UserPassword))
+        );
         assert_eq!(merge_encryption_source(&[]), None);
+    }
+
+    #[test]
+    fn merge_encryption_source_both_orders_user_and_owner() {
+        let user = aes256();
+        let owner = owner_only();
+        assert!(owner.is_encrypted());
+        assert!(owner.password().get().is_none());
+
+        assert_eq!(
+            merge_encryption_source(&[plain(), user.clone()]),
+            Some((1, EncryptionSourceKind::UserPassword))
+        );
+        assert_eq!(
+            merge_encryption_source(&[user.clone(), plain()]),
+            Some((0, EncryptionSourceKind::UserPassword))
+        );
+        assert_eq!(
+            merge_encryption_source(&[plain(), owner.clone()]),
+            Some((1, EncryptionSourceKind::OwnerOnly))
+        );
+        assert_eq!(
+            merge_encryption_source(&[owner.clone(), plain()]),
+            Some((0, EncryptionSourceKind::OwnerOnly))
+        );
+        assert_eq!(
+            merge_encryption_source(&[user.clone(), owner.clone()]),
+            Some((0, EncryptionSourceKind::UserPassword))
+        );
+        assert_eq!(
+            merge_encryption_source(&[owner, user]),
+            Some((0, EncryptionSourceKind::OwnerOnly))
+        );
+    }
+
+    #[test]
+    fn describe_merge_encryption_es_en() {
+        use crate::test_support::with_locale;
+        with_locale("en", || {
+            assert_eq!(
+                describe_merge_encryption(EncryptionSourceKind::UserPassword, "contract.pdf"),
+                "The result will be protected with the password of «contract.pdf»"
+            );
+            assert_eq!(
+                describe_merge_encryption(EncryptionSourceKind::OwnerOnly, "scan.pdf"),
+                "The result will open without a password but keep the restrictions of «scan.pdf»"
+            );
+        });
+        with_locale("es", || {
+            let user =
+                describe_merge_encryption(EncryptionSourceKind::UserPassword, "contrato.pdf");
+            let owner = describe_merge_encryption(EncryptionSourceKind::OwnerOnly, "escaneo.pdf");
+            let generic_en = "The result will keep the protection of «x»";
+            assert_eq!(
+                user,
+                "El resultado estará protegido con la contraseña de «contrato.pdf»"
+            );
+            assert_eq!(
+                owner,
+                "El resultado se abrirá sin contraseña pero conservará las restricciones de «escaneo.pdf»"
+            );
+            assert_ne!(
+                user,
+                "The result will be protected with the password of «contrato.pdf»"
+            );
+            assert_ne!(
+                owner,
+                "The result will open without a password but keep the restrictions of «escaneo.pdf»"
+            );
+            assert_ne!(
+                describe_merge_encryption(EncryptionSourceKind::UserPassword, "x"),
+                generic_en
+            );
+        });
     }
 
     #[test]
