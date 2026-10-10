@@ -235,7 +235,7 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        variant: [plain, nodbuswait, minimal]
+        variant: [plain, nodbuswait, minimal, fcwarm]
         shard: [1, 2, 3]
     defaults:
       run:
@@ -262,22 +262,37 @@ jobs:
             echo "$msg" >> "$GITHUB_STEP_SUMMARY"
           fi
 
+      # Normal-launch baseline: the runner env before any variant/measure var is set.
+      - name: Record baseline launch env
+        if: steps.gui.outputs.skip == 'false'
+        run: |
+          mkdir -p envs
+          OPENPDF_ENV_DUMP="$PWD/envs/baseline.txt" .github/scripts/env-dump.sh true
+          echo "envs/baseline.txt: $(wc -l < envs/baseline.txt) vars"
+
+      # Per-variant env + the exceptions the parity check accepts (printed in the log).
       - name: Variant environment
         if: steps.gui.outputs.skip == 'false'
         run: |
+          allow="GDK_BACKEND=x11 GSK_RENDERER=cairo"
           case "${{ matrix.variant }}" in
-            plain) ;;
+            plain|fcwarm) ;;
             nodbuswait)
               echo "OPENPDF_MEASURE_WRAP=dbus-run-session --" >> "$GITHUB_ENV"
               echo "GTK_A11Y=none" >> "$GITHUB_ENV"
-              echo "GSETTINGS_BACKEND=memory" >> "$GITHUB_ENV" ;;
+              echo "GSETTINGS_BACKEND=memory" >> "$GITHUB_ENV"
+              allow="$allow GTK_A11Y=none" ;;
             minimal)
               echo "OPENPDF_MEASURE_WRAP=dbus-run-session --" >> "$GITHUB_ENV"
               echo "GTK_A11Y=none" >> "$GITHUB_ENV"
               echo "GSETTINGS_BACKEND=memory" >> "$GITHUB_ENV"
               echo "GIO_USE_VFS=local" >> "$GITHUB_ENV"
-              echo "GTK_IM_MODULE=gtk-im-context-simple" >> "$GITHUB_ENV" ;;
+              echo "GTK_IM_MODULE=gtk-im-context-simple" >> "$GITHUB_ENV"
+              allow="$allow GTK_A11Y=none GTK_IM_MODULE=gtk-im-context-simple" ;;
           esac
+          echo "PARITY_ALLOW=$allow" >> "$GITHUB_ENV"
+          echo "declared env-parity exceptions for ${{ matrix.variant }}: $allow"
+          echo "$allow" > envs/allow.txt
 
       - name: Install Rust from rust-toolchain.toml
         if: steps.gui.outputs.skip == 'false'
@@ -300,12 +315,26 @@ jobs:
           sudo apt-get update
           sudo apt-get install -y --no-install-recommends \
             libgtk-4-dev libadwaita-1-dev pkg-config librsvg2-common adwaita-icon-theme \
-            xvfb xauth dbus dbus-daemon strace
+            xvfb xauth dbus dbus-daemon strace fontconfig
+
+      # fcwarm: build the user fontconfig cache up front, as on a real desktop.
+      - name: Warm fontconfig cache (fcwarm only)
+        if: steps.gui.outputs.skip == 'false' && matrix.variant == 'fcwarm'
+        run: |
+          start=$(date +%s%N)
+          fc-cache -f
+          echo "fc-cache -f: $(( ($(date +%s%N) - start) / 1000000 )) ms"
 
       # Build only; nothing launches the GUI before the measurement.
       - name: Build workspace (release)
         if: steps.gui.outputs.skip == 'false'
         run: cargo build --release --workspace --locked
+
+      - name: "~/.cache snapshot (before first launch)"
+        if: steps.gui.outputs.skip == 'false'
+        run: |
+          mkdir -p cache
+          .github/scripts/cache-snapshot.sh cache/0-before.txt
 
       - name: Drop page cache
         if: steps.gui.outputs.skip == 'false'
@@ -314,39 +343,81 @@ jobs:
           echo 3 | sudo tee /proc/sys/vm/drop_caches
           echo "drop_caches: ran (sync; echo 3 > /proc/sys/vm/drop_caches) at $(date -u +%FT%TZ)"
 
-      - name: Cold GUI measure (single run, first launch)
+      # Shard 1: the FIRST launch runs under strace (its number is tagged straced=1).
+      - name: Cold GUI measure (first launch)
         if: steps.gui.outputs.skip == 'false'
         env:
           GDK_BACKEND: x11
           GSK_RENDERER: cairo
+          OPENPDF_ENV_DUMP: ${{ github.workspace }}/envs/measure-1.txt
         run: |
-          mkdir -p cold
-          echo "variant=${{ matrix.variant }} wrap='${OPENPDF_MEASURE_WRAP:-}' GTK_A11Y=${GTK_A11Y:-} GSETTINGS_BACKEND=${GSETTINGS_BACKEND:-} GIO_USE_VFS=${GIO_USE_VFS:-} GTK_IM_MODULE=${GTK_IM_MODULE:-}"
+          mkdir -p cold strace
+          wrap="${OPENPDF_MEASURE_WRAP:-}"
+          straced=0
+          if [ "${{ matrix.shard }}" = 1 ]; then
+            wrap="$wrap strace -f -tt -e trace=openat,connect -o $PWD/strace/trace-first.txt"
+            straced=1
+          fi
+          export OPENPDF_MEASURE_WRAP="$wrap $PWD/.github/scripts/env-dump.sh"
+          echo "variant=${{ matrix.variant }} wrap='$OPENPDF_MEASURE_WRAP'"
           python3 .github/scripts/run-measure.py --kind gui --single-cold --frames 32 \
             --out "cold/$TAG.txt"
-          echo "variant=${{ matrix.variant }}" >> "cold/$TAG.txt"
+          printf 'variant=%s\nstraced=%s\n' "${{ matrix.variant }}" "$straced" >> "cold/$TAG.txt"
+          if [ "$straced" = 1 ]; then
+            python3 .github/scripts/strace-summary.py strace/trace-first.txt | tee strace/summary-first.md
+            { echo "### ${{ matrix.variant }}: first launch (strace)"; cat strace/summary-first.md; } >> "$GITHUB_STEP_SUMMARY"
+          fi
 
-      # Shard 1 only: a second cold launch under strace (not used for the numbers).
-      - name: Drop page cache (strace run)
-        if: steps.gui.outputs.skip == 'false' && matrix.shard == 1
+      - name: "~/.cache snapshot (after first launch)"
+        if: always() && steps.gui.outputs.skip == 'false'
+        run: .github/scripts/cache-snapshot.sh cache/1-after-first.txt
+
+      - name: Drop page cache (second launch)
+        if: always() && steps.gui.outputs.skip == 'false'
         run: |
           sync
           echo 3 | sudo tee /proc/sys/vm/drop_caches
           echo "drop_caches: ran at $(date -u +%FT%TZ)"
 
-      - name: Cold GUI launch under strace
-        if: steps.gui.outputs.skip == 'false' && matrix.shard == 1
+      # Second launch on the same VM, page cache dropped again (for comparison).
+      - name: Cold GUI measure (second launch)
+        if: always() && steps.gui.outputs.skip == 'false'
         env:
           GDK_BACKEND: x11
           GSK_RENDERER: cairo
+          OPENPDF_ENV_DUMP: ${{ github.workspace }}/envs/measure-2.txt
         run: |
-          mkdir -p strace
-          export OPENPDF_MEASURE_WRAP="${OPENPDF_MEASURE_WRAP:-} strace -f -tt -e trace=openat,connect -o $PWD/strace/trace.txt"
+          wrap="${OPENPDF_MEASURE_WRAP:-}"
+          straced=0
+          if [ "${{ matrix.shard }}" = 1 ]; then
+            wrap="$wrap strace -f -tt -e trace=openat,connect -o $PWD/strace/trace-second.txt"
+            straced=1
+          fi
+          export OPENPDF_MEASURE_WRAP="$wrap $PWD/.github/scripts/env-dump.sh"
           echo "wrap='$OPENPDF_MEASURE_WRAP'"
           python3 .github/scripts/run-measure.py --kind gui --single-cold --frames 32 \
-            --out "strace/measure-under-strace.txt" || true
-          python3 .github/scripts/strace-summary.py strace/trace.txt | tee strace/summary.md
-          { echo "### ${{ matrix.variant }}"; cat strace/summary.md; } >> "$GITHUB_STEP_SUMMARY"
+            --out "cold/$TAG.second" || true
+          printf 'straced=%s\n' "$straced" >> "cold/$TAG.second"
+          if [ "$straced" = 1 ]; then
+            python3 .github/scripts/strace-summary.py strace/trace-second.txt | tee strace/summary-second.md
+            { echo "### ${{ matrix.variant }}: second launch (strace)"; cat strace/summary-second.md; } >> "$GITHUB_STEP_SUMMARY"
+          fi
+
+      - name: "~/.cache snapshot (after second launch) + diff"
+        if: always() && steps.gui.outputs.skip == 'false'
+        run: |
+          .github/scripts/cache-snapshot.sh cache/2-after-second.txt
+          python3 .github/scripts/cache-diff.py cache/0-before.txt cache/1-after-first.txt cache/2-after-second.txt | tee cache/diff.md
+          { echo "### ~/.cache diff: $TAG"; cat cache/diff.md; } >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Env parity (in-job view; the gating check is cold-start-env-parity)
+        if: always() && steps.gui.outputs.skip == 'false'
+        run: |
+          args=()
+          for a in $PARITY_ALLOW; do args+=(--allow "$a"); done
+          files=(envs/baseline.txt)
+          for f in envs/measure-1.txt envs/measure-2.txt; do [ -f "$f" ] && files+=("$f"); done
+          python3 .github/scripts/env-parity.py "${files[@]}" "${args[@]}"
 
       - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
         if: always() && matrix.shard == 1 && steps.gui.outputs.skip == 'false'
@@ -356,11 +427,64 @@ jobs:
           if-no-files-found: warn
 
       - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        if: always() && steps.gui.outputs.skip == 'false'
+        with:
+          name: cache-${{ env.TAG }}
+          path: cache/
+          if-no-files-found: warn
+
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        if: always() && steps.gui.outputs.skip == 'false'
+        with:
+          name: envs-${{ env.TAG }}
+          path: envs/
+          if-no-files-found: warn
+
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
         if: always()
         with:
           name: cold-start-${{ env.TAG }}
           path: cold/
           if-no-files-found: warn
+
+  # Real gate (no continue-on-error): --measure must run with the app's normal env
+  # except the per-variant exceptions declared in the cold-start job.
+  cold-start-env-parity:
+    name: Cold start env parity
+    needs: cold-start
+    if: always()
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+        with:
+          persist-credentials: false
+          sparse-checkout: .github/scripts
+
+      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
+        with:
+          pattern: envs-*
+          path: envs
+
+      - name: Compare launch env vs --measure env
+        run: |
+          shopt -s nullglob
+          dirs=(envs/envs-*)
+          if [ ${#dirs[@]} -eq 0 ]; then
+            echo "::notice::no env dumps (cold-start skipped on this branch)"; exit 0
+          fi
+          rc=0
+          for d in "${dirs[@]}"; do
+            echo "== ${d#envs/envs-}"
+            if [ ! -f "$d/measure-1.txt" ]; then
+              echo "::error::${d}: no measure-1.txt (first --measure launch did not reach the app)"; rc=1; continue
+            fi
+            args=()
+            for a in $(cat "$d/allow.txt"); do args+=(--allow "$a"); done
+            files=("$d/baseline.txt" "$d/measure-1.txt")
+            [ -f "$d/measure-2.txt" ] && files+=("$d/measure-2.txt")
+            python3 .github/scripts/env-parity.py "${files[@]}" "${args[@]}" || rc=1
+          done
+          exit $rc
 
   cold-start-summary:
     name: Cold start summary
@@ -375,33 +499,36 @@ jobs:
           path: cold
           merge-multiple: true
 
-      - name: Median per variant
+      - name: Per variant (all values; shard 1 first launch is under strace)
         run: |
           python3 - <<'PY2'
           import glob, os, statistics
-          variants = ["plain", "nodbuswait", "minimal"]
-          keys = ["cold_startup_ms", "ui_gtk_startup_ms", "ui_activate_ms"]
-          data, skipped, rows = {v: [] for v in variants}, 0, []
-          for f in sorted(glob.glob("cold/*.txt")):
-              kv = dict(l.split("=", 1) for l in open(f).read().split() if "=" in l)
-              if kv.get("skipped"):
-                  skipped += 1; continue
-              v = kv.get("variant") or os.path.basename(f).rsplit("-", 1)[0]
-              if "cold_startup_ms" in kv and v in data:
-                  data[v].append(kv)
-                  marks = " ".join(f"{k}={x}" for k, x in kv.items() if k.startswith("ui_"))
-                  rows.append(f"- `{os.path.basename(f)}`: cold_startup_ms={kv['cold_startup_ms']} {marks}")
-          out = ["## Cold start per variant (informational, single first launch per fresh VM)", ""]
-          if not any(data.values()):
-              out.append(f"No cold values ({skipped} job(s) skipped: GUI placeholder until #1).")
-          else:
-              def med(lst, k):
-                  xs = [float(d[k]) for d in lst if k in d]
-                  return f"{statistics.median(xs):g} (n={len(xs)})" if xs else "-"
-              out += ["| variant | " + " | ".join(keys) + " |", "|---|" + "---:|" * len(keys)]
-              for v in variants:
-                  out.append(f"| {v} | " + " | ".join(med(data[v], k) for k in keys) + " |")
-              out += ["", "Per job:"] + rows
+          variants = ["plain", "nodbuswait", "minimal", "fcwarm"]
+          def kv(f):
+              return dict(l.split("=", 1) for l in open(f).read().split() if "=" in l)
+          out = ["## Cold start per variant (informational, fresh VM per job)", "",
+                 "| variant | first launch cold_startup_ms (all shards) | median w/o strace | second launch (same VM) |",
+                 "|---|---|---:|---|"]
+          skipped = 0
+          for v in variants:
+              first, clean, second = [], [], []
+              for f in sorted(glob.glob(f"cold/{v}-*.txt")):
+                  d = kv(f)
+                  if d.get("skipped"):
+                      skipped += 1; continue
+                  sh = os.path.basename(f)[len(v) + 1:-4]
+                  if "cold_startup_ms" in d:
+                      s = d.get("straced") == "1"
+                      first.append(f"s{sh}={d['cold_startup_ms']}{'*' if s else ''}")
+                      if not s: clean.append(float(d["cold_startup_ms"]))
+                  sf = f[:-4] + ".second"
+                  if os.path.exists(sf):
+                      d2 = kv(sf)
+                      second.append(f"s{sh}={d2.get('cold_startup_ms', 'fail')}{'*' if d2.get('straced') == '1' else ''}")
+              med = f"{statistics.median(clean):g}" if clean else "-"
+              out.append(f"| {v} | {' '.join(first) or '-'} | {med} | {' '.join(second) or '-'} |")
+          out += ["", "`*` = under strace (slower; not in the median)."]
+          if skipped: out.append(f"{skipped} job(s) skipped (GUI placeholder).")
           text = "\n".join(out) + "\n"
           print(text)
           with open(os.environ["GITHUB_STEP_SUMMARY"], "a") as fh:
