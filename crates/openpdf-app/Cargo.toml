@@ -1,0 +1,16 @@
+[package]
+name = "openpdf-app"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+description = "openPDF GTK application (composes UI + PKCS#11 signer)"
+
+[[bin]]
+name = "openpdf-gtk"
+path = "src/main.rs"
+
+[dependencies]
+openpdf-core.workspace = true
+openpdf-gtk = { path = "../openpdf-gtk" }
+openpdf-sign = { path = "../openpdf-sign" }

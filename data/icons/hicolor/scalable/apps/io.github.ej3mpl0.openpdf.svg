@@ -1,0 +1,8 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 128 128" role="img" aria-label="openPDF">
+  <rect width="128" height="128" rx="28" fill="#1b5e3b"/>
+  <path fill="#f4f7f5" d="M34 22h44l20 20v64a8 8 0 0 1-8 8H34a8 8 0 0 1-8-8V30a8 8 0 0 1 8-8z"/>
+  <path fill="#c5d4cb" d="M78 22v16a4 4 0 0 0 4 4h16"/>
+  <rect x="38" y="56" width="52" height="8" rx="4" fill="#1b5e3b"/>
+  <rect x="38" y="72" width="40" height="8" rx="4" fill="#1b5e3b" opacity=".7"/>
+  <rect x="38" y="88" width="46" height="8" rx="4" fill="#1b5e3b" opacity=".45"/>
+</svg>
