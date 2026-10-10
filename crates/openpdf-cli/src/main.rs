@@ -172,12 +172,34 @@ fn cli() -> Command {
 fn main() {
     init_i18n();
     if let Err(e) = run() {
+        if is_pin_cancelled(&e) {
+            // Quiet success: a cancelled PIN is not an error (exit 0).
+            return;
+        }
         eprintln!(
             "{}",
             tr_args("openpdf: {error}", &[("error", &format!("{e:#}"))])
         );
         std::process::exit(1);
     }
+}
+
+/// True when the user cancelled a PIN prompt.
+///
+/// `PinCancelled` is not in `openpdf_core` on this branch. When core adds
+/// `Error::Invalid(InvalidKind::PinCancelled)` (or `Error::PinCancelled`),
+/// match it in [`core_error_is_pin_cancelled`] so the CLI exits 0 with no
+/// alarming message.
+fn is_pin_cancelled(err: &anyhow::Error) -> bool {
+    err.chain().any(|cause| {
+        cause
+            .downcast_ref::<openpdf_core::Error>()
+            .is_some_and(core_error_is_pin_cancelled)
+    })
+}
+
+fn core_error_is_pin_cancelled(_err: &openpdf_core::Error) -> bool {
+    false
 }
 
 fn run() -> Result<()> {
@@ -379,4 +401,17 @@ fn looks_like_pdf(path: &Path) -> bool {
     path.extension()
         .and_then(|e| e.to_str())
         .is_some_and(|e| e.eq_ignore_ascii_case("pdf"))
+}
+
+#[cfg(test)]
+mod pin_cancel_tests {
+    use super::*;
+    use openpdf_core::Error;
+
+    #[test]
+    fn current_core_errors_are_not_pin_cancel() {
+        assert!(!core_error_is_pin_cancelled(&Error::EmptyDocument));
+        let wrapped = anyhow::Error::from(Error::EmptyDocument);
+        assert!(!is_pin_cancelled(&wrapped));
+    }
 }
