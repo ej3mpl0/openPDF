@@ -297,7 +297,7 @@ jobs:
               echo "OPENPDF_NO_GSK_CAIRO=1" >> "$GITHUB_ENV"
               echo "OPENPDF_WAYLAND=1" >> "$GITHUB_ENV"
               echo "OPENPDF_MEASURE_RSS_BREAKDOWN=1" >> "$GITHUB_ENV"
-              allow="GDK_BACKEND=wayland WAYLAND_DISPLAY=wayland-ci OPENPDF_MEASURE_RSS_BREAKDOWN=1" ;;
+              allow="GDK_BACKEND=wayland WAYLAND_DISPLAY=wayland-ci" ;;
             # vulkan-wayland: same weston headless, but GSK_RENDERER=vulkan on Mesa lavapipe. Crash GATE.
             # VK_DRIVER_FILES/VK_ICD_FILENAMES (lvp_icd) are exported after mesa-vulkan-drivers is installed.
             vulkan-wayland)
@@ -305,7 +305,7 @@ jobs:
               echo "OPENPDF_WAYLAND=1" >> "$GITHUB_ENV"
               echo "OPENPDF_GSK=vulkan" >> "$GITHUB_ENV"
               echo "OPENPDF_MEASURE_RSS_BREAKDOWN=1" >> "$GITHUB_ENV"
-              allow="GDK_BACKEND=wayland WAYLAND_DISPLAY=wayland-ci GSK_RENDERER=vulkan OPENPDF_MEASURE_RSS_BREAKDOWN=1" ;;  # VK_DRIVER_FILES/VK_ICD_FILENAMES: not watched by env-parity (logged in the lavapipe step)
+              allow="GDK_BACKEND=wayland WAYLAND_DISPLAY=wayland-ci GSK_RENDERER=vulkan" ;;  # VK_*, OPENPDF_MEASURE_RSS_BREAKDOWN: not watched by env-parity (logged in the lavapipe step)
             nodbuswait)
               echo "OPENPDF_MEASURE_WRAP=dbus-run-session --" >> "$GITHUB_ENV"
               echo "GTK_A11Y=none" >> "$GITHUB_ENV"
@@ -419,8 +419,8 @@ jobs:
         run: |
           [ -S "$XDG_RUNTIME_DIR/wayland-ci" ] || { echo "::error::weston socket gone"; exit 1; }
           env -u DISPLAY WAYLAND_DISPLAY=wayland-ci MESA_SHADER_CACHE_DISABLE=true vulkaninfo --summary 2>&1 | tee vulkaninfo.txt || true
-          dev=$(sed -n 's/^ *deviceName *= *//p' vulkaninfo.txt | head -1)
-          drv=$(sed -n 's/^ *driverInfo *= *//p' vulkaninfo.txt | head -1)
+          dev=$(sed -n 's/^[[:space:]]*deviceName[[:space:]]*=[[:space:]]*//p' vulkaninfo.txt | head -1)
+          drv=$(sed -n 's/^[[:space:]]*driverInfo[[:space:]]*=[[:space:]]*//p' vulkaninfo.txt | head -1)
           echo "VK device=${dev:-unknown} driverInfo=${drv:-unknown}"
           echo "gl_renderer=vk:$(echo "${dev:-unknown}" | tr ' ' '_')" > cold/$TAG.gl
 
