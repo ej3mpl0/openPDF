@@ -331,7 +331,7 @@ jobs:
         if: steps.gui.outputs.skip == 'false'
         run: |
           mkdir -p cold
-          xvfb-run -a --server-args="-screen 0 1280x800x24" glxinfo -B | tee glxinfo.txt || true
+          MESA_SHADER_CACHE_DISABLE=true xvfb-run -a --server-args="-screen 0 1280x800x24" glxinfo -B | tee glxinfo.txt || true
           gl=$(sed -n 's/^ *OpenGL renderer string: *//p' glxinfo.txt | head -1)
           echo "GL_RENDERER=${gl:-unknown}"
           echo "gl_renderer=$(echo "${gl:-unknown}" | tr ' ' '_')" > cold/$TAG.gl
