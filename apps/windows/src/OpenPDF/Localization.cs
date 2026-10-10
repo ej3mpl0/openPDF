@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: MPL-2.0
 namespace OpenPdf;
 
 static class L10n

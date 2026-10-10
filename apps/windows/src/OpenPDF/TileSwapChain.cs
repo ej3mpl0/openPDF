@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: MPL-2.0
 #if !OPENPDF_MEASURE
 using System.Runtime.InteropServices;
 using Microsoft.UI.Xaml.Controls;
