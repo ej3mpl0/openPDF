@@ -421,5 +421,5 @@ msgstr ""
 msgid "PKCS#11 module not available"
 msgstr ""
 
-msgid "Could not load the PKCS#11 module"
+msgid "Could not load the PKCS#11 module {module}: {detail}"
 msgstr ""
