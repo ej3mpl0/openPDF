@@ -2,6 +2,5 @@
 <gresources>
   <gresource prefix="/io/github/ej3mpl0/openpdf/icons">
     <file alias="scalable/actions/open-menu-symbolic.svg">icons/scalable/actions/open-menu-symbolic.svg</file>
-    <file alias="scalable/apps/io.github.ej3mpl0.openpdf.svg">icons/io.github.ej3mpl0.openpdf.svg</file>
   </gresource>
 </gresources>

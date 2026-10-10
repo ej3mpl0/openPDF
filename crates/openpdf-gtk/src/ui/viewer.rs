@@ -450,37 +450,43 @@ pub fn build(doc: Rc<Opened>, settings: &Settings, lang: Lang) -> Rc<DocumentVie
         content.append(&banner);
     }
 
-    let mode_bar = gtk::Box::new(gtk::Orientation::Horizontal, 6);
-    mode_bar.add_css_class("mode-bar");
-    mode_bar.set_margin_start(8);
-    mode_bar.set_margin_end(8);
-    let view_mode = gtk::ToggleButton::with_label(t(lang, "View"));
-    view_mode.set_active(true);
-    view_mode.add_css_class("mode-btn");
-    view_mode.add_css_class("pill");
-    view_mode.add_css_class("suggested-action");
-    mode_bar.append(&view_mode);
-    for (label, action) in [
-        (t(lang, "Comment"), None),
-        (t(lang, "Fill and sign"), Some("app.sign")),
-        (t(lang, "Organize pages"), None),
-        (t(lang, "Edit"), None),
-        (t(lang, "Protect"), None),
-        (t(lang, "Tools"), None),
-    ] {
-        let btn = gtk::Button::with_label(label);
-        btn.add_css_class("mode-btn");
-        btn.add_css_class("flat");
-        btn.add_css_class("pill");
-        if let Some(name) = action {
-            btn.connect_clicked(move |w| {
-                let _ = w.activate_action(name, None);
-            });
-        } else {
-            btn.set_sensitive(false);
-            btn.set_tooltip_text(Some(t(lang, "Waiting on openpdf-core")));
+    let measuring = gtk::gio::Application::default()
+        .and_then(|app| app.application_id())
+        .is_some_and(|id| id == crate::MEASURE_APP_ID);
+    if !measuring {
+        let mode_bar = gtk::Box::new(gtk::Orientation::Horizontal, 6);
+        mode_bar.add_css_class("mode-bar");
+        mode_bar.set_margin_start(8);
+        mode_bar.set_margin_end(8);
+        let view_mode = gtk::ToggleButton::with_label(t(lang, "View"));
+        view_mode.set_active(true);
+        view_mode.add_css_class("mode-btn");
+        view_mode.add_css_class("pill");
+        view_mode.add_css_class("suggested-action");
+        mode_bar.append(&view_mode);
+        for (label, action) in [
+            (t(lang, "Comment"), None),
+            (t(lang, "Fill and sign"), Some("app.sign")),
+            (t(lang, "Organize pages"), None),
+            (t(lang, "Edit"), None),
+            (t(lang, "Protect"), None),
+            (t(lang, "Tools"), None),
+        ] {
+            let btn = gtk::Button::with_label(label);
+            btn.add_css_class("mode-btn");
+            btn.add_css_class("flat");
+            btn.add_css_class("pill");
+            if let Some(name) = action {
+                btn.connect_clicked(move |w| {
+                    let _ = w.activate_action(name, None);
+                });
+            } else {
+                btn.set_sensitive(false);
+                btn.set_tooltip_text(Some(t(lang, "Waiting on openpdf-core")));
+            }
+            mode_bar.append(&btn);
         }
-        mode_bar.append(&btn);
+        content.append(&mode_bar);
     }
 
     let chrome = gtk::Box::new(gtk::Orientation::Horizontal, 8);
@@ -526,7 +532,6 @@ pub fn build(doc: Rc<Opened>, settings: &Settings, lang: Lang) -> Rc<DocumentVie
     search_bar.set_show_close_button(true);
     search_bar.connect_entry(&search_entry);
 
-    content.append(&mode_bar);
     content.append(&chrome);
     content.append(&search_bar);
     content.append(&pages_scroll);

@@ -1,0 +1,16 @@
+# xvfb GTK captures (cairo) next to headless Chromium renders of the owner boards.
+# Left = design, right = app, except thumbnails (design strip | app strip).
+# Design has no verify board; design-verify.png is the viewer surface.
+
+7a82a2d53e4648abbfbe3447ab2d7c23f30febce56e3316dad369d6ef3fc32aa  viewer-side-by-side.png
+b5128201dbe5d1833a82bd2301c16ec44bc3f5c9301d8e8ff69eb24d6c78e112  thumbnails-side-by-side.png
+79447d43df2d4f0bacc2bdc53cfcc98d5ba47357f30e67c6fe2a6e6e6131725a  cert-picker-side-by-side.png
+930730973fc713ecf20c75295d317942d8dc1343c0578fa9cc548282bb182a6e  verify-side-by-side.png
+c0481324d1ccf3cdb101bc4a6681ba19940ab0c400180b2e7035cd20fbbd67b5  app-viewer.png
+22140644487169249a805eb4248ff9e61fa3301af5b459df396bf7f7a71ec6ea  app-thumbnails.png
+ea1e463b0b386418732e3acec6ad5dcf14d5d0692d9da8183d2cfca283db0028  app-cert-picker.png
+bc31abae8093052cfd74e0cb658ee9c830c637db63eb2829aaddc52d20b5d41b  app-verify.png
+1157d6240fa10e6d7f0de1fc79a3dca87ff0fbd8cc5453349acabad7e71ef1af  design-viewer.png
+018e97f87c463a04df411b40c0f2fe3c0abc898ad780efda5fe2117c2ee0d2ec  design-thumbnails.png
+08ac7fe935878f6911b31c9e77323deeea243057d686cce7a32e82aeaf8f7f2a  design-cert-picker.png
+1157d6240fa10e6d7f0de1fc79a3dca87ff0fbd8cc5453349acabad7e71ef1af  design-verify.png

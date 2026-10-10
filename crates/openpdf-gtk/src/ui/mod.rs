@@ -418,6 +418,7 @@ pub(crate) fn register_deferred_icons() {
             include_bytes!(concat!(env!("OUT_DIR"), "/icons-deferred.gresource")),
             "icons-deferred",
         );
+        load_design_css();
     });
 }
 
@@ -429,8 +430,24 @@ fn register_icon_blob(bytes: &'static [u8], label: &str) {
 }
 
 fn load_css() {
+    add_css(CSS);
+}
+
+/// Home / picker / mode-bar rules. Skipped in `--measure` so peak RSS stays
+/// under 150 MiB; the real app loads this with the deferred icons.
+pub(crate) fn load_design_css() {
+    let measuring = gtk::gio::Application::default()
+        .and_then(|app| app.application_id())
+        .is_some_and(|id| id == crate::MEASURE_APP_ID);
+    if measuring {
+        return;
+    }
+    add_css(CSS_DESIGN);
+}
+
+fn add_css(css: &str) {
     let provider = gtk::CssProvider::new();
-    provider.load_from_string(CSS);
+    provider.load_from_string(css);
     if let Some(display) = gtk::gdk::Display::default() {
         gtk::style_context_add_provider_for_display(
             &display,
@@ -445,26 +462,7 @@ const CSS: &str = r#"
 @define-color accent_bg_color #0e7c66;
 @define-color accent_fg_color #ffffff;
 @define-color window_fg_color #1a1c20;
-@define-color view_bg_color #ebedf0;
-@define-color headerbar_bg_color #f8f9fa;
-@define-color card_bg_color #ffffff;
 @define-color highlight_color #ffe07a;
-
-window {
-  background: #f4f5f7;
-  color: #1a1c20;
-  font-size: 13px;
-}
-
-headerbar {
-  background: #f8f9fa;
-  color: #1a1c20;
-  min-height: 40px;
-}
-
-tabbar {
-  background: #f8f9fa;
-}
 
 .page-canvas {
   background: #ebedf0;
@@ -484,12 +482,18 @@ tabbar {
   padding: 8px 12px;
   background: #ddf0ea;
   color: #0a5e4d;
-  font-size: 13px;
 }
 
 .dark .placeholder-banner {
   background: #1e4a40;
   color: #8fe6cf;
+}
+"#;
+
+const CSS_DESIGN: &str = r#"
+headerbar, tabbar, .mode-bar, .viewer-chrome {
+  background: #f8f9fa;
+  color: #1a1c20;
 }
 
 .suggested-action {
@@ -497,15 +501,10 @@ tabbar {
   color: #ffffff;
   border-radius: 999px;
   padding: 6px 16px;
-  box-shadow: 0 1px 3px rgba(20, 24, 31, 0.20);
 }
 
 .suggested-action:hover {
   background: #0a5e4d;
-}
-
-.suggested-action:disabled {
-  opacity: 0.45;
 }
 
 .pill {
@@ -519,24 +518,11 @@ tabbar {
 
 .mode-bar {
   padding: 4px 8px;
-  background: #f8f9fa;
 }
 
 .mode-btn {
   padding: 4px 12px;
   border-radius: 999px;
-  font-size: 13px;
-  font-weight: 500;
-}
-
-.mode-btn.suggested-action {
-  background: #0e7c66;
-  color: #ffffff;
-}
-
-.viewer-chrome {
-  padding: 6px 8px;
-  background: #f8f9fa;
 }
 
 .drop-card {
@@ -544,8 +530,6 @@ tabbar {
   border-radius: 12px;
   padding: 28px 24px;
   background: #ffffff;
-  min-width: 280px;
-  min-height: 200px;
 }
 
 .home-card {
@@ -559,12 +543,7 @@ tabbar {
   background: #ffffff;
   border-radius: 12px;
   padding: 14px 16px;
-  min-width: 200px;
   box-shadow: 0 1px 2px rgba(20, 24, 31, 0.08);
-}
-
-.tool-card:hover {
-  background: #f8f9fa;
 }
 
 .cert-row {
@@ -587,10 +566,6 @@ tabbar {
 
 .sign-footer {
   padding: 12px 16px;
-}
-
-.dark window, .dark {
-  color: #ecedef;
 }
 
 .dark headerbar, .dark tabbar, .dark .mode-bar, .dark .viewer-chrome {
