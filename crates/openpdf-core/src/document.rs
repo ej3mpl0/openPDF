@@ -330,6 +330,20 @@ impl Document {
         }
     }
 
+    /// Cheap memory accounting for this document: O(objects), no stream
+    /// clone or decode, no heap allocation. See [`DocMemory`].
+    pub fn memory_usage(&self) -> DocMemory {
+        let mut est = 0usize;
+        for obj in self.inner.objects.values() {
+            est += MAP_ENTRY_OVERHEAD + std::mem::size_of::<ObjectId>() + object_heap(obj);
+        }
+        DocMemory {
+            file_bytes: self.original.len() as u64,
+            object_tree_estimate: est as u64,
+            object_count: self.inner.objects.len() as u64,
+        }
+    }
+
     pub(crate) fn original_bytes(&self) -> &[u8] {
         &self.original
     }
@@ -511,5 +525,90 @@ mod tests {
         assert_eq!(doc.page_count(), 2);
         doc.move_page(0, 2).unwrap();
         assert_eq!(doc.page_count(), 2);
+    }
+}
+
+/// Memory used by an open [`Document`], in bytes. Returned by
+/// [`Document::memory_usage`].
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[non_exhaustive]
+pub struct DocMemory {
+    /// Length of the original file buffer the document keeps. Counted once
+    /// here. Note: on this branch `Engine::bind` hands PDFium its own copy of
+    /// these bytes, so while bound the process holds them twice; that copy is
+    /// PDFium's and is not included.
+    pub file_bytes: u64,
+    /// **Estimate** of the lopdf object tree's heap: each object's inline size,
+    /// a fixed per-entry overhead for the object map and for dictionary entries,
+    /// name/string lengths, and the (still encoded) stream content length.
+    /// Allocator slack and BTreeMap node layout are approximated, not measured.
+    pub object_tree_estimate: u64,
+    /// Number of indirect objects in the tree.
+    pub object_count: u64,
+}
+
+impl DocMemory {
+    /// `file_bytes + object_tree_estimate`.
+    pub fn total(&self) -> u64 {
+        self.file_bytes + self.object_tree_estimate
+    }
+}
+
+/// Approximate per-entry cost of a `BTreeMap` (node share + padding).
+const MAP_ENTRY_OVERHEAD: usize = 16;
+
+fn dict_heap(d: &Dictionary) -> usize {
+    d.iter()
+        .map(|(k, v)| {
+            MAP_ENTRY_OVERHEAD + k.len() + std::mem::size_of::<Vec<u8>>() + object_heap(v)
+        })
+        .sum()
+}
+
+/// Inline size of `obj` plus what it owns on the heap.
+fn object_heap(obj: &Object) -> usize {
+    std::mem::size_of::<Object>()
+        + match obj {
+            Object::Name(n) => n.len(),
+            Object::String(s, _) => s.len(),
+            Object::Array(a) => a.iter().map(object_heap).sum(),
+            Object::Dictionary(d) => dict_heap(d),
+            Object::Stream(st) => st.content.len() + dict_heap(&st.dict),
+            _ => 0,
+        }
+}
+
+#[cfg(test)]
+mod memory_tests {
+    use super::*;
+    use crate::test_support::corpus;
+
+    #[test]
+    fn corpus_memory_is_sane() {
+        for name in ["hello.pdf", "two_page.pdf", "outline.pdf"] {
+            let bytes = std::fs::read(corpus(name)).unwrap();
+            let len = bytes.len() as u64;
+            let doc = Document::from_bytes(bytes, None).unwrap();
+            let m = doc.memory_usage();
+            assert_eq!(m.file_bytes, len, "{name}");
+            let streams: u64 = doc
+                .inner
+                .objects
+                .values()
+                .filter_map(|o| o.as_stream().ok())
+                .map(|s| s.content.len() as u64)
+                .sum();
+            assert!(m.object_tree_estimate >= streams, "{name}: {m:?}");
+            assert!(m.object_count > 0);
+            // Object tree is never tiny, and not wildly larger than the file.
+            assert!(
+                m.object_tree_estimate >= m.object_count * 16,
+                "{name}: {m:?}"
+            );
+            assert!(
+                m.object_tree_estimate <= len * 50 + 64 * 1024,
+                "{name}: {m:?}"
+            );
+        }
     }
 }
