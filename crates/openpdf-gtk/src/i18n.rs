@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: MPL-2.0
 //! UI strings. Call sites pass **English** msgids; Spanish lives in `po/es.po`.
 //!
 //! Locale follows `openpdf-core` (GNU gettext): `LANGUAGE` (colon-separated

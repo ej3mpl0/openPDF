@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: MPL-2.0
 //! GTK frontend for openPDF.
 //!
 //! Rendering and document I/O go through `openpdf-core`. This crate never

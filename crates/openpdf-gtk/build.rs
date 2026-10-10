@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: MPL-2.0
 fn main() {
     let out = std::env::var("OUT_DIR").expect("OUT_DIR");
     let dest = format!("{out}/icons.gresource");
