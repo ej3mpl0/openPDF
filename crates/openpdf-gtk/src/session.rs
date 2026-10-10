@@ -16,8 +16,31 @@ use crate::tiles::{TileCache, TileKey as ViewTile, DEFAULT_CACHE_BYTES};
 pub struct Session {
     engine: Engine,
     doc: RefCell<Document>,
-    title: String,
-    path: Option<PathBuf>,
+    title: RefCell<String>,
+    path: RefCell<Option<PathBuf>>,
+}
+
+/// `document.pdf` → `document-signed.pdf`. Opening an already-signed sibling
+/// writes `document-signed-2.pdf` so the source file is never overwritten.
+pub fn sibling_signed_path(src: &Path) -> PathBuf {
+    let parent = src.parent().unwrap_or_else(|| Path::new("."));
+    let raw_stem = src
+        .file_stem()
+        .and_then(|s| s.to_str())
+        .unwrap_or("document");
+    let ext = src.extension().and_then(|s| s.to_str()).unwrap_or("pdf");
+    let stem = raw_stem.strip_suffix("-signed").unwrap_or(raw_stem);
+    let first = parent.join(format!("{stem}-signed.{ext}"));
+    if first != src {
+        return first;
+    }
+    for n in 2u32.. {
+        let dest = parent.join(format!("{stem}-signed-{n}.{ext}"));
+        if dest != src {
+            return dest;
+        }
+    }
+    first
 }
 
 impl Session {
@@ -31,17 +54,17 @@ impl Session {
         Ok(Self {
             engine: engine.clone(),
             doc: RefCell::new(doc),
-            title,
-            path: Some(path.to_path_buf()),
+            title: RefCell::new(title),
+            path: RefCell::new(Some(path.to_path_buf())),
         })
     }
 
-    pub fn title(&self) -> &str {
-        &self.title
+    pub fn title(&self) -> String {
+        self.title.borrow().clone()
     }
 
-    pub fn path(&self) -> Option<&Path> {
-        self.path.as_deref()
+    pub fn path(&self) -> Option<PathBuf> {
+        self.path.borrow().clone()
     }
 
     pub fn doc_id(&self) -> DocumentId {
@@ -151,7 +174,7 @@ impl Session {
     }
 
     pub fn bytes_for_verify(&self) -> Result<Vec<u8>, BackendError> {
-        if let Some(path) = &self.path {
+        if let Some(path) = self.path.borrow().as_ref() {
             if path.exists() {
                 return std::fs::read(path).map_err(BackendError::from);
             }
@@ -180,11 +203,40 @@ impl Session {
 
     pub fn apply_signed_bytes(&self, signed: Vec<u8>) -> Result<(), BackendError> {
         let old_id = self.doc.borrow().id();
-        let path = self.path.clone();
+        let path = self.path.borrow().clone();
         let doc = Document::from_bytes(signed, path).map_err(core_err)?;
         self.engine.bind(&doc).map_err(core_err)?;
         let _ = self.engine.close(old_id);
         *self.doc.borrow_mut() = doc;
+        Ok(())
+    }
+
+    /// Write the signed bytes next to the source (or into `$TMP`), then reopen
+    /// that file so verify reads the on-disk original, not `to_bytes()`.
+    pub fn persist_signed(&self, signed: Vec<u8>) -> Result<PathBuf, BackendError> {
+        let dest = match self.path.borrow().as_ref() {
+            Some(p) => sibling_signed_path(p),
+            None => {
+                std::env::temp_dir().join(format!("document-signed-{}.pdf", std::process::id()))
+            }
+        };
+        std::fs::write(&dest, &signed)?;
+        self.reopen(&dest)?;
+        Ok(dest)
+    }
+
+    pub fn reopen(&self, path: &Path) -> Result<(), BackendError> {
+        let old_id = self.doc.borrow().id();
+        let doc = self.engine.open(path).map_err(core_err)?;
+        self.engine.bind(&doc).map_err(core_err)?;
+        let _ = self.engine.close(old_id);
+        *self.doc.borrow_mut() = doc;
+        *self.path.borrow_mut() = Some(path.to_path_buf());
+        *self.title.borrow_mut() = path
+            .file_name()
+            .and_then(|s| s.to_str())
+            .unwrap_or("document.pdf")
+            .to_string();
         Ok(())
     }
 
@@ -357,7 +409,7 @@ impl Opened {
 
     pub fn path(&self) -> Option<PathBuf> {
         match self {
-            Self::Core(s) => s.path().map(|p| p.to_path_buf()),
+            Self::Core(s) => s.path(),
             Self::Mock(s) => s.path().map(|p| p.to_path_buf()),
         }
     }
@@ -566,6 +618,20 @@ impl Opened {
             }
         }
     }
+
+    pub fn persist_signed(&self, signed: Vec<u8>) -> Result<PathBuf, BackendError> {
+        match self {
+            Self::Core(s) => s.persist_signed(signed),
+            Self::Mock(s) => {
+                s.lock_after_sign();
+                let dest = s.path().map(sibling_signed_path).unwrap_or_else(|| {
+                    std::env::temp_dir().join(format!("document-signed-{}.pdf", std::process::id()))
+                });
+                std::fs::write(&dest, signed)?;
+                Ok(dest)
+            }
+        }
+    }
 }
 
 pub struct PaintTile {
@@ -704,5 +770,57 @@ mod tests {
             mismatch * 100.0,
             crate::tiles::max_channel_delta(&composite, &full.rgba)
         );
+    }
+
+    #[test]
+    fn sibling_signed_path_keeps_the_source() {
+        let src = PathBuf::from("/tmp/report.pdf");
+        assert_eq!(
+            sibling_signed_path(&src),
+            PathBuf::from("/tmp/report-signed.pdf")
+        );
+        let already = PathBuf::from("/tmp/report-signed.pdf");
+        assert_eq!(
+            sibling_signed_path(&already),
+            PathBuf::from("/tmp/report-signed-2.pdf")
+        );
+    }
+
+    #[test]
+    fn persist_signed_reopen_reads_the_written_file_for_verify() {
+        let Ok(engine) = Engine::new() else {
+            return;
+        };
+        let hello = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../corpus/hello.pdf");
+        let other = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../corpus/two_page.pdf");
+        if !hello.exists() || !other.exists() {
+            return;
+        }
+        let dir = std::env::temp_dir().join(format!(
+            "openpdf-persist-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        std::fs::create_dir_all(&dir).unwrap();
+        let src = dir.join("src.pdf");
+        std::fs::copy(&hello, &src).unwrap();
+        let session = Session::open(&engine, &src).unwrap();
+        let written = std::fs::read(&other).unwrap();
+        let dest = session
+            .persist_signed(written.clone())
+            .expect("write sibling and reopen");
+        assert_eq!(dest, dir.join("src-signed.pdf"));
+        assert_eq!(session.path(), Some(dest.clone()));
+        let verify = session.bytes_for_verify().expect("verify bytes");
+        assert_eq!(verify, written, "verify must read the written sibling");
+        assert_ne!(
+            verify,
+            std::fs::read(&src).unwrap(),
+            "verify must not reread the unsigned source"
+        );
+        let _ = std::fs::remove_dir_all(&dir);
     }
 }

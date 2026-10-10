@@ -741,3 +741,6 @@ msgstr ""
 
 msgid "PIN must be requested off the GTK thread"
 msgstr ""
+
+msgid "Saved signed PDF to {path}"
+msgstr ""
