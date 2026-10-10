@@ -9,6 +9,7 @@
 //!
 //! fn main() {
 //!     openpdf_core::init();
+//!     let ocr: Box<dyn openpdf_core::OcrEngine> = openpdf_ocr_native::default_engine();
 //!     let pin = /* GTK dialog implementing PinProvider */;
 //!     let signer: Box<dyn Signer> =
 //!         Box::new(Pkcs11Signer::new(Pkcs11Config::default(), pin)?);

@@ -1,0 +1,42 @@
+[package]
+name = "openpdf-ocr-native"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "Native OcrEngine backends (Windows.Media.Ocr, Vision; Tesseract on Linux)"
+
+[dependencies]
+openpdf-core = { path = "../openpdf-core" }
+
+[target.'cfg(windows)'.dependencies]
+windows = { version = "0.61", features = [
+    "Foundation_Collections",
+    "Globalization",
+    "Graphics_Imaging",
+    "Media_Ocr",
+    "Storage_Streams",
+    "Win32_System_WinRT",
+] }
+
+[target.'cfg(target_os = "macos")'.dependencies]
+objc2 = "0.6"
+objc2-foundation = { version = "0.3", features = [
+    "NSArray",
+    "NSData",
+    "NSDictionary",
+    "NSError",
+    "NSString",
+] }
+objc2-core-foundation = { version = "0.3", features = ["CFCGTypes", "CFData"] }
+objc2-core-graphics = { version = "0.3", features = [
+    "CGColorSpace",
+    "CGDataProvider",
+    "CGImage",
+] }
+objc2-vision = { version = "0.3", features = [
+    "VNObservation",
+    "VNRecognizeTextRequest",
+    "VNRequest",
+    "VNRequestHandler",
+    "objc2-core-graphics",
+] }

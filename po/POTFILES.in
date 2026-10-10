@@ -13,3 +13,4 @@ crates/openpdf-cli/src/tools.rs
 crates/openpdf-core/src/ocr.rs
 crates/openpdf-core/src/redact.rs
 crates/openpdf-core/src/compare.rs
+crates/openpdf-ocr-native/src/lib.rs

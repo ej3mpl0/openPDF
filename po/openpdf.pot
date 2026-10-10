@@ -418,6 +418,12 @@ msgstr ""
 msgid "OCR is unavailable ({hint})"
 msgstr ""
 
+msgid "install the Windows OCR language pack"
+msgstr ""
+
+msgid "install the Vision OCR language pack in System Settings"
+msgstr ""
+
 msgid "OCR language {language} is not installed (have: {installed}). {hint}"
 msgstr ""
 

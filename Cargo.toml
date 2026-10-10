@@ -5,6 +5,7 @@ members = [
     "crates/openpdf-cli",
     "crates/openpdf-gtk",
     "crates/openpdf-sign",
+    "crates/openpdf-ocr-native",
 ]
 
 [workspace.package]
