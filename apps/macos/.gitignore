@@ -1,0 +1,7 @@
+.build/
+.derived/
+.generated/
+lib/
+Sources/OpenPDFApp/Generated/openpdf.swift
+*.xcodeproj/
+.swiftpm/

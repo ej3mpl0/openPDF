@@ -1,0 +1,4 @@
+module openpdfFFI {
+    header "include/openpdfFFI.h"
+    export *
+}

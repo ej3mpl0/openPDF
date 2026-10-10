@@ -429,3 +429,45 @@ msgstr "Quedan pocos intentos de PIN"
 
 msgid "Signing cancelled"
 msgstr "Firma cancelada"
+
+msgid "Open"
+msgstr "Abrir"
+
+msgid "Open PDF"
+msgstr "Abrir PDF"
+
+msgid "Thumbnails"
+msgstr "Miniaturas"
+
+msgid "Enter PIN"
+msgstr "Introducir PIN"
+
+msgid "Cancel"
+msgstr "Cancelar"
+
+msgid "Unlock"
+msgstr "Desbloquear"
+
+msgid "Signed document — read-only"
+msgstr "Documento firmado — solo lectura"
+
+msgid "Page {page} of {total}"
+msgstr "Página {page} de {total}"
+
+msgid "Zoom in"
+msgstr "Acercar"
+
+msgid "Zoom out"
+msgstr "Alejar"
+
+msgid "Previous page"
+msgstr "Página anterior"
+
+msgid "Next page"
+msgstr "Página siguiente"
+
+msgid "Sign"
+msgstr "Firmar"
+
+msgid "no signing certificates found"
+msgstr "no se encontraron certificados de firma"
