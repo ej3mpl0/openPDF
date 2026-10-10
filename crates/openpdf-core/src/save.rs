@@ -36,14 +36,14 @@ impl Document {
     /// Original file bytes plus an incremental update describing the current page list.
     pub fn to_incremental_bytes(&self) -> Result<Vec<u8>> {
         if !self.is_dirty() {
-            return Ok(self.original_bytes().to_vec());
+            return Ok(self.original_slice().to_vec());
         }
-        let prev = lopdf::Document::load_mem(self.original_bytes())?;
-        let mut inc = IncrementalDocument::create_from(self.original_bytes().to_vec(), prev);
+        let prev = lopdf::Document::load_mem(self.original_slice())?;
+        let mut inc = IncrementalDocument::create_from(self.original_slice().to_vec(), prev);
         apply_slots_incremental(&mut inc, self.slots())?;
         let mut buf = Vec::new();
         inc.save_to(&mut buf)?;
-        if !buf.starts_with(self.original_bytes()) {
+        if !buf.starts_with(self.original_slice()) {
             return Err(Error::structure(
                 "incremental save did not preserve original bytes",
             ));
@@ -98,7 +98,7 @@ mod tests {
     #[test]
     fn incremental_save_keeps_prefix() {
         let mut doc = Document::open(corpus("hello.pdf")).unwrap();
-        let original = doc.original_bytes().to_vec();
+        let original = doc.original_slice().to_vec();
         doc.rotate_page(0, 90).unwrap();
         let saved = doc.to_incremental_bytes().unwrap();
         assert!(

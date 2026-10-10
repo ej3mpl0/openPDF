@@ -510,7 +510,7 @@ impl Engine {
         let bytes = if doc.is_dirty() {
             doc.to_bytes()?
         } else {
-            doc.original_bytes().to_vec()
+            doc.original_slice().to_vec()
         };
         self.bind_bytes(doc.id(), bytes)
     }

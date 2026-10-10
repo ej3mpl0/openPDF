@@ -1,5 +1,6 @@
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::Arc;
 
 use lopdf::{Dictionary, Document as LopdfDocument, Object, ObjectId};
 
@@ -40,7 +41,7 @@ pub(crate) struct PageSlot {
 pub struct Document {
     id: DocumentId,
     path: Option<PathBuf>,
-    original: Vec<u8>,
+    original: Arc<[u8]>,
     inner: LopdfDocument,
     slots: Vec<PageSlot>,
     history: History,
@@ -56,6 +57,8 @@ impl Document {
     }
 
     pub fn from_bytes(bytes: Vec<u8>, path: Option<PathBuf>) -> Result<Self> {
+        // One Vec -> Arc<[u8]> conversion; the Vec is freed before parsing.
+        let bytes: Arc<[u8]> = bytes.into();
         let inner = LopdfDocument::load_mem(&bytes)?;
         Self::from_lopdf_inner(inner, bytes, path)
     }
@@ -64,13 +67,14 @@ impl Document {
         let mut tmp = inner;
         let mut bytes = Vec::new();
         tmp.save_to(&mut bytes)?;
+        let bytes: Arc<[u8]> = bytes.into();
         let inner = LopdfDocument::load_mem(&bytes)?;
         Self::from_lopdf_inner(inner, bytes, path)
     }
 
     fn from_lopdf_inner(
         inner: LopdfDocument,
-        original: Vec<u8>,
+        original: Arc<[u8]>,
         path: Option<PathBuf>,
     ) -> Result<Self> {
         let slots = slots_from(&inner)?;
@@ -334,7 +338,15 @@ impl Document {
     ///
     /// Unlike [`Document::to_bytes`], this never rewrites the file, so it is
     /// allowed on signed documents and is what signature verification needs.
-    pub fn original_bytes(&self) -> &[u8] {
+    ///
+    /// Returns a shared handle (no byte copy) that can be moved to another
+    /// thread.
+    pub fn original_bytes(&self) -> Arc<[u8]> {
+        Arc::clone(&self.original)
+    }
+
+    /// Borrowed view of [`Document::original_bytes`] for internal use.
+    pub(crate) fn original_slice(&self) -> &[u8] {
         &self.original
     }
 
@@ -354,6 +366,7 @@ impl Document {
     }
 
     pub(crate) fn reload_from_saved(&mut self, bytes: Vec<u8>) -> Result<()> {
+        let bytes: Arc<[u8]> = bytes.into();
         let inner = LopdfDocument::load_mem(&bytes)?;
         self.slots = slots_from(&inner)?;
         self.signed = contains_signature(&inner);
@@ -533,6 +546,32 @@ mod tests {
         std::fs::remove_file(&path).ok();
         assert!(doc.is_signed());
         assert!(doc.to_bytes().is_err());
-        assert_eq!(doc.original_bytes(), signed.as_slice());
+        assert_eq!(&*doc.original_bytes(), signed.as_slice());
+    }
+
+    #[test]
+    fn original_bytes_is_shared_not_copied() {
+        let doc = Document::open(
+            std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../corpus/hello.pdf"),
+        )
+        .unwrap();
+        let a = doc.original_bytes();
+        let b = doc.original_bytes();
+        assert!(Arc::ptr_eq(&a, &b));
+    }
+
+    #[test]
+    fn original_bytes_can_move_to_another_thread() {
+        let path = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../corpus/hello.pdf");
+        let on_disk = std::fs::read(&path).unwrap();
+        let doc = Document::open(&path).unwrap();
+        let bytes = doc.original_bytes();
+        let len = std::thread::spawn(move || {
+            assert!(bytes.starts_with(b"%PDF"));
+            bytes.len()
+        })
+        .join()
+        .unwrap();
+        assert_eq!(len, on_disk.len());
     }
 }
