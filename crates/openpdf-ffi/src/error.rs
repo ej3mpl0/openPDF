@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: MPL-2.0
 use openpdf_core::Error as CoreError;
 
 /// UniFFI error mirroring [`openpdf_core::Error`].
