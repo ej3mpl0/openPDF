@@ -40,3 +40,54 @@ jobs:
           test -n "$(find bindings/swift -type f | head -n 1)"
           test -n "$(find bindings/csharp -type f | head -n 1)"
 
+
+  windows-app:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: actions/setup-dotnet@v4
+        with:
+          dotnet-version: "8.0.x"
+      - name: Install PDFium
+        shell: bash
+        run: |
+          set -euo pipefail
+          curl -fsSL -o /tmp/pdfium.tgz \
+            "https://github.com/bblanchon/pdfium-binaries/releases/download/chromium%2F8035/pdfium-win-x64.tgz"
+          mkdir -p "$HOME/pdfium"
+          tar -xzf /tmp/pdfium.tgz -C "$HOME/pdfium"
+          if [ -f "$HOME/pdfium/bin/pdfium.dll" ]; then
+            echo "OPENPDF_PDFIUM=$HOME/pdfium/bin/pdfium.dll" >> "$GITHUB_ENV"
+          else
+            echo "OPENPDF_PDFIUM=$HOME/pdfium/lib/pdfium.dll" >> "$GITHUB_ENV"
+          fi
+      - name: Build FFI and generate C#
+        shell: bash
+        run: |
+          set -euo pipefail
+          cargo build -p openpdf-ffi --release
+          mkdir -p apps/windows/src/OpenPDF/Generated apps/windows/lib
+          cargo install uniffi-bindgen-cs \
+            --git https://github.com/NordSecurity/uniffi-bindgen-cs \
+            --tag v0.10.0+v0.29.4
+          uniffi-bindgen-cs --library --out-dir apps/windows/src/OpenPDF/Generated \
+            target/release/openpdf_ffi.dll
+          cp target/release/openpdf_ffi.dll apps/windows/lib/
+          cp "$OPENPDF_PDFIUM" apps/windows/lib/pdfium.dll
+          test -n "$(ls apps/windows/src/OpenPDF/Generated | head -n 1)"
+      - name: Build measure console
+        run: dotnet build apps/windows/src/OpenPDF.Measure/OpenPDF.Measure.csproj -c Release
+      - name: Measure (headless)
+        run: |
+          $bin = Get-ChildItem -Recurse apps/windows/src/OpenPDF.Measure/bin/Release -Filter OpenPDF.Measure.exe | Select-Object -First 1
+          if (-not $bin) { throw "OpenPDF.Measure.exe missing" }
+          Copy-Item apps/windows/lib/*.dll $bin.Directory.FullName -Force
+          & $bin.FullName --measure 32
+        env:
+          OPENPDF_CORPUS: ${{ github.workspace }}/corpus
+          OPENPDF_PDFIUM: ${{ env.OPENPDF_PDFIUM }}
+      - name: Build WinUI 3 app
+        run: dotnet build apps/windows/src/OpenPDF/OpenPDF.csproj -c Release -p:Platform=x64
+
+
