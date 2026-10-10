@@ -134,7 +134,6 @@ struct Word {
     text: String,
     left: f32,
     top: f32,
-    #[allow(dead_code)]
     width: f32,
     height: f32,
 }
@@ -524,11 +523,19 @@ fn invisible_text_ops(words: &[Word], iw: u32, ih: u32, pw: f32, ph: f32) -> Vec
         let x = w.left * sx;
         let y = ph - (w.top + w.height) * sy;
         let size = (w.height * sy).clamp(4.0, 72.0);
+        let box_w = w.width * sx;
         let bytes = winansi(&w.text);
         if bytes.is_empty() {
             continue;
         }
+        let natural = helvetica_width_pt(&bytes, size);
+        let tz = if natural > 0.01 {
+            (box_w / natural * 100.0).clamp(1.0, 10_000.0)
+        } else {
+            100.0
+        };
         ops.push(Operation::new("Tf", vec!["Helv".into(), size.into()]));
+        ops.push(Operation::new("Tz", vec![tz.into()]));
         ops.push(Operation::new("Td", vec![x.into(), y.into()]));
         ops.push(Operation::new(
             "Tj",
@@ -539,6 +546,27 @@ fn invisible_text_ops(words: &[Word], iw: u32, ih: u32, pw: f32, ph: f32) -> Vec
     ops.push(Operation::new("ET", vec![]));
     ops.push(Operation::new("Q", vec![]));
     ops
+}
+
+/// Helvetica WinAnsi advances in 1/1000 em (Adobe AFM), ASCII only; else 600.
+fn helvetica_advance(b: u8) -> u16 {
+    const ASCII: [u16; 95] = [
+        278, 278, 355, 556, 556, 889, 667, 191, 333, 333, 389, 584, 278, 333, 278, 278, 556, 556,
+        556, 556, 556, 556, 556, 556, 556, 556, 278, 278, 584, 584, 584, 556, 1015, 667, 667, 722,
+        722, 667, 611, 778, 722, 278, 500, 667, 556, 833, 722, 778, 667, 778, 722, 667, 611, 722,
+        667, 944, 667, 667, 611, 278, 278, 278, 469, 556, 333, 556, 556, 500, 556, 556, 278, 556,
+        556, 222, 222, 500, 222, 833, 556, 556, 556, 556, 333, 500, 278, 556, 500, 722, 500, 500,
+        500, 334, 260, 334, 584,
+    ];
+    match b {
+        32..=126 => ASCII[(b - 32) as usize],
+        _ => 600,
+    }
+}
+
+fn helvetica_width_pt(bytes: &[u8], size: f32) -> f32 {
+    let units: u32 = bytes.iter().map(|&b| u32::from(helvetica_advance(b))).sum();
+    units as f32 * size / 1000.0
 }
 
 fn winansi(s: &str) -> Vec<u8> {
@@ -696,5 +724,34 @@ mod tests {
         let words = parse_tsv(tsv);
         assert_eq!(words.len(), 1);
         assert_eq!(words[0].text, "Hello");
+        assert_eq!(words[0].width, 40.0);
+        assert_eq!(words[0].height, 12.0);
+    }
+
+    #[test]
+    fn invisible_text_scales_horizontally_to_word_width() {
+        let words = [Word {
+            text: "Hello".into(),
+            left: 10.0,
+            top: 20.0,
+            width: 40.0,
+            height: 12.0,
+        }];
+        let ops = invisible_text_ops(&words, 100, 100, 100.0, 100.0);
+        let tz = ops
+            .iter()
+            .find(|op| op.operator == "Tz")
+            .expect("Tz so selection boxes match word width");
+        let value = match tz.operands.first() {
+            Some(Object::Real(v)) => *v,
+            Some(Object::Integer(v)) => *v as f32,
+            other => panic!("Tz operand {other:?}"),
+        };
+        let natural = helvetica_width_pt(&winansi("Hello"), 12.0);
+        let expected = (40.0 / natural * 100.0).clamp(1.0, 10_000.0);
+        assert!(
+            (value - expected).abs() < 0.05,
+            "tz={value} expected={expected}"
+        );
     }
 }
