@@ -50,7 +50,7 @@ pub use render::{
 };
 pub use signer::{
     describe_certificate, format_verify_result, format_verify_results, pin_prompt_text,
-    usage_label, CertificateInfo, CertificateUsage, CertificateValidity, SignRequest,
+    usage_label, CertificateInfo, CertificateUsage, CertificateValidity, PadesLevel, SignRequest,
     SignatureInfo, Signer, VisibleAppearance,
 };
 pub use zeroize::Zeroizing;

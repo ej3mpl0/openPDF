@@ -206,6 +206,8 @@ impl Signer for Pkcs11Signer {
         if request.cert_id.trim().is_empty() {
             return Err(Error::invalid(InvalidKind::CertIdRequired));
         }
+        // Refuse unsupported levels before any token login / PIN prompt.
+        pades::ensure_supported_level(request)?;
         let picked = self.pick(&request.cert_id)?;
         if !can_sign(&picked.info.usage) {
             return Err(Error::Sign("certificate is not a signing cert".into()));

@@ -25,6 +25,10 @@ pub enum Error {
     WrongPassword,
     Invalid(InvalidKind),
     Sign(String),
+    /// The signer backend cannot produce this PAdES level yet. Never downgraded.
+    SignLevelUnsupported {
+        level: crate::signer::PadesLevel,
+    },
     /// The PDF already has a signature; `op` would invalidate it.
     Signed {
         op: SignedOp,
@@ -104,6 +108,10 @@ impl Error {
             Error::PasswordRequired => tr("password is required"),
             Error::WrongPassword => tr("wrong password"),
             Error::Invalid(kind) => kind.to_locale_string(),
+            Error::SignLevelUnsupported { level } => tr_args(
+                "{level} signatures are not supported yet",
+                &[("level", level.label())],
+            ),
             Error::Sign(m) => tr_args("sign: {detail}", &[("detail", &tr(m))]),
             Error::Signed { op } => tr_args(
                 "document is signed; {op} would invalidate the signature (incremental save only)",
