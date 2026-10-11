@@ -252,12 +252,12 @@ impl Document {
             if self.is_dirty() {
                 self.to_incremental_bytes()
             } else {
-                Ok(self.original_bytes().to_vec())
+                Ok(self.original_slice().to_vec())
             }
         } else if self.is_dirty() {
             self.to_bytes()
         } else {
-            Ok(self.original_bytes().to_vec())
+            Ok(self.original_slice().to_vec())
         }
     }
 }
@@ -474,7 +474,7 @@ mod tests {
             })
         ));
         let incremental = doc.to_incremental_bytes().unwrap();
-        assert!(incremental.starts_with(doc.original_bytes()));
+        assert!(incremental.starts_with(&doc.original_bytes()));
         assert!(contains_signature(
             &LopdfDocument::load_mem(&incremental).unwrap()
         ));
@@ -487,7 +487,7 @@ mod tests {
             certs: dnie_certs(),
         };
         doc.apply_signer(&signer, &signing_request()).unwrap();
-        let after_first = doc.original_bytes().to_vec();
+        let after_first = doc.original_slice().to_vec();
         doc.apply_signer(&signer, &signing_request()).unwrap();
         assert!(doc.original_bytes().starts_with(&after_first));
         assert!(doc.is_signed());

@@ -451,7 +451,7 @@ mod encryption_tests {
         let bytes = merged.to_bytes().unwrap();
         assert_eq!(
             encrypt_profile(&bytes),
-            encrypt_profile(src.original_bytes())
+            encrypt_profile(src.original_slice())
         );
         assert_eq!(reopen(bytes).page_count(), 4);
     }
@@ -463,10 +463,10 @@ mod encryption_tests {
             ("aes128", aes128()),
             ("rc4-128", rc4_128()),
         ] {
-            let want = encrypt_profile(src.original_bytes());
+            let want = encrypt_profile(src.original_slice());
             // The source really is restricted (no "modify", bit 4) and /P is
             // the usual negative 32-bit value.
-            let p = p_value(src.original_bytes());
+            let p = p_value(src.original_slice());
             assert!(p < 0 && p & 8 == 0, "{name}: /P {p}");
             let all = parse_page_ranges("1-2", 2).unwrap();
             let two = parse_page_ranges("1,2", 2).unwrap();
