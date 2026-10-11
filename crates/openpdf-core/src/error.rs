@@ -19,6 +19,10 @@ pub enum Error {
         count: u32,
     },
     EmptyDocument,
+    /// The PDF is encrypted; open it with `Document::from_bytes_with_password`.
+    PasswordRequired,
+    /// The supplied password opens neither the user nor the owner key.
+    WrongPassword,
     Invalid(InvalidKind),
     Sign(String),
     /// The signer backend cannot produce this PAdES level yet. Never downgraded.
@@ -101,6 +105,8 @@ impl Error {
                 &[("page", &page.to_string()), ("count", &count.to_string())],
             ),
             Error::EmptyDocument => tr("document has no pages"),
+            Error::PasswordRequired => tr("password is required"),
+            Error::WrongPassword => tr("wrong password"),
             Error::Invalid(kind) => kind.to_locale_string(),
             Error::SignLevelUnsupported { level } => tr_args(
                 "{level} signatures are not supported yet",

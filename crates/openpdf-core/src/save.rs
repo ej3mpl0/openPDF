@@ -3,7 +3,7 @@ use std::path::Path;
 
 use lopdf::{IncrementalDocument, Object};
 
-use crate::document::{Document, PageSlot};
+use crate::document::{load_lopdf, reencrypt_for_write, Document, PageSlot};
 use crate::error::{Error, Result, SignedOp};
 
 impl Document {
@@ -28,6 +28,7 @@ impl Document {
             return Err(Error::signed(SignedOp::Rewrite));
         }
         let mut doc = self.assembled_lopdf()?;
+        reencrypt_for_write(&mut doc)?;
         let mut buf = Vec::new();
         doc.save_to(&mut buf)?;
         Ok(buf)
@@ -38,7 +39,7 @@ impl Document {
         if !self.is_dirty() {
             return Ok(self.original_bytes().to_vec());
         }
-        let prev = lopdf::Document::load_mem(self.original_bytes())?;
+        let prev = load_lopdf(self.original_bytes(), self.password().as_str())?;
         let mut inc = IncrementalDocument::create_from(self.original_bytes().to_vec(), prev);
         apply_slots_incremental(&mut inc, self.slots())?;
         let mut buf = Vec::new();

@@ -34,7 +34,9 @@ pub use i18n::{
     available_locales, current_locale, detect_locale, init as init_i18n, set_locale, tr, tr_args,
 };
 pub use convert::{blank_document, images_to_pdf, pdf_to_rasters, raster_to_png};
-pub use ops::{merge, merge_paths, parse_page_ranges, split, split_all, PageRange};
+pub use ops::{
+    merge, merge_encryption_source, merge_paths, parse_page_ranges, split, split_all, PageRange,
+};
 pub use optimize::{optimize, OptimizeOptions};
 pub use overlay::{apply_overlay, Overlay, OverlayKind};
 pub use pages::{crop_pages, extract, insert_pages, replace_pages, CropBox};
@@ -51,3 +53,4 @@ pub use signer::{
     usage_label, CertificateInfo, CertificateUsage, CertificateValidity, PadesLevel, SignRequest,
     SignatureInfo, Signer, VisibleAppearance,
 };
+pub use zeroize::Zeroizing;
