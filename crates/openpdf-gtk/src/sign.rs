@@ -55,10 +55,7 @@ pub fn certificate_can_sign(cert: &CertificateInfo) -> bool {
 
 /// Build the request the UI is allowed to send. No PIN field exists here.
 pub fn sign_request_for(cert_id: impl Into<String>) -> SignRequest {
-    SignRequest {
-        cert_id: cert_id.into(),
-        ..Default::default()
-    }
+    SignRequest::new(cert_id)
 }
 
 #[cfg(test)]
@@ -93,7 +90,7 @@ mod tests {
         let req = sign_request_for("dnie-sign");
         assert_eq!(req.cert_id, "dnie-sign");
         assert!(s.sign(b"%PDF", &req).is_err());
-        assert!(s.sign(b"%PDF", &SignRequest::default()).is_err());
+        assert!(s.sign(b"%PDF", &SignRequest::new("")).is_err());
     }
 
     #[test]

@@ -227,7 +227,7 @@ mod tests {
         ));
         assert_eq!(err.to_string(), "PKCS#11 module not available");
         assert!(
-            lazy.sign(b"%PDF", &SignRequest::default()).is_err(),
+            lazy.sign(b"%PDF", &SignRequest::new("")).is_err(),
             "sign must not swallow a failed load"
         );
     }
