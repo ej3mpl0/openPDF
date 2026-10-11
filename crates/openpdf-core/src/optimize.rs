@@ -41,7 +41,7 @@ pub fn optimize(doc: &Document, opts: &OptimizeOptions) -> Result<Document> {
     if opts.linearize {
         stamp_linearized(&mut inner, doc.page_count());
     }
-    Document::from_lopdf(inner, None)
+    doc.derive(inner)
 }
 
 fn recompress_images(doc: &mut lopdf::Document, quality: u8) -> Result<()> {

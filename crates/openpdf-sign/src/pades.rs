@@ -210,16 +210,39 @@ fn byte_range(dict: &Dictionary) -> Option<Vec<i64>> {
 
 fn contents_bytes(dict: &Dictionary) -> Option<Vec<u8>> {
     match dict.get(b"Contents").ok()? {
-        Object::String(bytes, _) => {
-            let end = bytes
-                .iter()
-                .rposition(|b| *b != 0)
-                .map(|i| i + 1)
-                .unwrap_or(0);
-            Some(bytes[..end].to_vec())
-        }
+        Object::String(bytes, _) => strip_contents_padding(bytes).map(<[u8]>::to_vec),
         _ => None,
     }
+}
+
+/// `/Contents` is the CMS DER followed by zero padding. Cut it at the DER
+/// length, not at the last non-zero byte: a CMS that happens to end in 0x00
+/// (about 1 in 256 RSA signatures) would otherwise be truncated and reported
+/// invalid. If the DER length can't be read or runs past the data, the CMS is
+/// malformed: return `None` (signature invalid), never guess with the old
+/// trailing-zero trim.
+fn strip_contents_padding(bytes: &[u8]) -> Option<&[u8]> {
+    let len = der_tlv_len(bytes)?;
+    bytes.get(..len)
+}
+
+/// Total length (header + content) of the DER SEQUENCE at the start of `b`.
+fn der_tlv_len(b: &[u8]) -> Option<usize> {
+    if b.len() < 2 || b[0] != 0x30 {
+        return None;
+    }
+    let first = b[1] as usize;
+    if first < 0x80 {
+        return Some(2 + first);
+    }
+    let n = first & 0x7f;
+    if n == 0 || n > 4 || b.len() < 2 + n {
+        return None;
+    }
+    let len = b[2..2 + n]
+        .iter()
+        .fold(0usize, |acc, x| (acc << 8) | *x as usize);
+    Some(2 + n + len)
 }
 
 pub(crate) fn byterange_bytes(pdf: &[u8], ranges: &[i64]) -> Result<Vec<u8>> {
@@ -705,6 +728,155 @@ mod tests {
     fn verify_unsigned_is_empty() {
         let pdf = std::fs::read(corpus("hello.pdf")).unwrap();
         assert!(verify_signatures(&pdf).unwrap().is_empty());
+    }
+
+    #[test]
+    fn contents_padding_keeps_trailing_zero_of_der() {
+        // SEQUENCE { OCTET STRING 01 00 } followed by padding.
+        let der = [0x30, 0x04, 0x04, 0x02, 0x01, 0x00];
+        let mut padded = der.to_vec();
+        padded.extend_from_slice(&[0; 16]);
+        assert_eq!(strip_contents_padding(&padded), Some(&der[..]));
+        let mut long = vec![0x30, 0x82, 0x01, 0x00];
+        long.extend(std::iter::repeat_n(0xAB, 255));
+        long.push(0x00);
+        let full = long.clone();
+        long.extend_from_slice(&[0; 8]);
+        assert_eq!(strip_contents_padding(&long), Some(&full[..]));
+    }
+
+    #[test]
+    fn contents_with_unreadable_der_length_is_rejected() {
+        // Not a SEQUENCE.
+        assert_eq!(strip_contents_padding(&[0x04, 0x01, 0xAB, 0, 0]), None);
+        // Length runs past the data.
+        assert_eq!(strip_contents_padding(&[0x30, 0x10, 0x01, 0x02]), None);
+        assert_eq!(
+            strip_contents_padding(&[0x30, 0x84, 0x7F, 0xFF, 0xFF, 0xFF, 1, 0]),
+            None
+        );
+        // Indefinite / too many length octets / header cut short.
+        assert_eq!(strip_contents_padding(&[0x30, 0x80, 1, 0, 0]), None);
+        assert_eq!(strip_contents_padding(&[0x30, 0x85, 1, 1, 1, 1, 1]), None);
+        assert_eq!(strip_contents_padding(&[0x30, 0x82, 0x01]), None);
+        assert_eq!(strip_contents_padding(&[0x30]), None);
+    }
+
+    /// A /Contents whose DER length runs past the data is reported invalid
+    /// (not valid, not `Err`), and an earlier good signature in the same PDF
+    /// still verifies.
+    #[test]
+    fn truncated_der_contents_is_invalid_and_other_signature_verifies() {
+        use rsa::pkcs1v15::SigningKey;
+        use rsa::pkcs8::DecodePrivateKey;
+        use rsa::signature::{SignatureEncoding, Signer as _};
+        use rsa::RsaPrivateKey;
+
+        let dir = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("testdata");
+        let cert = std::fs::read(dir.join("trailing-zero-cert.der")).unwrap();
+        let key = SigningKey::<Sha256>::new(
+            RsaPrivateKey::from_pkcs8_der(
+                &std::fs::read(dir.join("trailing-zero-key.p8.der")).unwrap(),
+            )
+            .unwrap(),
+        );
+        let request = SignRequest {
+            cert_id: String::new(),
+            reason: Some("good".into()),
+            location: None,
+            contact: None,
+            appearance: None,
+        };
+        let pdf = std::fs::read(corpus("hello.pdf")).unwrap();
+        let once = sign_incremental(&pdf, &request, "Good", |m| {
+            cades::sign_detached(m, &cert, |tbs| Ok(key.sign(tbs).to_vec()))
+        })
+        .expect("first sign");
+        let twice = sign_incremental(&once, &request, "Truncated", |m| {
+            let mut cms = cades::sign_detached(m, &cert, |tbs| Ok(key.sign(tbs).to_vec()))?;
+            // Claim a DER length far beyond the reserved /Contents space.
+            assert_eq!(cms[0], 0x30);
+            let body = cms.split_off(2 + (cms[1] & 0x7f) as usize);
+            cms.truncate(1);
+            cms.extend_from_slice(&[0x84, 0x7F, 0xFF, 0xFF, 0xFF]);
+            cms.extend_from_slice(&body);
+            Ok(cms)
+        })
+        .expect("second sign");
+
+        let infos = verify_signatures(&twice).expect("verify must not fail");
+        assert_eq!(infos.len(), 2);
+        let good = infos.iter().filter(|i| i.valid == Some(true)).count();
+        let bad = infos.iter().filter(|i| i.valid == Some(false)).count();
+        assert_eq!((good, bad), (1, 1), "{infos:?}");
+    }
+
+    /// Regression: a real signed PDF whose CMS DER ends in 0x00 must verify.
+    /// Deterministic: a fixed software key, and an unsigned attribute whose
+    /// value is the single byte 0x00 is placed last in the SignerInfo, so the
+    /// CMS always ends in 0x00 whatever the signature value is.
+    #[test]
+    fn cms_ending_in_zero_byte_verifies() {
+        use cms::content_info::ContentInfo;
+        use cms::signed_data::SignedData;
+        use der::asn1::{OctetString, SetOfVec};
+        use der::{Any, Decode, Encode};
+        use rsa::pkcs1v15::SigningKey;
+        use rsa::pkcs8::DecodePrivateKey;
+        use rsa::signature::{SignatureEncoding, Signer as _};
+        use rsa::RsaPrivateKey;
+
+        let dir = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("testdata");
+        let cert = std::fs::read(dir.join("trailing-zero-cert.der")).unwrap();
+        let key = RsaPrivateKey::from_pkcs8_der(
+            &std::fs::read(dir.join("trailing-zero-key.p8.der")).unwrap(),
+        )
+        .unwrap();
+        let key = SigningKey::<Sha256>::new(key);
+
+        let pdf = std::fs::read(corpus("hello.pdf")).unwrap();
+        let request = SignRequest {
+            cert_id: String::new(),
+            reason: Some("trailing zero".into()),
+            location: None,
+            contact: None,
+            appearance: None,
+        };
+        let mut produced = Vec::new();
+        let signed = sign_incremental(&pdf, &request, "Trailing Zero", |message| {
+            let cms = cades::sign_detached(message, &cert, |tbs| Ok(key.sign(tbs).to_vec()))?;
+            let ci = ContentInfo::from_der(&cms).unwrap();
+            let mut sd = ci.content.decode_as::<SignedData>().unwrap();
+            let mut infos: Vec<_> = sd.signer_infos.0.into_vec();
+            let zero = OctetString::new(vec![0x00]).unwrap().to_der().unwrap();
+            infos[0].unsigned_attrs = Some(
+                SetOfVec::try_from(vec![x509_cert::attr::Attribute {
+                    // id-data: arbitrary, ignored by verification.
+                    oid: const_oid::db::rfc5911::ID_DATA,
+                    values: SetOfVec::try_from(vec![Any::from_der(&zero).unwrap()]).unwrap(),
+                }])
+                .unwrap(),
+            );
+            sd.signer_infos = cms::signed_data::SignerInfos(SetOfVec::try_from(infos).unwrap());
+            let out = ContentInfo {
+                content_type: ci.content_type,
+                content: Any::from_der(&sd.to_der().unwrap()).unwrap(),
+            }
+            .to_der()
+            .unwrap();
+            produced = out.clone();
+            Ok(out)
+        })
+        .expect("sign");
+        assert_eq!(produced.last(), Some(&0x00), "CMS must end in 0x00");
+
+        let infos = verify_signatures(&signed).unwrap();
+        assert_eq!(infos.len(), 1);
+        assert_eq!(infos[0].valid, Some(true));
+
+        // The old last-non-zero trim really does lose that byte.
+        let end = produced.iter().rposition(|b| *b != 0).unwrap() + 1;
+        assert!(end < produced.len());
     }
 
     fn corpus(name: &str) -> std::path::PathBuf {

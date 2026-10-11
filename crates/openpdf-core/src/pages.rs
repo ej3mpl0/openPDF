@@ -133,7 +133,7 @@ pub fn crop_pages(doc: &Document, ranges: &[PageRange], crop: CropBox) -> Result
             }
         }
     }
-    Document::from_lopdf(inner, None)
+    doc.derive(inner)
 }
 
 #[cfg(test)]

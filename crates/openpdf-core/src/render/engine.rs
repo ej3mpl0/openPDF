@@ -7,7 +7,7 @@ use std::time::Duration;
 
 use pdfium_render::prelude::{PdfDocument, Pdfium};
 
-use crate::document::{Document, DocumentId};
+use crate::document::{DocSecret, Document, DocumentId};
 use crate::error::{Error, InvalidKind, Result};
 
 use super::cache::TileCache;
@@ -19,6 +19,7 @@ enum WorkerCmd {
     Bind {
         id: DocumentId,
         bytes: Arc<Vec<u8>>,
+        password: Option<Arc<DocSecret>>,
         reply: Sender<Result<()>>,
     },
     /// Test-only: address of the buffer PDFium loaded `id` from.
@@ -123,10 +124,20 @@ impl BoundDoc {
     }
 }
 
-fn load_bound(pdfium: &'static Pdfium, bytes: Arc<Vec<u8>>) -> Result<BoundDoc> {
+/// Load the shared `bytes` into PDFium in place, decrypting with `password`
+/// if the file is encrypted.
+///
+/// PDFium receives the password as a `&str` and keeps its own internal copy
+/// for the document's lifetime; that copy lives in C memory we cannot zeroize.
+/// Our side stays in the document's zeroizing `DocSecret`.
+fn load_bound(
+    pdfium: &'static Pdfium,
+    bytes: Arc<Vec<u8>>,
+    password: Option<&str>,
+) -> Result<BoundDoc> {
     BoundDoc::try_new(bytes, |bytes| {
         pdfium
-            .load_pdf_from_byte_slice(bytes.as_slice(), None)
+            .load_pdf_from_byte_slice(bytes.as_slice(), password)
             .map_err(|e| Error::pdfium(e.to_string()))
     })
 }
@@ -226,13 +237,20 @@ fn handle_cmd(
         WorkerCmd::LoadedPtr { id, reply } => {
             let _ = reply.send(docs.get(&id).map(|b| b.borrow_owner().as_ptr() as usize));
         }
-        WorkerCmd::Bind { id, bytes, reply } => {
-            let result = load_bound(pdfium, bytes).map(|bound| {
-                docs.insert(id, bound);
-                if let Ok(mut c) = cache.lock() {
-                    c.invalidate_doc(id);
-                }
-            });
+        WorkerCmd::Bind {
+            id,
+            bytes,
+            password,
+            reply,
+        } => {
+            let result = load_bound(pdfium, bytes, password.as_deref().map(DocSecret::as_str)).map(
+                |bound| {
+                    docs.insert(id, bound);
+                    if let Ok(mut c) = cache.lock() {
+                        c.invalidate_doc(id);
+                    }
+                },
+            );
             let _ = reply.send(result);
         }
         WorkerCmd::Unbind { id } => {
@@ -402,18 +420,24 @@ impl Engine {
         } else {
             doc.original_bytes()
         };
-        self.bind_bytes(doc.id(), bytes)
+        self.bind_bytes(doc.id(), bytes, doc.password().get().cloned())
     }
 
     pub fn refresh(&self, doc: &Document) -> Result<()> {
         self.bind(doc)
     }
 
-    fn bind_bytes(&self, id: DocumentId, bytes: Arc<Vec<u8>>) -> Result<()> {
+    fn bind_bytes(
+        &self,
+        id: DocumentId,
+        bytes: Arc<Vec<u8>>,
+        password: Option<Arc<DocSecret>>,
+    ) -> Result<()> {
         let (tx, rx) = mpsc::channel();
         self.send(WorkerCmd::Bind {
             id,
             bytes,
+            password,
             reply: tx,
         })?;
         rx.recv()
