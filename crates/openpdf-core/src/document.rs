@@ -105,6 +105,35 @@ pub(crate) fn load_lopdf(bytes: &[u8], password: Option<&str>) -> Result<LopdfDo
     Ok(doc)
 }
 
+/// Whether an encrypted document needs a non-empty user password: test the
+/// empty password against /U (and /UE for R6) with lopdf's standard security
+/// handler. Only the trailer /ID and the /Encrypt dictionary are involved: a
+/// two-entry scratch document carries the /Encrypt dictionary re-encoded from
+/// the state lopdf decoded at load, so no object tree is parsed again.
+///
+/// If the state cannot be re-encoded we answer `true` (the stricter choice:
+/// a merge then keeps requiring a password rather than dropping it).
+pub(crate) fn needs_user_password(doc: &LopdfDocument, opened_without_password: bool) -> bool {
+    // Loaded without any password yet decrypted: the empty user password
+    // worked, so the file is owner-only. No need to check /U.
+    if opened_without_password && doc.was_encrypted() {
+        return false;
+    }
+    let Some(state) = doc.encryption_state.as_ref() else {
+        return false;
+    };
+    let Ok(encrypt) = state.encode() else {
+        return true;
+    };
+    let mut probe = LopdfDocument::with_version(doc.version.clone());
+    let id = probe.add_object(Object::Dictionary(encrypt));
+    probe.trailer.set("Encrypt", Object::Reference(id));
+    if let Ok(file_id) = doc.trailer.get(b"ID") {
+        probe.trailer.set("ID", file_id.clone());
+    }
+    probe.authenticate_user_password("").is_err()
+}
+
 /// Re-apply the document's encryption before writing, so a document opened
 /// with a password is never written out in plaintext by accident.
 pub(crate) fn reencrypt_for_write(doc: &mut LopdfDocument) -> Result<()> {
@@ -126,6 +155,8 @@ pub struct Document {
     dirty: bool,
     signed: bool,
     password: PasswordSlot,
+    /// Encrypted with a non-empty user password (not owner-password-only).
+    requires_user_password: bool,
 }
 
 impl Document {
@@ -219,6 +250,13 @@ impl Document {
     ) -> Result<Self> {
         let slots = slots_from(&inner)?;
         let signed = contains_signature(&inner);
+        // Decided from the bytes this Document wraps: does opening them need a
+        // non-empty user password? An owner-password-only file opened *with*
+        // its owner password still does not. Every constructor ends here, so
+        // ops that change encryption (protect -> per its user password,
+        // unprotect -> false, merge -> its chosen source, derived ops ->
+        // same state as their source) get the flag of their own output.
+        let requires_user_password = needs_user_password(&inner, password.get().is_none());
         Ok(Self {
             id: DocumentId::next(),
             path,
@@ -229,6 +267,7 @@ impl Document {
             dirty: false,
             signed,
             password,
+            requires_user_password,
         })
     }
 
@@ -288,6 +327,13 @@ impl Document {
     /// True when the file is encrypted (whether or not it was opened with a password).
     pub fn is_encrypted(&self) -> bool {
         self.inner.is_encrypted() || self.inner.was_encrypted()
+    }
+
+    /// True when the file needs a (non-empty) user password to open, as
+    /// opposed to unencrypted or owner-password-only files. Independent of
+    /// which password, if any, was supplied.
+    pub(crate) fn requires_user_password(&self) -> bool {
+        self.requires_user_password
     }
 
     /// Password this document was opened with, for the render engine and saves.
@@ -619,6 +665,49 @@ fn number(obj: &Object) -> Result<f32> {
 mod tests {
     use super::*;
     use crate::test_support::corpus;
+
+    /// qpdf-made fixtures (corpus/encrypted/README.md): R2 RC4-40, R3 RC4-128,
+    /// R4 AES-128, R6 AES-256, each with an empty and a non-empty user password.
+    #[test]
+    fn requires_user_password_from_u_and_ue_on_qpdf_fixtures() {
+        for algo in ["rc4-40", "rc4-128", "aes-128", "aes-256"] {
+            for (kind, needs) in [("empty", false), ("user", true)] {
+                let name = format!("{algo}-{kind}");
+                let bytes = std::fs::read(corpus(&format!("encrypted/{name}.pdf"))).unwrap();
+                let pw = |p: &str| Zeroizing::new(p.to_string());
+
+                // Whichever password was supplied, the answer is the file's.
+                let by_owner =
+                    Document::from_bytes_with_password(bytes.clone(), None, pw("owner-pw"))
+                        .unwrap_or_else(|e| panic!("{name}: {e:?}"));
+                assert!(by_owner.is_encrypted(), "{name}");
+                assert_eq!(
+                    by_owner.requires_user_password(),
+                    needs,
+                    "{name} (owner pw)"
+                );
+                assert_eq!(needs_user_password(&by_owner.inner, false), needs, "{name}");
+
+                if needs {
+                    let by_user =
+                        Document::from_bytes_with_password(bytes.clone(), None, pw("user-pw"))
+                            .unwrap();
+                    assert!(by_user.requires_user_password(), "{name} (user pw)");
+                    assert!(matches!(
+                        Document::from_bytes(bytes, None),
+                        Err(Error::PasswordRequired)
+                    ));
+                } else {
+                    let open = Document::from_bytes(bytes, None).unwrap();
+                    assert!(open.is_encrypted(), "{name}");
+                    assert!(!open.requires_user_password(), "{name} (no pw)");
+                    // The no-password shortcut and the full /U check agree.
+                    assert!(!needs_user_password(&open.inner, true), "{name}");
+                    assert!(!needs_user_password(&open.inner, false), "{name}");
+                }
+            }
+        }
+    }
 
     #[test]
     fn open_hello_and_sizes() {
