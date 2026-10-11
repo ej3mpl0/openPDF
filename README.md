@@ -30,3 +30,8 @@ openpdf_core::tr_args("pages: {count}", &[("count", "2")]);
 ```
 
 The GTK UI can match `Error`, `InvalidKind`, and `SignedOp` instead of parsing `Display`. Adding a language is a new `po/{lang}.po` plus a line in `po/LINGUAS`.
+
+## License
+
+This project is licensed under the Mozilla Public License 2.0. See
+[LICENSE](LICENSE).

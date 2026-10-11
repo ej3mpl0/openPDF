@@ -46,14 +46,79 @@ pub struct CertificateInfo {
 /// The PIN is collected through [`crate::PinProvider`] in the UI and used only
 /// inside the signer backend. It must never appear on this struct, on
 /// [`Signer`], or on [`crate::Document`].
+///
+/// `#[non_exhaustive]`: build it with [`SignRequest::new`] and the `with_*`
+/// methods so new fields do not break downstream crates.
 #[derive(Clone, Debug, Default)]
+#[non_exhaustive]
 pub struct SignRequest {
     /// Token certificate id from [`Signer::list_certificates`].
     pub cert_id: String,
+    /// Written as `/Reason` in the signature dictionary.
     pub reason: Option<String>,
+    /// Written as `/Location` in the signature dictionary.
     pub location: Option<String>,
     pub contact: Option<String>,
     pub appearance: Option<VisibleAppearance>,
+    /// PAdES baseline level. Backends must refuse levels they cannot produce
+    /// rather than silently downgrading.
+    pub level: PadesLevel,
+}
+
+impl SignRequest {
+    pub fn new(cert_id: impl Into<String>) -> Self {
+        Self {
+            cert_id: cert_id.into(),
+            ..Self::default()
+        }
+    }
+
+    pub fn with_reason(mut self, reason: impl Into<String>) -> Self {
+        self.reason = Some(reason.into());
+        self
+    }
+
+    pub fn with_location(mut self, location: impl Into<String>) -> Self {
+        self.location = Some(location.into());
+        self
+    }
+
+    pub fn with_contact(mut self, contact: impl Into<String>) -> Self {
+        self.contact = Some(contact.into());
+        self
+    }
+
+    pub fn with_appearance(mut self, appearance: VisibleAppearance) -> Self {
+        self.appearance = Some(appearance);
+        self
+    }
+
+    pub fn with_level(mut self, level: PadesLevel) -> Self {
+        self.level = level;
+        self
+    }
+}
+
+/// PAdES baseline signature level (ETSI EN 319 142-1).
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Hash)]
+#[non_exhaustive]
+pub enum PadesLevel {
+    /// B-B: signed attributes only, no timestamp.
+    #[default]
+    BB,
+    /// B-T: B-B plus a signature timestamp from a TSA (not implemented yet;
+    /// no TSA is configured anywhere).
+    BT,
+}
+
+impl PadesLevel {
+    /// Display name, e.g. `"PAdES-B-T"`.
+    pub fn label(self) -> &'static str {
+        match self {
+            PadesLevel::BB => "PAdES-B-B",
+            PadesLevel::BT => "PAdES-B-T",
+        }
+    }
 }
 
 /// Information about an existing signature dictionary. Validity is left to the signer backend.
@@ -324,13 +389,19 @@ mod tests {
     }
 
     fn signing_request() -> SignRequest {
-        SignRequest {
-            cert_id: "dnie-sign".into(),
-            reason: Some("test".into()),
-            location: None,
-            contact: None,
-            appearance: None,
-        }
+        SignRequest::new("dnie-sign").with_reason("test")
+    }
+
+    #[test]
+    fn sign_request_defaults_to_pades_bb() {
+        let r = SignRequest::new("c").with_reason("r").with_location("l");
+        assert_eq!(r.level, PadesLevel::BB);
+        assert_eq!(r.reason.as_deref(), Some("r"));
+        assert_eq!(r.location.as_deref(), Some("l"));
+        assert_eq!(
+            SignRequest::new("c").with_level(PadesLevel::BT).level,
+            PadesLevel::BT
+        );
     }
 
     #[test]

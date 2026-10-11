@@ -16,7 +16,7 @@ use der::{Encode, Sequence};
 use openpdf_core::test_support::with_locale;
 use openpdf_core::{
     describe_certificate, format_verify_result, format_verify_results, pin_prompt_text, tr,
-    Document, Error, PinProvider, SecretPin, SignRequest, Signer, VisibleAppearance,
+    Document, Error, PadesLevel, PinProvider, SecretPin, SignRequest, Signer, VisibleAppearance,
 };
 use x509_cert::name::Name;
 use x509_cert::serial_number::SerialNumber;
@@ -317,13 +317,9 @@ fn sign_and_verify_corpus_keeps_prefix() {
         let certs = signer.list_certificates().unwrap();
         let cert = certs.iter().find(|c| can_use(c)).unwrap_or(&certs[0]);
         let original = fs::read(corpus("hello.pdf")).unwrap();
-        let request = SignRequest {
-            cert_id: cert.id.clone(),
-            reason: Some("openpdf-sign test".into()),
-            location: Some("CI".into()),
-            contact: None,
-            appearance: None,
-        };
+        let request = SignRequest::new(cert.id.clone())
+            .with_reason("openpdf-sign test")
+            .with_location("CI");
         let signed = signer.sign(&original, &request).expect("sign");
         assert!(
             signed.starts_with(&original),
@@ -374,16 +370,10 @@ fn sign_visible_appearance() {
         let signer = signer();
         let cert = &signer.list_certificates().unwrap()[0];
         let original = fs::read(corpus("two_page.pdf")).unwrap();
-        let request = SignRequest {
-            cert_id: cert.id.clone(),
-            reason: None,
-            location: None,
-            contact: None,
-            appearance: Some(VisibleAppearance {
-                page: 0,
-                rect: [72.0, 72.0, 240.0, 120.0],
-            }),
-        };
+        let request = SignRequest::new(cert.id.clone()).with_appearance(VisibleAppearance {
+            page: 0,
+            rect: [72.0, 72.0, 240.0, 120.0],
+        });
         let signed = signer.sign(&original, &request).expect("sign visible");
         assert!(signed.starts_with(&original));
         let infos = signer.verify(&signed).unwrap();
@@ -399,13 +389,7 @@ fn unknown_cert_id_fails() {
         let signer = signer();
         let pdf = fs::read(corpus("hello.pdf")).unwrap();
         let err = signer
-            .sign(
-                &pdf,
-                &SignRequest {
-                    cert_id: "no-such-cert".into(),
-                    ..SignRequest::default()
-                },
-            )
+            .sign(&pdf, &SignRequest::new("no-such-cert"))
             .unwrap_err();
         assert!(matches!(err, Error::Sign(_)));
     }) else {
@@ -415,4 +399,73 @@ fn unknown_cert_id_fails() {
 
 fn can_use(c: &openpdf_core::CertificateInfo) -> bool {
     c.usage.is_empty() || c.usage.contains(&CertificateUsage::Signing)
+}
+
+#[test]
+fn reason_and_location_written_and_read_back() {
+    let Some(()) = with_softhsm(|| {
+        let signer = signer();
+        let certs = signer.list_certificates().unwrap();
+        let cert = certs.iter().find(|c| can_use(c)).unwrap_or(&certs[0]);
+        let original = fs::read(corpus("hello.pdf")).unwrap();
+        let request = SignRequest::new(cert.id.clone())
+            .with_reason("Approved by QA")
+            .with_location("Madrid");
+        let signed = signer.sign(&original, &request).expect("sign");
+        let tail = &signed[original.len()..];
+        let has = |needle: &[u8]| tail.windows(needle.len()).any(|w| w == needle);
+        assert!(has(b"/Reason (Approved by QA)"));
+        assert!(has(b"/Location (Madrid)"));
+        let infos = verify_pdf(&signed).unwrap();
+        assert_eq!(infos.len(), 1);
+        assert_eq!(infos[0].valid, Some(true));
+        assert_eq!(infos[0].reason.as_deref(), Some("Approved by QA"));
+        assert_eq!(infos[0].location.as_deref(), Some("Madrid"));
+    }) else {
+        return;
+    };
+}
+
+#[test]
+fn pades_bt_is_a_typed_error_not_a_downgrade() {
+    let pdf = fs::read(corpus("hello.pdf")).unwrap();
+    let request = SignRequest::new("any").with_level(PadesLevel::BT);
+    let mut called = false;
+    let err = crate::pades::sign_incremental(&pdf, &request, "x", |_| {
+        called = true;
+        Ok(Vec::new())
+    })
+    .unwrap_err();
+    assert!(matches!(
+        err,
+        Error::SignLevelUnsupported {
+            level: PadesLevel::BT
+        }
+    ));
+    assert!(!called, "no CMS may be produced for an unsupported level");
+    with_locale("en", || {
+        assert_eq!(
+            err.to_string(),
+            "PAdES-B-T signatures are not supported yet"
+        );
+    });
+    with_locale("es", || {
+        let es = tr("{level} signatures are not supported yet").replace("{level}", "PAdES-B-T");
+        assert_eq!(err.to_string(), es);
+        assert_ne!(es, "PAdES-B-T signatures are not supported yet");
+    });
+
+    let Some(()) = with_softhsm(|| {
+        let signer = signer();
+        let cert = &signer.list_certificates().unwrap()[0];
+        let request = SignRequest::new(cert.id.clone()).with_level(PadesLevel::BT);
+        assert!(matches!(
+            signer.sign(&pdf, &request),
+            Err(Error::SignLevelUnsupported {
+                level: PadesLevel::BT
+            })
+        ));
+    }) else {
+        return;
+    };
 }

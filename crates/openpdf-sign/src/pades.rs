@@ -3,7 +3,9 @@
 use std::io::Write;
 
 use lopdf::{Dictionary, Document, Object, ObjectId};
-use openpdf_core::{tr_args, Error, Result, SignRequest, SignatureInfo, VisibleAppearance};
+use openpdf_core::{
+    tr_args, Error, PadesLevel, Result, SignRequest, SignatureInfo, VisibleAppearance,
+};
 use sha2::{Digest, Sha256};
 
 use crate::cades;
@@ -19,6 +21,7 @@ pub(crate) fn sign_incremental(
     signer_name: &str,
     mut make_cms: impl FnMut(&[u8]) -> Result<Vec<u8>>,
 ) -> Result<Vec<u8>> {
+    ensure_supported_level(request)?;
     if !pdf.starts_with(b"%PDF-") {
         return Err(Error::Sign("not a PDF".into()));
     }
@@ -118,6 +121,15 @@ pub(crate) fn sign_incremental(
     padded.resize(CONTENTS_LEN * 2, b'0');
     out[lt + 1..lt + 1 + CONTENTS_LEN * 2].copy_from_slice(&padded);
     Ok(out)
+}
+
+/// Only PAdES-B-B is produced. Any other level is a typed error, never a
+/// silent downgrade to B-B.
+pub(crate) fn ensure_supported_level(request: &SignRequest) -> Result<()> {
+    match request.level {
+        PadesLevel::BB => Ok(()),
+        level => Err(Error::SignLevelUnsupported { level }),
+    }
 }
 
 pub(crate) fn verify_signatures(pdf: &[u8]) -> Result<Vec<SignatureInfo>> {
@@ -780,13 +792,7 @@ mod tests {
             )
             .unwrap(),
         );
-        let request = SignRequest {
-            cert_id: String::new(),
-            reason: Some("good".into()),
-            location: None,
-            contact: None,
-            appearance: None,
-        };
+        let request = SignRequest::new(String::new()).with_reason("good");
         let pdf = std::fs::read(corpus("hello.pdf")).unwrap();
         let once = sign_incremental(&pdf, &request, "Good", |m| {
             cades::sign_detached(m, &cert, |tbs| Ok(key.sign(tbs).to_vec()))
@@ -835,13 +841,7 @@ mod tests {
         let key = SigningKey::<Sha256>::new(key);
 
         let pdf = std::fs::read(corpus("hello.pdf")).unwrap();
-        let request = SignRequest {
-            cert_id: String::new(),
-            reason: Some("trailing zero".into()),
-            location: None,
-            contact: None,
-            appearance: None,
-        };
+        let request = SignRequest::new(String::new()).with_reason("trailing zero");
         let mut produced = Vec::new();
         let signed = sign_incremental(&pdf, &request, "Trailing Zero", |message| {
             let cms = cades::sign_detached(message, &cert, |tbs| Ok(key.sign(tbs).to_vec()))?;
