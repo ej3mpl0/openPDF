@@ -792,13 +792,7 @@ mod tests {
             )
             .unwrap(),
         );
-        let request = SignRequest {
-            cert_id: String::new(),
-            reason: Some("good".into()),
-            location: None,
-            contact: None,
-            appearance: None,
-        };
+        let request = SignRequest::new(String::new()).with_reason("good");
         let pdf = std::fs::read(corpus("hello.pdf")).unwrap();
         let once = sign_incremental(&pdf, &request, "Good", |m| {
             cades::sign_detached(m, &cert, |tbs| Ok(key.sign(tbs).to_vec()))
@@ -847,13 +841,7 @@ mod tests {
         let key = SigningKey::<Sha256>::new(key);
 
         let pdf = std::fs::read(corpus("hello.pdf")).unwrap();
-        let request = SignRequest {
-            cert_id: String::new(),
-            reason: Some("trailing zero".into()),
-            location: None,
-            contact: None,
-            appearance: None,
-        };
+        let request = SignRequest::new(String::new()).with_reason("trailing zero");
         let mut produced = Vec::new();
         let signed = sign_incremental(&pdf, &request, "Trailing Zero", |message| {
             let cms = cades::sign_detached(message, &cert, |tbs| Ok(key.sign(tbs).to_vec()))?;
