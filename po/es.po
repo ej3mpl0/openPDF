@@ -737,3 +737,5 @@ msgstr "El resultado conservará la protección de «{file}»"
 
 msgid "The passwords of the other files will no longer open it."
 msgstr "Las contraseñas de los demás archivos ya no lo abrirán."
+msgid "{level} signatures are not supported yet"
+msgstr "las firmas {level} todavía no están soportadas"

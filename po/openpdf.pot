@@ -660,6 +660,9 @@ msgstr ""
 msgid "PIN entry was cancelled"
 msgstr ""
 
+msgid "{level} signatures are not supported yet"
+msgstr ""
+
 msgid "--measure opens the real libadwaita window (needs a display or xvfb-run), loads a multi-page PDF, waits for visible tiles and thumbnails, then prints startup time and peak RSS and exits non-zero if over the documented limits."
 msgstr ""
 
