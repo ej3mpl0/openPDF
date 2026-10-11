@@ -84,12 +84,7 @@ fn apply_slots_incremental(inc: &mut IncrementalDocument, slots: &[PageSlot]) ->
     if let Ok(Object::Dictionary(dict)) = inc.new_document.get_object_mut(pages_id) {
         dict.set(
             "Kids",
-            Object::Array(
-                slots
-                    .iter()
-                    .map(|s| Object::Reference(s.obj_id))
-                    .collect(),
-            ),
+            Object::Array(slots.iter().map(|s| Object::Reference(s.obj_id)).collect()),
         );
         dict.set("Count", Object::Integer(slots.len() as i64));
     }

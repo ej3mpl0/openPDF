@@ -71,9 +71,11 @@ pub fn parse_page_ranges(spec: &str, page_count: u32) -> Result<Vec<PageRange>> 
 }
 
 fn parse_one(s: &str) -> Result<u32> {
-    s.trim()
-        .parse()
-        .map_err(|_| Error::invalid(InvalidKind::NotAPageNumber { value: s.to_string() }))
+    s.trim().parse().map_err(|_| {
+        Error::invalid(InvalidKind::NotAPageNumber {
+            value: s.to_string(),
+        })
+    })
 }
 
 /// Concatenate documents in order. Uses lopdf (not PDFium) so gtk/sign stay off this path.
@@ -107,16 +109,12 @@ pub fn merge(docs: &[Document]) -> Result<Document> {
     let mut pages_object: Option<(ObjectId, Object)> = None;
 
     for (id, object) in objects.iter() {
-        match object.type_name().map(|n| n.as_ref()) {
-            Ok(b"Catalog") => {
-                if catalog_object.is_none() {
-                    catalog_object = Some((*id, object.clone()));
-                }
+        match object.type_name() {
+            Ok(b"Catalog") if catalog_object.is_none() => {
+                catalog_object = Some((*id, object.clone()));
             }
-            Ok(b"Pages") => {
-                if pages_object.is_none() {
-                    pages_object = Some((*id, object.clone()));
-                }
+            Ok(b"Pages") if pages_object.is_none() => {
+                pages_object = Some((*id, object.clone()));
             }
             _ => {}
         }
@@ -282,11 +280,7 @@ mod tests {
         let parts = split_all(&merged).unwrap();
         assert_eq!(parts.len(), 3);
         assert_eq!(parts[0].page_count(), 1);
-        let first_two = split(
-            &merged,
-            &[PageRange { start: 0, end: 1 }],
-        )
-        .unwrap();
+        let first_two = split(&merged, &[PageRange { start: 0, end: 1 }]).unwrap();
         assert_eq!(first_two[0].page_count(), 2);
     }
 
@@ -302,11 +296,12 @@ mod tests {
         assert!(!merged.is_signed());
         assert!(!merged.is_read_only());
         merged.rotate_page(0, 90).unwrap();
-        merged.save(std::env::temp_dir().join(format!(
-            "openpdf-merge-signed-{}.pdf",
-            std::process::id()
-        )))
-        .unwrap();
+        merged
+            .save(
+                std::env::temp_dir()
+                    .join(format!("openpdf-merge-signed-{}.pdf", std::process::id())),
+            )
+            .unwrap();
     }
 }
 
