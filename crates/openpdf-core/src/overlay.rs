@@ -88,7 +88,7 @@ pub fn apply_overlay(doc: &Document, overlay: &Overlay) -> Result<Document> {
             .add_page_contents(page_id, bytes)
             .map_err(|e| Error::structure(e.to_string()))?;
     }
-    Document::from_lopdf(inner, None)
+    doc.derive(inner)
 }
 
 fn helvetica_id(doc: &mut lopdf::Document) -> ObjectId {

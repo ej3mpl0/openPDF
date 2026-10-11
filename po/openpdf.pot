@@ -414,3 +414,18 @@ msgstr ""
 
 msgid "crop box must be llx,lly,urx,ury"
 msgstr ""
+
+msgid "Read passwords from stdin, one per line, instead of prompting"
+msgstr ""
+
+msgid "Password for {path}: "
+msgstr ""
+
+msgid "User password: "
+msgstr ""
+
+msgid "Owner password (empty = same as user): "
+msgstr ""
+
+msgid "missing password on stdin"
+msgstr ""

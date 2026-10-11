@@ -1,6 +1,7 @@
 use std::fs;
 use std::path::{Path, PathBuf};
 
+use crate::password::{read_optional_password, read_password};
 use anyhow::{bail, Context, Result};
 use clap::{value_parser, Arg, ArgMatches, Command};
 use openpdf_core::{
@@ -94,17 +95,6 @@ pub fn register(cmd: Command, arguments: &'static str) -> Command {
             .about(tr("Encrypt with a user/owner password (AES-256)"))
             .arg(file_arg(arguments))
             .arg(
-                Arg::new("user")
-                    .long("user")
-                    .required(true)
-                    .help(tr("User password")),
-            )
-            .arg(
-                Arg::new("owner")
-                    .long("owner")
-                    .help(tr("Owner password (defaults to user)")),
-            )
-            .arg(
                 Arg::new("permit")
                     .long("permit")
                     .help(tr("Permissions: print,modify,copy,annotate,fill,assemble,print-high")),
@@ -115,12 +105,6 @@ pub fn register(cmd: Command, arguments: &'static str) -> Command {
         Command::new("unprotect")
             .about(tr("Remove password protection"))
             .arg(file_arg(arguments))
-            .arg(
-                Arg::new("password")
-                    .long("password")
-                    .required(true)
-                    .help(tr("User or owner password")),
-            )
             .arg(output_arg()),
     ))
     .subcommand(decorate(
@@ -275,8 +259,8 @@ fn save_out(mut doc: Document, output: &Path) -> Result<()> {
 }
 
 fn insert_cmd(m: &ArgMatches) -> Result<()> {
-    let target = Document::open(path_arg(m, "file"))?;
-    let source = Document::open(path_arg(m, "source"))?;
+    let target = crate::password::open(path_arg(m, "file"))?;
+    let source = crate::password::open(path_arg(m, "source"))?;
     let at_1 = *m.get_one::<u32>("at").unwrap();
     if at_1 == 0 {
         bail!("{}", tr("--at is 1-based"));
@@ -291,15 +275,15 @@ fn insert_cmd(m: &ArgMatches) -> Result<()> {
 }
 
 fn extract_cmd(m: &ArgMatches) -> Result<()> {
-    let doc = Document::open(path_arg(m, "file"))?;
+    let doc = crate::password::open(path_arg(m, "file"))?;
     let spec = m.get_one::<String>("pages").unwrap();
     let ranges = parse_page_ranges(spec, doc.page_count())?;
     save_out(extract(&doc, &ranges)?, &path_arg(m, "output"))
 }
 
 fn replace_cmd(m: &ArgMatches) -> Result<()> {
-    let target = Document::open(path_arg(m, "file"))?;
-    let source = Document::open(path_arg(m, "source"))?;
+    let target = crate::password::open(path_arg(m, "file"))?;
+    let source = crate::password::open(path_arg(m, "source"))?;
     let at_1 = *m.get_one::<u32>("at").unwrap();
     if at_1 == 0 {
         bail!("{}", tr("--at is 1-based"));
@@ -315,7 +299,7 @@ fn replace_cmd(m: &ArgMatches) -> Result<()> {
 }
 
 fn crop_cmd(m: &ArgMatches) -> Result<()> {
-    let doc = Document::open(path_arg(m, "file"))?;
+    let doc = crate::password::open(path_arg(m, "file"))?;
     let spec = m.get_one::<String>("box").unwrap();
     let nums: Result<Vec<f32>, _> = spec.split(',').map(|s| s.trim().parse()).collect();
     let nums = nums.context(tr("crop box must be llx,lly,urx,ury"))?;
@@ -333,7 +317,7 @@ fn crop_cmd(m: &ArgMatches) -> Result<()> {
 }
 
 fn optimize_cmd(m: &ArgMatches) -> Result<()> {
-    let doc = Document::open(path_arg(m, "file"))?;
+    let doc = crate::password::open(path_arg(m, "file"))?;
     let opts = OptimizeOptions {
         jpeg_quality: Some(*m.get_one::<u8>("quality").unwrap()),
         drop_unused: true,
@@ -343,13 +327,14 @@ fn optimize_cmd(m: &ArgMatches) -> Result<()> {
 }
 
 fn protect_cmd(m: &ArgMatches) -> Result<()> {
-    let doc = Document::open(path_arg(m, "file"))?;
-    let user = m.get_one::<String>("user").unwrap();
-    let owner = m
-        .get_one::<String>("owner")
-        .map(String::as_str)
-        .unwrap_or("");
-    let mut opts = ProtectOptions::new(user, owner)?;
+    let doc = crate::password::open(path_arg(m, "file"))?;
+    // Stdin: line 1 user password, optional line 2 owner password.
+    let user = read_password(&tr("User password: "))?;
+    let owner = read_optional_password(&tr("Owner password (empty = same as user): "))?;
+    let mut opts = ProtectOptions::new(
+        user.as_str(),
+        owner.as_ref().map(|o| o.as_str()).unwrap_or(""),
+    )?;
     if let Some(spec) = m.get_one::<String>("permit") {
         opts.permissions = PdfPermissions::parse_list(spec)?;
     }
@@ -357,25 +342,26 @@ fn protect_cmd(m: &ArgMatches) -> Result<()> {
 }
 
 fn unprotect_cmd(m: &ArgMatches) -> Result<()> {
-    let doc = Document::open(path_arg(m, "file"))?;
-    let password = m.get_one::<String>("password").unwrap();
+    let (doc, password) = crate::password::open_doc(&path_arg(m, "file"))?;
+    // An unencrypted file never asked for a password; core reports NotEncrypted.
+    let password = password.as_ref().map(|p| p.as_str()).unwrap_or("");
     save_out(unprotect(&doc, password)?, &path_arg(m, "output"))
 }
 
 fn sanitize_cmd(m: &ArgMatches) -> Result<()> {
-    let doc = Document::open(path_arg(m, "file"))?;
+    let doc = crate::password::open(path_arg(m, "file"))?;
     save_out(sanitize_metadata(&doc)?, &path_arg(m, "output"))
 }
 
 fn overlay_cmd(m: &ArgMatches, kind: OverlayKind) -> Result<()> {
-    let doc = Document::open(path_arg(m, "file"))?;
+    let doc = crate::password::open(path_arg(m, "file"))?;
     let mut overlay = Overlay::new(kind, m.get_one::<String>("text").unwrap())?;
     overlay.pages = ranges_or_all(&doc, m.get_one::<String>("pages").map(String::as_str))?;
     save_out(apply_overlay(&doc, &overlay)?, &path_arg(m, "output"))
 }
 
 fn number_cmd(m: &ArgMatches) -> Result<()> {
-    let doc = Document::open(path_arg(m, "file"))?;
+    let doc = crate::password::open(path_arg(m, "file"))?;
     let format = m
         .get_one::<String>("format")
         .map(String::as_str)
@@ -399,7 +385,8 @@ fn to_images_cmd(m: &ArgMatches) -> Result<()> {
     let zoom = *m.get_one::<f32>("zoom").unwrap();
     let output = path_arg(m, "output");
     let engine: Engine = engine()?;
-    let doc = engine.open(&path)?;
+    let doc = crate::password::open(&path)?;
+    engine.bind(&doc)?;
     let rasters = pdf_to_rasters(&engine, &doc, zoom)?;
     if rasters.len() == 1 && looks_png(&output) {
         let png = raster_to_png(&rasters[0])?;

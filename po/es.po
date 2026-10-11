@@ -414,3 +414,18 @@ msgstr "--at empieza en 1"
 
 msgid "crop box must be llx,lly,urx,ury"
 msgstr "el recorte debe ser llx,lly,urx,ury"
+
+msgid "Read passwords from stdin, one per line, instead of prompting"
+msgstr "Leer las contraseñas de la entrada estándar, una por línea, en lugar de preguntarlas"
+
+msgid "Password for {path}: "
+msgstr "Contraseña de {path}: "
+
+msgid "User password: "
+msgstr "Contraseña de usuario: "
+
+msgid "Owner password (empty = same as user): "
+msgstr "Contraseña de propietario (vacía = la de usuario): "
+
+msgid "missing password on stdin"
+msgstr "falta la contraseña en la entrada estándar"

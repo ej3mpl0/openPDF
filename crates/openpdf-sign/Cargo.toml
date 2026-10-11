@@ -11,7 +11,7 @@ cms = "0.2"
 const-oid = { version = "0.9", features = ["db"] }
 cryptoki = "0.12"
 der = { version = "0.7", features = ["alloc", "derive", "oid"] }
-lopdf = "0.36.0"
+lopdf = "0.44.0"
 rsa = { version = "0.9", default-features = false, features = ["std", "sha2"] }
 sha2 = { version = "0.10", default-features = false, features = ["std"] }
 x509-cert = { version = "0.2", default-features = false, features = ["std"] }
