@@ -107,16 +107,12 @@ pub fn merge(docs: &[Document]) -> Result<Document> {
     let mut pages_object: Option<(ObjectId, Object)> = None;
 
     for (id, object) in objects.iter() {
-        match object.type_name().map(|n| n.as_ref()) {
-            Ok(b"Catalog") => {
-                if catalog_object.is_none() {
-                    catalog_object = Some((*id, object.clone()));
-                }
+        match object.type_name() {
+            Ok(b"Catalog") if catalog_object.is_none() => {
+                catalog_object = Some((*id, object.clone()));
             }
-            Ok(b"Pages") => {
-                if pages_object.is_none() {
-                    pages_object = Some((*id, object.clone()));
-                }
+            Ok(b"Pages") if pages_object.is_none() => {
+                pages_object = Some((*id, object.clone()));
             }
             _ => {}
         }
