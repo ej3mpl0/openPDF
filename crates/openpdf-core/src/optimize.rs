@@ -62,7 +62,10 @@ fn recompress_images(doc: &mut lopdf::Document, quality: u8) -> Result<()> {
         let mut jpeg = Vec::new();
         {
             let mut enc = JpegEncoder::new_with_quality(&mut jpeg, quality);
-            if enc.encode(&rgb, w, h, ExtendedColorType::Rgb8).is_err() {
+            if enc
+                .encode(&rgb, w, h, ExtendedColorType::Rgb8)
+                .is_err()
+            {
                 continue;
             }
         }
@@ -91,9 +94,11 @@ fn is_image(stream: &Stream) -> bool {
 fn is_jpeg(stream: &Stream) -> bool {
     match stream.dict.get(b"Filter") {
         Ok(Object::Name(n)) => n.as_slice() == b"DCTDecode",
-        Ok(Object::Array(arr)) => arr
-            .iter()
-            .any(|o| o.as_name().ok().is_some_and(|n| n == b"DCTDecode")),
+        Ok(Object::Array(arr)) => arr.iter().any(|o| {
+            o.as_name()
+                .ok()
+                .is_some_and(|n| n == b"DCTDecode")
+        }),
         _ => false,
     }
 }

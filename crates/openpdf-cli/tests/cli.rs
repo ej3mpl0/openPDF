@@ -57,11 +57,7 @@ fn spanish_pages_line() -> String {
 #[test]
 fn info_two_page() {
     let out = run(&["info", corpus("two_page.pdf").to_str().unwrap()]);
-    assert!(
-        out.status.success(),
-        "{}",
-        String::from_utf8_lossy(&out.stderr)
-    );
+    assert!(out.status.success(), "{}", String::from_utf8_lossy(&out.stderr));
     let stdout = String::from_utf8_lossy(&out.stdout);
     assert!(stdout.contains("pages: 2"), "{stdout}");
 }
@@ -72,16 +68,8 @@ fn info_follows_spanish_catalog_without_hardcoded_msgstr() {
     let file = corpus("two_page.pdf");
     let en = run_locale("C", &["info", file.to_str().unwrap()]);
     let es = run_locale("es_ES.UTF-8", &["info", file.to_str().unwrap()]);
-    assert!(
-        en.status.success(),
-        "{}",
-        String::from_utf8_lossy(&en.stderr)
-    );
-    assert!(
-        es.status.success(),
-        "{}",
-        String::from_utf8_lossy(&es.stderr)
-    );
+    assert!(en.status.success(), "{}", String::from_utf8_lossy(&en.stderr));
+    assert!(es.status.success(), "{}", String::from_utf8_lossy(&es.stderr));
 
     let en_out = String::from_utf8_lossy(&en.stdout);
     let es_out = String::from_utf8_lossy(&es.stdout);
@@ -100,16 +88,8 @@ fn help_follows_locale() {
     let _g = locale_test_guard();
     let en = run_locale("C", &["--help"]);
     let es = run_locale("es", &["--help"]);
-    assert!(
-        en.status.success(),
-        "{}",
-        String::from_utf8_lossy(&en.stderr)
-    );
-    assert!(
-        es.status.success(),
-        "{}",
-        String::from_utf8_lossy(&es.stderr)
-    );
+    assert!(en.status.success(), "{}", String::from_utf8_lossy(&en.stderr));
+    assert!(es.status.success(), "{}", String::from_utf8_lossy(&es.stderr));
 
     let en_out = String::from_utf8_lossy(&en.stdout);
     let es_out = String::from_utf8_lossy(&es.stdout);
@@ -129,11 +109,7 @@ fn info_language_es_en() {
     let _g = locale_test_guard();
     let file = corpus("two_page.pdf");
     let out = run_language("es:en", "en_US.UTF-8", &["info", file.to_str().unwrap()]);
-    assert!(
-        out.status.success(),
-        "{}",
-        String::from_utf8_lossy(&out.stderr)
-    );
+    assert!(out.status.success(), "{}", String::from_utf8_lossy(&out.stderr));
     let stdout = String::from_utf8_lossy(&out.stdout);
     let pages = spanish_pages_line();
     assert_ne!(pages, "pages: 2");
@@ -146,11 +122,7 @@ fn info_language_fr_es() {
     let _g = locale_test_guard();
     let file = corpus("two_page.pdf");
     let out = run_language("fr:es", "en_US.UTF-8", &["info", file.to_str().unwrap()]);
-    assert!(
-        out.status.success(),
-        "{}",
-        String::from_utf8_lossy(&out.stderr)
-    );
+    assert!(out.status.success(), "{}", String::from_utf8_lossy(&out.stderr));
     let stdout = String::from_utf8_lossy(&out.stdout);
     let pages = spanish_pages_line();
     assert!(stdout.contains(&pages), "{stdout}");
@@ -162,11 +134,7 @@ fn info_language_ignored_when_lang_is_c() {
     let _g = locale_test_guard();
     let file = corpus("two_page.pdf");
     let out = run_language("es:en", "C", &["info", file.to_str().unwrap()]);
-    assert!(
-        out.status.success(),
-        "{}",
-        String::from_utf8_lossy(&out.stderr)
-    );
+    assert!(out.status.success(), "{}", String::from_utf8_lossy(&out.stderr));
     let stdout = String::from_utf8_lossy(&out.stdout);
     assert!(stdout.contains("pages: 2"), "{stdout}");
     let pages = spanish_pages_line();
@@ -186,11 +154,7 @@ fn insert_extract_optimize_watermark() {
         "-o",
         inserted.to_str().unwrap(),
     ]);
-    assert!(
-        out.status.success(),
-        "{}",
-        String::from_utf8_lossy(&out.stderr)
-    );
+    assert!(out.status.success(), "{}", String::from_utf8_lossy(&out.stderr));
     let extracted = dir.join("one.pdf");
     let out = run(&[
         "extract",
@@ -200,11 +164,7 @@ fn insert_extract_optimize_watermark() {
         "-o",
         extracted.to_str().unwrap(),
     ]);
-    assert!(
-        out.status.success(),
-        "{}",
-        String::from_utf8_lossy(&out.stderr)
-    );
+    assert!(out.status.success(), "{}", String::from_utf8_lossy(&out.stderr));
     let opt = dir.join("opt.pdf");
     let out = run(&[
         "optimize",
@@ -212,11 +172,7 @@ fn insert_extract_optimize_watermark() {
         "-o",
         opt.to_str().unwrap(),
     ]);
-    assert!(
-        out.status.success(),
-        "{}",
-        String::from_utf8_lossy(&out.stderr)
-    );
+    assert!(out.status.success(), "{}", String::from_utf8_lossy(&out.stderr));
     let marked = dir.join("mark.pdf");
     let out = run(&[
         "watermark",
@@ -226,11 +182,7 @@ fn insert_extract_optimize_watermark() {
         "-o",
         marked.to_str().unwrap(),
     ]);
-    assert!(
-        out.status.success(),
-        "{}",
-        String::from_utf8_lossy(&out.stderr)
-    );
+    assert!(out.status.success(), "{}", String::from_utf8_lossy(&out.stderr));
     let numbered = dir.join("num.pdf");
     let out = run(&[
         "number",
@@ -238,11 +190,7 @@ fn insert_extract_optimize_watermark() {
         "-o",
         numbered.to_str().unwrap(),
     ]);
-    assert!(
-        out.status.success(),
-        "{}",
-        String::from_utf8_lossy(&out.stderr)
-    );
+    assert!(out.status.success(), "{}", String::from_utf8_lossy(&out.stderr));
 }
 
 #[test]
@@ -259,11 +207,7 @@ fn from_images_builds_pdf() {
         "-o",
         pdf.to_str().unwrap(),
     ]);
-    assert!(
-        out.status.success(),
-        "{}",
-        String::from_utf8_lossy(&out.stderr)
-    );
+    assert!(out.status.success(), "{}", String::from_utf8_lossy(&out.stderr));
     assert!(pdf.is_file());
 }
 
@@ -278,11 +222,7 @@ fn merge_and_split() {
         "-o",
         merged.to_str().unwrap(),
     ]);
-    assert!(
-        out.status.success(),
-        "{}",
-        String::from_utf8_lossy(&out.stderr)
-    );
+    assert!(out.status.success(), "{}", String::from_utf8_lossy(&out.stderr));
     let parts = dir.join("parts");
     let out = run(&[
         "split",
@@ -290,11 +230,7 @@ fn merge_and_split() {
         "-o",
         parts.to_str().unwrap(),
     ]);
-    assert!(
-        out.status.success(),
-        "{}",
-        String::from_utf8_lossy(&out.stderr)
-    );
+    assert!(out.status.success(), "{}", String::from_utf8_lossy(&out.stderr));
     assert_eq!(std::fs::read_dir(&parts).unwrap().count(), 3);
 }
 
@@ -312,26 +248,15 @@ fn render_and_text_if_pdfium() {
         "-o",
         png.to_str().unwrap(),
     ]);
-    assert!(
-        out.status.success(),
-        "{}",
-        String::from_utf8_lossy(&out.stderr)
-    );
+    assert!(out.status.success(), "{}", String::from_utf8_lossy(&out.stderr));
     assert!(png.is_file());
     let header = std::fs::read(&png).unwrap();
     assert_eq!(&header[..8], b"\x89PNG\r\n\x1a\n");
 
     let out = run(&["text", corpus("hello.pdf").to_str().unwrap()]);
-    assert!(
-        out.status.success(),
-        "{}",
-        String::from_utf8_lossy(&out.stderr)
-    );
+    assert!(out.status.success(), "{}", String::from_utf8_lossy(&out.stderr));
     let stdout = String::from_utf8_lossy(&out.stdout);
-    assert!(
-        stdout.contains("Hello") || stdout.contains("openPDF"),
-        "{stdout}"
-    );
+    assert!(stdout.contains("Hello") || stdout.contains("openPDF"), "{stdout}");
 }
 
 struct EngineProbe;
