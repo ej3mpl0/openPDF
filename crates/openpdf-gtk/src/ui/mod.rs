@@ -1,6 +1,8 @@
 // SPDX-License-Identifier: MPL-2.0
 mod about;
+mod canvas;
 mod home;
+mod password;
 mod preferences;
 mod sign;
 mod tools;
@@ -13,7 +15,7 @@ use std::rc::Rc;
 use std::sync::Arc;
 
 use crate::measure::{
-    self, peak_rss_bytes, BudgetReport, DEFAULT_MEASURE_PAGES, MAX_MEASURE_WAIT_MS,
+    self, peak_rss_bytes, BudgetReport, DEFAULT_MEASURE_PAGES, MIN_THUMB_TILES, MIN_VISIBLE_TILES,
 };
 use crate::settings::{Settings, Theme};
 use crate::sign::{NoopVerifier, UnavailableSigner};
@@ -22,9 +24,14 @@ use gtk::glib;
 use gtk::prelude::*;
 use gtk4 as gtk;
 use libadwaita as adw;
-use openpdf_core::{Signer, Verifier};
+use openpdf_core::{Engine, Signer, Verifier};
 
-pub fn run(initial: Option<PathBuf>, signer: Box<dyn Signer>, verifier: Box<dyn Verifier>) {
+pub fn run(
+    initial: Option<PathBuf>,
+    signer: Box<dyn Signer>,
+    verifier: Box<dyn Verifier>,
+    engine: Option<Engine>,
+) {
     let signer = Arc::<dyn Signer>::from(signer);
     let verifier = Arc::<dyn Verifier>::from(verifier);
     let app = adw::Application::builder()
@@ -44,6 +51,7 @@ pub fn run(initial: Option<PathBuf>, signer: Box<dyn Signer>, verifier: Box<dyn 
     app.connect_activate({
         let signer = signer.clone();
         let verifier = verifier.clone();
+        let engine = engine.clone();
         let win_slot = win_slot.clone();
         let cli_path = cli_path.clone();
         move |app| {
@@ -55,8 +63,13 @@ pub fn run(initial: Option<PathBuf>, signer: Box<dyn Signer>, verifier: Box<dyn 
                 settings.apply_locale();
                 apply_theme(settings.theme);
                 install_accels(app);
-                let win =
-                    window::OpenPdfWindow::new(app, settings, signer.clone(), verifier.clone());
+                let win = window::OpenPdfWindow::new(
+                    app,
+                    settings,
+                    signer.clone(),
+                    verifier.clone(),
+                    engine.clone(),
+                );
                 win.present();
                 *win_slot.borrow_mut() = Some(win);
                 if let Some(win) = win_slot.borrow().as_ref() {
@@ -104,13 +117,13 @@ pub fn run(initial: Option<PathBuf>, signer: Box<dyn Signer>, verifier: Box<dyn 
 /// visible thumbnail has been painted. `ui_first_tile_ms` is the first painted
 /// page tile; `ui_thumbs_done_ms` is when the thumbnail strip meets the gate.
 /// Other `ui_*` marks are also milliseconds from process start.
-pub fn run_measure(pages: usize) -> i32 {
+pub fn run_measure(pages: usize, engine: Option<Engine>) -> i32 {
     measure::mark_process_start();
+    measure::remember_inherited_env();
     if !measure::has_display() {
         eprintln!("measure: {}", measure::display_hint());
         return 1;
     }
-    measure::isolate_xdg();
     let pages = if pages == 0 {
         DEFAULT_MEASURE_PAGES
     } else {
@@ -125,6 +138,7 @@ pub fn run_measure(pages: usize) -> i32 {
     };
 
     let report: Rc<RefCell<Option<BudgetReport>>> = Rc::new(RefCell::new(None));
+    let timed_out = Rc::new(Cell::new(false));
     let app = adw::Application::builder()
         .application_id(crate::MEASURE_APP_ID)
         .flags(ApplicationFlags::NON_UNIQUE)
@@ -136,6 +150,9 @@ pub fn run_measure(pages: usize) -> i32 {
         let ui_adw_init_ms = ui_adw_init_ms.clone();
         let ui_css_ms = ui_css_ms.clone();
         move |_| {
+            measure::mark_gtk_startup();
+            measure::warmup_fontconfig_pango();
+            measure::mark_pango_init();
             adw::init().ok();
             register_icons();
             ui_adw_init_ms.set(measure::process_elapsed_ms());
@@ -145,6 +162,7 @@ pub fn run_measure(pages: usize) -> i32 {
     });
 
     let report_c = report.clone();
+    let timed_out_c = timed_out.clone();
     app.connect_activate(move |app| {
         let ui_activate_ms = measure::process_elapsed_ms();
         let mut settings = Settings::default();
@@ -159,6 +177,7 @@ pub fn run_measure(pages: usize) -> i32 {
             settings,
             Arc::new(UnavailableSigner),
             Arc::new(NoopVerifier),
+            engine.clone(),
         );
         let ui_window_build_ms = measure::process_elapsed_ms();
         win.present();
@@ -175,6 +194,7 @@ pub fn run_measure(pages: usize) -> i32 {
             app,
             win,
             report_c.clone(),
+            timed_out_c.clone(),
             MeasureMarks {
                 ui_activate_ms,
                 ui_window_present_ms,
@@ -187,10 +207,19 @@ pub fn run_measure(pages: usize) -> i32 {
     });
 
     let _ = app.run_with_args::<&str>(&[]);
+    if timed_out.get() {
+        if let Some(breakdown) = measure::take_rss_breakdown() {
+            eprint!("{breakdown}");
+        }
+        return 1;
+    }
     let result = report.borrow().clone();
     match result {
         Some(r) => {
             print!("{r}");
+            if let Some(breakdown) = measure::take_rss_breakdown() {
+                print!("{breakdown}");
+            }
             i32::from(!r.ok)
         }
         None => {
@@ -222,6 +251,7 @@ fn watch_measure(
     app: &adw::Application,
     win: window::OpenPdfWindow,
     report: Rc<RefCell<Option<BudgetReport>>>,
+    timed_out: Rc<Cell<bool>>,
     marks: MeasureMarks,
 ) {
     let app = app.clone();
@@ -233,6 +263,7 @@ fn watch_measure(
 
         if let Some(view) = win.current_view() {
             if view.opened().is_placeholder() {
+                measure::capture_rss_breakdown_if_enabled();
                 finish_measure(
                     &app,
                     &report,
@@ -241,6 +272,7 @@ fn watch_measure(
                         elapsed,
                         peak.get(),
                         "Engine/PDFium is required; placeholder renderer is not measured",
+                        win.widget(),
                     ),
                 );
                 return glib::ControlFlow::Break;
@@ -258,8 +290,18 @@ fn watch_measure(
                 view.queue_repaint();
             }
             // startup_ms is marked from the DrawingArea draw path, not here.
+            // Do not finish on a stale mark from a tiny first allocation:
+            // Xvfb often grows the viewport afterward and tile_ready drops
+            // to 0/N until the new keys are painted.
             let startup_ms = measure::ui_all_visible_painted_ms();
-            if laid_out.get() && view.viewport_allocated() && startup_ms > 0 {
+            if laid_out.get()
+                && view.viewport_allocated()
+                && startup_ms > 0
+                && measure::ui_first_tile_painted_ms() > 0
+                && ready.visible_ready >= MIN_VISIBLE_TILES
+                && ready.thumb_ready >= MIN_THUMB_TILES
+            {
+                measure::capture_rss_breakdown_if_enabled();
                 finish_measure(
                     &app,
                     &report,
@@ -275,6 +317,11 @@ fn watch_measure(
                         ui_window_present_ms: marks.ui_window_present_ms,
                         ui_first_frame_ms: marks.first_frame.get(),
                         ui_first_tile_ms: measure::ui_first_tile_painted_ms(),
+                        pdfium_load_ms: measure::ui_pdfium_load_ms(),
+                        ui_engine_created_ms: measure::ui_engine_created_ms(),
+                        ui_pango_init_ms: measure::ui_pango_init_ms(),
+                        ui_gtk_startup_ms: measure::ui_gtk_startup_ms(),
+                        pdfium_sha256: measure::pdfium_library_sha256(),
                         ui_adw_init_ms: marks.ui_adw_init_ms,
                         ui_css_ms: marks.ui_css_ms,
                         ui_window_build_ms: marks.ui_window_build_ms,
@@ -287,44 +334,51 @@ fn watch_measure(
                         ui_thumbs_done_ms: measure::ui_thumbs_done_ms(),
                         ok: false,
                         error: None,
+                        ..Default::default()
                     }
+                    .with_runtime_env()
+                    .with_window_graphics(win.widget())
+                    .with_heap_accounting(measure::current_heap_accounting())
                     .evaluate(),
                 );
                 return glib::ControlFlow::Break;
             }
         }
 
-        if elapsed >= MAX_MEASURE_WAIT_MS {
-            let (pages, ready) = match win.current_view() {
-                Some(view) => (view.opened().page_count(), Some(view.tile_ready())),
-                None => (0, None),
+        let timeout_ms = measure::measure_timeout_ms();
+        if elapsed >= timeout_ms {
+            let (vr, vt, tr, tt) = match win.current_view() {
+                Some(view) => {
+                    let r = view.tile_ready();
+                    (
+                        r.visible_ready,
+                        r.visible_total,
+                        r.thumb_ready,
+                        r.thumb_total,
+                    )
+                }
+                None => (0, 0, 0, 0),
             };
-            let err = if ready.is_none() {
-                "document did not open".into()
-            } else {
-                format!(
-                    "timed out after {MAX_MEASURE_WAIT_MS} ms waiting for tiles ({}/{} visible, {}/{} thumbs)",
-                    ready.map(|r| r.visible_ready).unwrap_or(0),
-                    ready.map(|r| r.visible_total).unwrap_or(0),
-                    ready.map(|r| r.thumb_ready).unwrap_or(0),
-                    ready.map(|r| r.thumb_total).unwrap_or(0)
-                )
-            };
-            let mut built = failed_report(pages, elapsed, peak.get(), &err);
-            if let Some(ready) = ready {
-                built.visible_ready = ready.visible_ready;
-                built.visible_total = ready.visible_total;
-                built.thumb_ready = ready.thumb_ready;
-                built.thumb_total = ready.thumb_total;
-            }
-            finish_measure(&app, &report, built);
+            measure::capture_rss_breakdown_if_enabled();
+            eprintln!(
+                "{}",
+                measure::format_measure_timeout(timeout_ms, vr, vt, tr, tt)
+            );
+            timed_out.set(true);
+            app.quit();
             return glib::ControlFlow::Break;
         }
         glib::ControlFlow::Continue
     });
 }
 
-fn failed_report(pages: usize, startup_ms: u128, rss_bytes: u64, error: &str) -> BudgetReport {
+fn failed_report(
+    pages: usize,
+    startup_ms: u128,
+    rss_bytes: u64,
+    error: &str,
+    widget: &impl IsA<gtk::Widget>,
+) -> BudgetReport {
     BudgetReport {
         pages,
         startup_ms,
@@ -332,6 +386,8 @@ fn failed_report(pages: usize, startup_ms: u128, rss_bytes: u64, error: &str) ->
         error: Some(error.to_string()),
         ..Default::default()
     }
+    .with_runtime_env()
+    .with_window_graphics(widget)
 }
 
 fn finish_measure(
@@ -421,6 +477,9 @@ const CSS: &str = r#"
 "#;
 
 pub(crate) fn show_toast(overlay: &adw::ToastOverlay, msg: &str) {
+    if msg.is_empty() {
+        return;
+    }
     let t = adw::Toast::new(msg);
     t.set_timeout(3);
     overlay.add_toast(t);

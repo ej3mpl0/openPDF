@@ -23,6 +23,10 @@ pub enum Error {
         count: u32,
     },
     EmptyDocument,
+    /// The PDF is encrypted; open it with `Document::from_bytes_with_password`.
+    PasswordRequired,
+    /// The supplied password opens neither the user nor the owner key.
+    WrongPassword,
     Invalid(InvalidKind),
     Sign(String),
     /// PKCS#11 (or another token backend) could not be loaded.
@@ -33,6 +37,10 @@ pub enum Error {
     /// Unit variant — no payload. The token was not touched. UIs treat
     /// this as a silent cancel. The CLI prints a neutral status, not an error.
     PinCancelled,
+    /// The signer backend cannot produce this PAdES level yet. Never downgraded.
+    SignLevelUnsupported {
+        level: crate::signer::PadesLevel,
+    },
     /// The PDF already has a signature; `op` would invalidate it.
     Signed {
         op: SignedOp,
@@ -119,7 +127,13 @@ impl Error {
                 &[("page", &page.to_string()), ("count", &count.to_string())],
             ),
             Error::EmptyDocument => tr("document has no pages"),
+            Error::PasswordRequired => tr("password is required"),
+            Error::WrongPassword => tr("wrong password"),
             Error::Invalid(kind) => kind.to_locale_string(),
+            Error::SignLevelUnsupported { level } => tr_args(
+                "{level} signatures are not supported yet",
+                &[("level", level.label())],
+            ),
             Error::Sign(m) => tr_args("sign: {detail}", &[("detail", &tr(m))]),
             Error::SignerUnavailable { reason } => describe_signer_unavailable(reason),
             Error::PinCancelled => tr("PIN entry was cancelled"),

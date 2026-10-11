@@ -194,16 +194,15 @@ mod tests {
 
     #[test]
     fn take_pin_clears_the_entry_into_zeroizing() {
-        // Without a display the widget constructors still work in unit tests
-        // on this crate's GTK; skip if GTK cannot init.
-        if gtk::init().is_err() && !gtk::is_initialized() {
+        let Some(()) = crate::test_gtk::on_gtk_thread(|| {
+            let entry = gtk::PasswordEntry::new();
+            entry.set_text("s3cret");
+            let pin = take_pin(&entry);
+            assert_eq!(pin.as_str(), "s3cret");
+            assert_eq!(entry.text().as_str(), "");
+        }) else {
             return;
-        }
-        let entry = gtk::PasswordEntry::new();
-        entry.set_text("s3cret");
-        let pin = take_pin(&entry);
-        assert_eq!(pin.as_str(), "s3cret");
-        assert_eq!(entry.text().as_str(), "");
+        };
     }
 
     #[test]
@@ -227,13 +226,7 @@ mod tests {
 
         let (tx, rx) = mpsc::channel();
         std::thread::spawn(move || {
-            let result = Fake(GtkPinProvider).sign(
-                b"%PDF",
-                &SignRequest {
-                    cert_id: "test".into(),
-                    ..Default::default()
-                },
-            );
+            let result = Fake(GtkPinProvider).sign(b"%PDF", &SignRequest::new("test"));
             let _ = tx.send(result);
         });
         let result = rx

@@ -660,6 +660,9 @@ msgstr ""
 msgid "PIN entry was cancelled"
 msgstr ""
 
+msgid "{level} signatures are not supported yet"
+msgstr ""
+
 msgid "--measure opens the real libadwaita window (needs a display or xvfb-run), loads a multi-page PDF, waits for visible tiles and thumbnails, then prints startup time and peak RSS and exits non-zero if over the documented limits."
 msgstr ""
 
@@ -694,4 +697,40 @@ msgid "Saved signed PDF to {path}"
 msgstr ""
 
 msgid "Cannot verify: original file bytes are unavailable."
+msgstr ""
+
+msgid "Read passwords from stdin, one per line, instead of prompting"
+msgstr ""
+
+msgid "Password for {path}: "
+msgstr ""
+
+msgid "User password: "
+msgstr ""
+
+msgid "Owner password (empty = same as user): "
+msgstr ""
+
+msgid "missing password on stdin"
+msgstr ""
+
+msgid "Password required"
+msgstr ""
+
+msgid "Password"
+msgstr ""
+
+msgid "Enter the password for «{file}»"
+msgstr ""
+
+msgid "The result will be protected with the password of «{file}»"
+msgstr ""
+
+msgid "The result will open without a password but keep the restrictions of «{file}»"
+msgstr ""
+
+msgid "The result will keep the protection of «{file}»"
+msgstr ""
+
+msgid "The passwords of the other files will no longer open it."
 msgstr ""

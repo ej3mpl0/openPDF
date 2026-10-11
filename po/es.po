@@ -232,7 +232,7 @@ msgid "{subject} — {usage} — {validity}"
 msgstr "Certificado {subject} — {usage} — {validity}"
 
 msgid "{usage} — {validity}"
-msgstr "{usage} — {validity}"
+msgstr "{usage}, {validity}"
 
 msgid "Enter PIN for token \"{token}\""
 msgstr "Introduzca el PIN del token \"{token}\""
@@ -701,3 +701,41 @@ msgstr "PDF firmado guardado en {path}"
 
 msgid "Cannot verify: original file bytes are unavailable."
 msgstr "No se puede verificar: no hay bytes originales del archivo."
+
+msgid "Read passwords from stdin, one per line, instead of prompting"
+msgstr "Leer las contraseñas de la entrada estándar, una por línea, en lugar de preguntarlas"
+
+msgid "Password for {path}: "
+msgstr "Contraseña de {path}: "
+
+msgid "User password: "
+msgstr "Contraseña de usuario: "
+
+msgid "Owner password (empty = same as user): "
+msgstr "Contraseña de propietario (vacía = la de usuario): "
+
+msgid "missing password on stdin"
+msgstr "falta la contraseña en la entrada estándar"
+
+msgid "Password required"
+msgstr "Se requiere contraseña"
+
+msgid "Password"
+msgstr "Contraseña"
+
+msgid "Enter the password for «{file}»"
+msgstr "Introduce la contraseña de «{file}»"
+
+msgid "The result will be protected with the password of «{file}»"
+msgstr "El resultado estará protegido con la contraseña de «{file}»"
+
+msgid "The result will open without a password but keep the restrictions of «{file}»"
+msgstr "El resultado se abrirá sin contraseña pero conservará las restricciones de «{file}»"
+
+msgid "The result will keep the protection of «{file}»"
+msgstr "El resultado conservará la protección de «{file}»"
+
+msgid "The passwords of the other files will no longer open it."
+msgstr "Las contraseñas de los demás archivos ya no lo abrirán."
+msgid "{level} signatures are not supported yet"
+msgstr "las firmas {level} todavía no están soportadas"

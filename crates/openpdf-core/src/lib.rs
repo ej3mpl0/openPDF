@@ -29,7 +29,9 @@ mod signer;
 pub mod test_support;
 
 pub use command::{Command, History};
-pub use convert::{blank_document, images_to_pdf, pdf_to_rasters, raster_to_png};
+pub use convert::{
+    blank_document, images_to_pdf, pdf_to_rasters, raster_to_png, red_rect_document,
+};
 pub use document::{Document, DocumentId, PageInfo};
 pub use error::{
     describe_signer_unavailable, Error, InvalidKind, Result, SignedOp, SignerUnavailableReason,
@@ -37,7 +39,10 @@ pub use error::{
 pub use i18n::{
     available_locales, current_locale, detect_locale, init as init_i18n, set_locale, tr, tr_args,
 };
-pub use ops::{merge, merge_paths, parse_page_ranges, split, split_all, PageRange};
+pub use ops::{
+    merge, merge_encryption_source, merge_paths, parse_page_ranges, split, split_all,
+    EncryptionSourceKind, PageRange,
+};
 pub use optimize::{optimize, OptimizeOptions};
 pub use outline::OutlineItem;
 pub use overlay::{apply_overlay, Overlay, OverlayKind};
@@ -46,12 +51,14 @@ pub use paths::{ensure_app_dirs, recovery_dir, settings_dir};
 pub use pin::{PinProvider, SecretPin};
 pub use protect::{protect, sanitize_metadata, unprotect, PdfPermissions, ProtectOptions};
 pub use render::{
-    page_pixel_size, quantize_zoom, tile_grid, tile_rect, Engine, Priority, Raster, SearchHit,
-    Tile, TileCache, TileEvent, TileKey, TileRequest, DEFAULT_CACHE_BYTES, TILE_SIZE,
+    page_pixel_size, parse_tile_cache_bytes, quantize_zoom, tile_cache_bytes, tile_grid, tile_rect,
+    viewport_cache_bytes, Engine, Priority, Raster, SearchHit, Tile, TileCache, TileEvent, TileKey,
+    TileRequest, DEFAULT_CACHE_BYTES, MAX_CACHE_BYTES, MIN_CACHE_BYTES, TILE_SIZE,
 };
 pub use signer::{
     certificate_common_name, describe_certificate, describe_certificate_detail,
     format_verify_result, format_verify_results, pin_prompt_text, usage_label, CertificateInfo,
-    CertificateUsage, CertificateValidity, SignRequest, SignatureInfo, Signer, Verifier,
-    VisibleAppearance,
+    CertificateUsage, CertificateValidity, PadesLevel, SignRequest, SignatureInfo, Signer,
+    Verifier, VisibleAppearance,
 };
+pub use zeroize::Zeroizing;

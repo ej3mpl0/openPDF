@@ -5,7 +5,7 @@ use std::sync::{Arc, Mutex};
 
 use openpdf_core::{
     Command, Document, DocumentId, Engine, OutlineItem, Priority, SearchHit, SignRequest, Signer,
-    Tile, TileKey, TileRequest,
+    Tile, TileKey, TileRequest, Zeroizing,
 };
 
 use crate::backend::{BackendError, DocumentBackend, MockDocument, PageSize, TileBitmap};
@@ -45,18 +45,35 @@ pub fn sibling_signed_path(src: &Path) -> PathBuf {
 
 impl Session {
     pub fn open(engine: &Engine, path: &Path) -> Result<Self, BackendError> {
+        crate::bind::assert_off_gtk_thread();
         let doc = engine.open(path).map_err(core_err)?;
+        Ok(Self::from_doc(engine.clone(), doc, path))
+    }
+
+    pub fn open_with_password(
+        engine: &Engine,
+        path: &Path,
+        password: Zeroizing<String>,
+    ) -> Result<Self, BackendError> {
+        crate::bind::assert_off_gtk_thread();
+        let doc = engine
+            .open_with_password(path, password)
+            .map_err(core_err)?;
+        Ok(Self::from_doc(engine.clone(), doc, path))
+    }
+
+    pub(crate) fn from_doc(engine: Engine, doc: Document, path: &Path) -> Self {
         let title = path
             .file_name()
             .and_then(|s| s.to_str())
             .unwrap_or("document.pdf")
             .to_string();
-        Ok(Self {
-            engine: engine.clone(),
+        Self {
+            engine,
             doc: RefCell::new(doc),
             title: RefCell::new(title),
             path: RefCell::new(Some(path.to_path_buf())),
-        })
+        }
     }
 
     pub fn title(&self) -> String {
@@ -102,19 +119,61 @@ impl Session {
         self.doc.borrow().is_encrypted()
     }
 
-    /// Run a core tool that returns a replacement document, then rebind the engine.
-    pub fn apply_tool(
+    pub fn engine(&self) -> Engine {
+        self.engine.clone()
+    }
+
+    pub fn clone_document(&self) -> Document {
+        self.doc.borrow().clone()
+    }
+
+    pub fn adopt_document(&self, old_id: DocumentId, new: Document) {
+        let _ = self.engine.close(old_id);
+        *self.doc.borrow_mut() = new;
+    }
+
+    pub fn adopt_reopened(&self, old_id: DocumentId, new: Document, path: PathBuf) {
+        self.adopt_document(old_id, new);
+        *self.title.borrow_mut() = path
+            .file_name()
+            .and_then(|s| s.to_str())
+            .unwrap_or("document.pdf")
+            .to_string();
+        *self.path.borrow_mut() = Some(path);
+    }
+
+    pub fn signed_dest(&self) -> PathBuf {
+        match self.path.borrow().as_ref() {
+            Some(p) => sibling_signed_path(p),
+            None => {
+                std::env::temp_dir().join(format!("document-signed-{}.pdf", std::process::id()))
+            }
+        }
+    }
+
+    pub fn apply_tool_prepare(
         &self,
         f: impl FnOnce(&Document) -> openpdf_core::Result<Document>,
-    ) -> Result<(), BackendError> {
+    ) -> Result<(DocumentId, Document), BackendError> {
         let old_id = self.doc.borrow().id();
         let new = {
             let doc = self.doc.borrow();
             f(&doc).map_err(core_err)?
         };
+        Ok((old_id, new))
+    }
+
+    /// Run a core tool that returns a replacement document, then rebind the engine.
+    ///
+    /// Must not run on the GTK thread (`Engine::bind` waits on the render worker).
+    pub fn apply_tool(
+        &self,
+        f: impl FnOnce(&Document) -> openpdf_core::Result<Document>,
+    ) -> Result<(), BackendError> {
+        let (old_id, new) = self.apply_tool_prepare(f)?;
+        crate::bind::assert_off_gtk_thread();
         self.engine.bind(&new).map_err(core_err)?;
-        let _ = self.engine.close(old_id);
-        *self.doc.borrow_mut() = new;
+        self.adopt_document(old_id, new);
         Ok(())
     }
 
@@ -127,12 +186,12 @@ impl Session {
     }
 
     pub fn save(&self) -> Result<(), BackendError> {
-        let Some(path) = &self.path else {
+        let Some(path) = self.path.borrow().clone() else {
             return Err(BackendError::Invalid(openpdf_core::tr(
                 "Placeholder has no PDF bytes.",
             )));
         };
-        self.save_to(path)
+        self.save_to(&path)
     }
 
     pub fn save_to(&self, path: &Path) -> Result<(), BackendError> {
@@ -156,52 +215,73 @@ impl Session {
         self.doc.borrow().outline().unwrap_or_default()
     }
 
-    pub fn rotate(&self, page: u32, delta: i32) -> Result<(), BackendError> {
+    pub fn rebind(&self) -> Result<(), BackendError> {
+        crate::bind::assert_off_gtk_thread();
+        self.engine.refresh(&self.doc.borrow()).map_err(core_err)
+    }
+
+    pub fn rotate_local(&self, page: u32, delta: i32) -> Result<(), BackendError> {
         self.ensure_writable()?;
-        let mut doc = self.doc.borrow_mut();
-        doc.rotate_page(page, delta).map_err(core_err)?;
-        self.engine.refresh(&doc).map_err(core_err)
+        self.doc
+            .borrow_mut()
+            .rotate_page(page, delta)
+            .map_err(core_err)
+    }
+
+    pub fn rotate(&self, page: u32, delta: i32) -> Result<(), BackendError> {
+        self.rotate_local(page, delta)?;
+        self.rebind()
+    }
+
+    pub fn delete_page_local(&self, page: u32) -> Result<(), BackendError> {
+        self.ensure_writable()?;
+        self.doc.borrow_mut().delete_page(page).map_err(core_err)
     }
 
     pub fn delete_page(&self, page: u32) -> Result<(), BackendError> {
-        self.ensure_writable()?;
-        let mut doc = self.doc.borrow_mut();
-        doc.delete_page(page).map_err(core_err)?;
-        self.engine.refresh(&doc).map_err(core_err)
+        self.delete_page_local(page)?;
+        self.rebind()
     }
 
     pub fn move_page(&self, from: u32, to: u32) -> Result<(), BackendError> {
         self.ensure_writable()?;
-        let mut doc = self.doc.borrow_mut();
-        doc.move_page(from, to).map_err(core_err)?;
-        self.engine.refresh(&doc).map_err(core_err)
+        self.doc
+            .borrow_mut()
+            .move_page(from, to)
+            .map_err(core_err)?;
+        self.rebind()
+    }
+
+    pub fn undo_local(&self) -> Result<bool, BackendError> {
+        self.ensure_writable()?;
+        self.doc.borrow_mut().undo().map_err(core_err)
     }
 
     pub fn undo(&self) -> Result<bool, BackendError> {
-        self.ensure_writable()?;
-        let mut doc = self.doc.borrow_mut();
-        let changed = doc.undo().map_err(core_err)?;
+        let changed = self.undo_local()?;
         if changed {
-            self.engine.refresh(&doc).map_err(core_err)?;
+            self.rebind()?;
         }
         Ok(changed)
     }
 
-    pub fn redo(&self) -> Result<bool, BackendError> {
+    pub fn redo_local(&self) -> Result<bool, BackendError> {
         self.ensure_writable()?;
-        let mut doc = self.doc.borrow_mut();
-        let changed = doc.redo().map_err(core_err)?;
+        self.doc.borrow_mut().redo().map_err(core_err)
+    }
+
+    pub fn redo(&self) -> Result<bool, BackendError> {
+        let changed = self.redo_local()?;
         if changed {
-            self.engine.refresh(&doc).map_err(core_err)?;
+            self.rebind()?;
         }
         Ok(changed)
     }
 
     pub fn execute(&self, command: Command) -> Result<(), BackendError> {
         self.ensure_writable()?;
-        let mut doc = self.doc.borrow_mut();
-        doc.execute(command).map_err(core_err)?;
-        self.engine.refresh(&doc).map_err(core_err)
+        self.doc.borrow_mut().execute(command).map_err(core_err)?;
+        self.rebind()
     }
 
     pub fn to_bytes(&self) -> Result<Vec<u8>, BackendError> {
@@ -246,6 +326,7 @@ impl Session {
     ) -> Result<(), BackendError> {
         let old_id = self.doc.borrow().id();
         let mut doc = self.doc.borrow_mut();
+        crate::bind::assert_off_gtk_thread();
         doc.apply_signer(signer, request).map_err(core_err)?;
         self.engine.bind(&doc).map_err(core_err)?;
         let _ = self.engine.close(old_id);
@@ -253,6 +334,7 @@ impl Session {
     }
 
     pub fn apply_signed_bytes(&self, signed: Vec<u8>) -> Result<(), BackendError> {
+        crate::bind::assert_off_gtk_thread();
         let old_id = self.doc.borrow().id();
         let path = self.path.borrow().clone();
         let doc = Document::from_bytes(signed, path).map_err(core_err)?;
@@ -272,14 +354,15 @@ impl Session {
             }
         };
         std::fs::write(&dest, &signed)?;
+        crate::bind::assert_off_gtk_thread();
         self.reopen(&dest)?;
         Ok(dest)
     }
 
     pub fn reopen(&self, path: &Path) -> Result<(), BackendError> {
+        crate::bind::assert_off_gtk_thread();
         let old_id = self.doc.borrow().id();
         let doc = self.engine.open(path).map_err(core_err)?;
-        self.engine.bind(&doc).map_err(core_err)?;
         let _ = self.engine.close(old_id);
         *self.doc.borrow_mut() = doc;
         *self.path.borrow_mut() = Some(path.to_path_buf());
@@ -296,6 +379,8 @@ impl Session {
     }
 
     pub fn request_view_tiles(&self, keys: &[ViewTile], priority: Priority) {
+        let sizes = self.pages();
+        let keys = crate::tiles::filter_keys_in_grid(keys, &sizes);
         if keys.is_empty() {
             return;
         }
@@ -326,6 +411,14 @@ impl Session {
         self.engine.cache_get(&core)
     }
 
+    pub fn set_cache_bytes(&self, bytes: usize) {
+        self.engine.set_cache_bytes(bytes);
+    }
+
+    pub fn retain_cache_zooms(&self, keep: &[u32]) {
+        self.engine.retain_cache_zooms(keep);
+    }
+
     pub fn poll(&self) -> bool {
         let mut dirty = false;
         while self.poll_one() {
@@ -334,13 +427,44 @@ impl Session {
         dirty
     }
 
-    /// Take at most one finished tile so the UI can `queue_draw` per arrival.
+    /// Take at most one finished event so the UI can `queue_draw` per arrival.
     pub fn poll_one(&self) -> bool {
-        if self.engine.try_recv().is_some() {
-            crate::measure::mark_first_tile_rendered();
-            true
-        } else {
-            false
+        self.take_event().is_some()
+    }
+
+    /// Ingest path: `Some` when the next event is a ready tile.
+    pub fn poll_ready(&self) -> Option<ViewTile> {
+        match self.take_event() {
+            Some(Some(key)) => Some(key),
+            _ => None,
+        }
+    }
+
+    fn take_event(&self) -> Option<Option<ViewTile>> {
+        match self.engine.try_recv() {
+            Some(openpdf_core::TileEvent::Ready(tile)) => {
+                crate::measure::mark_first_tile_rendered();
+                Some(Some(ViewTile::new(
+                    tile.key.page,
+                    f64::from(tile.key.zoom()),
+                    tile.key.x,
+                    tile.key.y,
+                    openpdf_core::TILE_SIZE,
+                )))
+            }
+            Some(openpdf_core::TileEvent::Failed { key, message }) => {
+                if crate::i18n::is_tile_out_of_range_message(&message) {
+                    if cfg!(debug_assertions) {
+                        eprintln!(
+                            "openpdf-gtk: tile out of range, skip paint page={} x={} y={}: {message}",
+                            key.page, key.x, key.y
+                        );
+                    }
+                }
+                Some(None)
+            }
+            Some(openpdf_core::TileEvent::Cancelled(_)) => Some(None),
+            None => None,
         }
     }
 
@@ -415,11 +539,25 @@ impl MockView {
         self.locked.set(true);
     }
 
+    pub fn set_cache_bytes(&self, bytes: usize) {
+        if let Ok(mut cache) = self.cache.lock() {
+            cache.set_max_bytes(bytes);
+        }
+    }
+
+    pub fn retain_cache_zooms(&self, keep: &[u32]) {
+        if let Ok(mut cache) = self.cache.lock() {
+            cache.retain_zooms(keep);
+        }
+    }
+
     pub fn request_view_tiles(&self, keys: &[ViewTile], _priority: Priority) {
+        let sizes = self.pages();
+        let keys = crate::tiles::filter_keys_in_grid(keys, &sizes);
         let Ok(mut cache) = self.cache.lock() else {
             return;
         };
-        for key in keys {
+        for key in &keys {
             if cache.get(key).is_some() {
                 continue;
             }
@@ -468,6 +606,13 @@ impl Opened {
         match self {
             Self::Core(s) => s.page_count(),
             Self::Mock(s) => s.page_count(),
+        }
+    }
+
+    pub fn doc_id(&self) -> DocumentId {
+        match self {
+            Self::Core(s) => s.doc_id(),
+            Self::Mock(_) => DocumentId(0),
         }
     }
 
@@ -582,18 +727,17 @@ impl Opened {
         }
     }
 
+    pub fn poll_ready(&self) -> Option<ViewTile> {
+        match self {
+            Self::Core(s) => s.poll_ready(),
+            Self::Mock(_) => None,
+        }
+    }
+
     pub fn paint_tile(&self, key: &ViewTile) -> Option<PaintTile> {
         match self {
-            Self::Core(s) => s.cache_get(key).map(|t| PaintTile {
-                width: t.width,
-                height: t.height,
-                rgba: t.rgba.clone(),
-            }),
-            Self::Mock(s) => s.cache_bitmap(key).map(|t| PaintTile {
-                width: t.width,
-                height: t.height,
-                rgba: t.pixels.clone(),
-            }),
+            Self::Core(s) => s.cache_get(key).map(PaintTile::from_core),
+            Self::Mock(s) => s.cache_bitmap(key).map(PaintTile::from_mock),
         }
     }
 
@@ -626,9 +770,55 @@ impl Opened {
         }
     }
 
+    pub fn engine(&self) -> Option<Engine> {
+        match self {
+            Self::Core(s) => Some(s.engine()),
+            Self::Mock(_) => None,
+        }
+    }
+
+    pub fn set_cache_bytes(&self, bytes: usize) {
+        match self {
+            Self::Core(s) => s.set_cache_bytes(bytes),
+            Self::Mock(s) => s.set_cache_bytes(bytes),
+        }
+    }
+
+    pub fn retain_cache_zooms(&self, keep: &[u32]) {
+        match self {
+            Self::Core(s) => s.retain_cache_zooms(keep),
+            Self::Mock(s) => s.retain_cache_zooms(keep),
+        }
+    }
+
+    pub fn clone_document(&self) -> Option<Document> {
+        match self {
+            Self::Core(s) => Some(s.clone_document()),
+            Self::Mock(_) => None,
+        }
+    }
+
+    pub fn rotate_local(&self, page: u32, delta: i32) -> Result<(), BackendError> {
+        match self {
+            Self::Core(s) => s.rotate_local(page, delta),
+            Self::Mock(_) => Err(BackendError::Invalid(openpdf_core::tr(
+                "Page edits need a real document.",
+            ))),
+        }
+    }
+
     pub fn rotate(&self, page: u32, delta: i32) -> Result<(), BackendError> {
         match self {
             Self::Core(s) => s.rotate(page, delta),
+            Self::Mock(_) => Err(BackendError::Invalid(openpdf_core::tr(
+                "Page edits need a real document.",
+            ))),
+        }
+    }
+
+    pub fn delete_page_local(&self, page: u32) -> Result<(), BackendError> {
+        match self {
+            Self::Core(s) => s.delete_page_local(page),
             Self::Mock(_) => Err(BackendError::Invalid(openpdf_core::tr(
                 "Page edits need a real document.",
             ))),
@@ -644,9 +834,23 @@ impl Opened {
         }
     }
 
+    pub fn undo_local(&self) -> Result<bool, BackendError> {
+        match self {
+            Self::Core(s) => s.undo_local(),
+            Self::Mock(_) => Ok(false),
+        }
+    }
+
     pub fn undo(&self) -> Result<bool, BackendError> {
         match self {
             Self::Core(s) => s.undo(),
+            Self::Mock(_) => Ok(false),
+        }
+    }
+
+    pub fn redo_local(&self) -> Result<bool, BackendError> {
+        match self {
+            Self::Core(s) => s.redo_local(),
             Self::Mock(_) => Ok(false),
         }
     }
@@ -717,6 +921,27 @@ impl Opened {
         }
     }
 
+    pub fn signed_dest(&self) -> Option<PathBuf> {
+        match self {
+            Self::Core(s) => Some(s.signed_dest()),
+            Self::Mock(s) => Some(s.path().map(sibling_signed_path).unwrap_or_else(|| {
+                std::env::temp_dir().join(format!("document-signed-{}.pdf", std::process::id()))
+            })),
+        }
+    }
+
+    pub fn adopt_document(&self, old_id: DocumentId, new: Document) {
+        if let Self::Core(s) = self {
+            s.adopt_document(old_id, new);
+        }
+    }
+
+    pub fn adopt_reopened(&self, old_id: DocumentId, new: Document, path: PathBuf) {
+        if let Self::Core(s) = self {
+            s.adopt_reopened(old_id, new, path);
+        }
+    }
+
     pub fn persist_signed(&self, signed: Vec<u8>) -> Result<PathBuf, BackendError> {
         match self {
             Self::Core(s) => s.persist_signed(signed),
@@ -735,7 +960,69 @@ impl Opened {
 pub struct PaintTile {
     pub width: u32,
     pub height: u32,
-    pub rgba: Vec<u8>,
+    pixels: PaintPixels,
+}
+
+enum PaintPixels {
+    Core(Arc<Tile>),
+    Mock(Arc<TileBitmap>),
+}
+
+impl PaintTile {
+    fn from_core(tile: Arc<Tile>) -> Self {
+        Self {
+            width: tile.width,
+            height: tile.height,
+            pixels: PaintPixels::Core(tile),
+        }
+    }
+
+    fn from_mock(tile: Arc<TileBitmap>) -> Self {
+        Self {
+            width: tile.width,
+            height: tile.height,
+            pixels: PaintPixels::Mock(tile),
+        }
+    }
+
+    /// Borrowed RGBA. Do not clone the buffer on the paint path.
+    pub fn rgba(&self) -> &[u8] {
+        match &self.pixels {
+            PaintPixels::Core(t) => &t.rgba,
+            PaintPixels::Mock(t) => &t.pixels,
+        }
+    }
+
+    /// Move a refcounted view of the pixel buffer into `glib::Bytes::from_owned`.
+    pub(crate) fn pixel_owner(&self) -> PixelOwner {
+        match &self.pixels {
+            PaintPixels::Core(t) => PixelOwner::Core(Arc::clone(t)),
+            PaintPixels::Mock(t) => PixelOwner::Mock(Arc::clone(t)),
+        }
+    }
+
+    /// `Arc` identity + RGBA length so engine + GTK textures can be counted once.
+    pub(crate) fn buffer_id(&self) -> (usize, usize) {
+        match &self.pixels {
+            PaintPixels::Core(t) => (Arc::as_ptr(t) as usize, t.byte_len()),
+            PaintPixels::Mock(t) => (Arc::as_ptr(t) as usize, t.pixels.len()),
+        }
+    }
+}
+
+/// `AsRef<[u8]>` over the core/mock tile so `Bytes::from_owned` copies no pixels.
+pub(crate) enum PixelOwner {
+    Core(Arc<Tile>),
+    Mock(Arc<TileBitmap>),
+}
+
+impl AsRef<[u8]> for PixelOwner {
+    fn as_ref(&self) -> &[u8] {
+        match self {
+            Self::Core(t) => &t.rgba,
+            Self::Mock(t) => &t.pixels,
+        }
+    }
 }
 
 pub fn sample_pdf_path() -> Option<PathBuf> {
@@ -920,5 +1207,156 @@ mod tests {
             "verify must not reread the unsigned source"
         );
         let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// 3840×2160 @ 1 and 1920×1080 @ 2 share a ~63.3 MiB budget. Scroll down
+    /// and back over the same range; cached tiles must not call `render_tile`
+    /// again. Peak RSS is informational (no assert).
+    #[test]
+    fn viewport_cache_reuses_tiles_at_3840x2160_and_1920x1080_scale_2() {
+        // Own worker + counter: the process-wide Engine shares RENDER calls
+        // and set_cache_bytes with other --lib tests.
+        let Ok(engine) = Engine::isolated() else {
+            eprintln!("viewport cache reuse: Engine::isolated skipped (no PDFium)");
+            return;
+        };
+        let path = match crate::measure::write_measure_pdf(8) {
+            Ok(p) => p,
+            Err(e) => {
+                eprintln!("viewport cache reuse: {e}");
+                return;
+            }
+        };
+        let session = match Session::open(&engine, &path) {
+            Ok(s) => s,
+            Err(e) => {
+                let _ = std::fs::remove_file(&path);
+                panic!("open measure PDF: {e}");
+            }
+        };
+
+        let Some(()) = crate::test_gtk::on_gtk_thread(move || {
+            use gtk::prelude::*;
+            use gtk4 as gtk;
+            let scroll = gtk::ScrolledWindow::new();
+            scroll.set_size_request(1920, 1080);
+            eprintln!(
+                "viewport cache reuse: gtk scale_factor={}",
+                scroll.scale_factor()
+            );
+            scroll_reuse_case(&engine, &session, &scroll, 3840, 2160, 1.0);
+            scroll_reuse_case(&engine, &session, &scroll, 1920, 1080, 2.0);
+        }) else {
+            let _ = std::fs::remove_file(&path);
+            eprintln!("viewport cache reuse: skipped (no GTK display)");
+            return;
+        };
+        let _ = std::fs::remove_file(&path);
+    }
+
+    fn wait_cached(session: &Session, keys: &[ViewTile], timeout: std::time::Duration) {
+        session.request_view_tiles(keys, Priority::Visible);
+        let t0 = std::time::Instant::now();
+        while t0.elapsed() < timeout {
+            session.poll();
+            if !keys.is_empty() && keys.iter().all(|k| session.cache_get(k).is_some()) {
+                return;
+            }
+            std::thread::sleep(std::time::Duration::from_millis(5));
+        }
+        let ready = keys
+            .iter()
+            .filter(|k| session.cache_get(k).is_some())
+            .count();
+        panic!(
+            "viewport tiles not cached in {:?}: {ready}/{}",
+            timeout,
+            keys.len()
+        );
+    }
+
+    fn scroll_reuse_case(
+        engine: &Engine,
+        session: &Session,
+        scroll: &gtk4::ScrolledWindow,
+        logical_w: u32,
+        logical_h: u32,
+        scale: f64,
+    ) {
+        use crate::tiles::{layout_continuous, visible_tiles, DEFAULT_TILE_SIZE};
+        use gtk::prelude::*;
+        use gtk4 as gtk;
+
+        let budget = openpdf_core::viewport_cache_bytes(logical_w, logical_h, scale);
+        assert_eq!(
+            budget,
+            openpdf_core::viewport_cache_bytes(3840, 2160, 1.0),
+            "{logical_w}x{logical_h}@{scale} must match 3840×2160@1"
+        );
+        engine.set_cache_bytes(1);
+        engine.set_cache_bytes(budget);
+        assert_eq!(engine.cache_cap(), Some(budget));
+
+        scroll.set_size_request(logical_w as i32, logical_h as i32);
+        let _ = scroll.scale_factor();
+
+        let device_w = f64::from(logical_w) * scale;
+        let device_h = f64::from(logical_h) * scale;
+        let sizes = session.pages();
+        let zoom = ((device_w - 36.0) / sizes[0].width).max(0.1);
+        let layout = layout_continuous(&sizes, zoom, device_w, 18.0, 14.0);
+        let keys_top = visible_tiles(
+            &layout,
+            0.0,
+            0.0,
+            device_w,
+            device_h,
+            zoom,
+            DEFAULT_TILE_SIZE,
+            0,
+        );
+        assert!(
+            !keys_top.is_empty(),
+            "{logical_w}x{logical_h}@{scale} must request tiles"
+        );
+
+        engine.reset_render_tile_calls();
+        wait_cached(session, &keys_top, std::time::Duration::from_secs(45));
+        let calls_top = engine.render_tile_calls();
+        assert!(
+            calls_top > 0,
+            "{logical_w}x{logical_h}@{scale}: first fill must render"
+        );
+
+        let dy = device_h * 0.5;
+        scroll.vadjustment().set_value(dy);
+        let keys_mid = visible_tiles(
+            &layout,
+            0.0,
+            dy,
+            device_w,
+            device_h,
+            zoom,
+            DEFAULT_TILE_SIZE,
+            0,
+        );
+        wait_cached(session, &keys_mid, std::time::Duration::from_secs(45));
+        let calls_mid = engine.render_tile_calls();
+
+        scroll.vadjustment().set_value(0.0);
+        wait_cached(session, &keys_top, std::time::Duration::from_secs(45));
+        let calls_back = engine.render_tile_calls();
+        assert_eq!(
+            calls_back, calls_mid,
+            "{logical_w}x{logical_h}@{scale}: scroll-back re-rendered cached tiles ({calls_back} > {calls_mid})"
+        );
+
+        let peak = crate::measure::peak_rss_bytes();
+        eprintln!(
+            "viewport_cache {logical_w}x{logical_h}@{scale} peak_rss_mb={:.1} budget_mib={:.1} tiles_top={} renders_top={calls_top} renders_after_scroll={calls_mid}",
+            peak as f64 / (1024.0 * 1024.0),
+            budget as f64 / (1024.0 * 1024.0),
+            keys_top.len(),
+        );
     }
 }

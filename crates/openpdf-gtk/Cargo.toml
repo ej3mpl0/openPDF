@@ -14,6 +14,8 @@ path = "src/lib.rs"
 openpdf-core.workspace = true
 gtk4 = { version = "0.8", features = ["v4_14"] }
 libadwaita = { version = "0.6", features = ["v1_5"] }
+pangocairo = "0.19"
+sha2 = { version = "0.10", default-features = false, features = ["std"] }
 zeroize = { version = "1", features = ["alloc"] }
 
 [dev-dependencies]

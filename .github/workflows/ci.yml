@@ -11,7 +11,8 @@ jobs:
           sudo apt-get update
           sudo apt-get install -y --no-install-recommends \
             libgtk-4-dev libadwaita-1-dev pkg-config \
-            xvfb dbus-x11 fonts-dejavu-core libgl1-mesa-dri adwaita-icon-theme
+            xvfb dbus-x11 fonts-dejavu-core libgl1-mesa-dri adwaita-icon-theme \
+            qpdf
       - name: Install PDFium
         run: |
           set -euo pipefail

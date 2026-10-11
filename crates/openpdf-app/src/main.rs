@@ -119,23 +119,46 @@ All --measure marks are milliseconds from one process-start Instant \
   ui_activate_ms                  GTK activate callback
   ui_window_present_ms            window.present()
   ui_window_build_ms              OpenPdfWindow::new returns
+  ui_gtk_startup_ms               connect_startup entered (process + GTK .so load)
+  ui_pango_init_ms                fontconfig + Pango fontmap warmup (before adw::init)
   ui_adw_init_ms                  adw::init + icon GResource
   ui_css_ms                       application CSS load
   ui_doc_load_start_ms            document open begins
   ui_doc_loaded_ms                Engine::open / Session::open returned
-The first-tile → startup gap is remaining visible tiles plus thumbs.";
+  pdfium_load_ms                  Engine::new / bind_pdfium finished
+  ui_engine_created_ms            Engine::new returned in main (font warmup continues)
+  pdfium_sha256                   SHA-256 of the bound libpdfium.so
+The first-tile → startup gap is remaining visible tiles plus thumbs.
+OPENPDF_MEASURE_RSS_BREAKDOWN=1 prints smaps_rollup + top 15 mappings
+(heap, libpdfium, GTK/adw, icon theme, fontconfig, cairo) at peak RSS.
+--measure also prints fontconfig file + FcFontList count, GTK icon theme
+and search paths, XDG_*/FONTCONFIG_*/GTK_*/GSK_RENDERER, and env_overrides=
+(must be empty: measure must not set env the normal app path does not).
+OPENPDF_TILE_CACHE_BYTES overrides the Engine RGBA cache cap (default 16 MiB).";
+
+fn create_engine() -> Option<openpdf_core::Engine> {
+    let engine = openpdf_core::Engine::new().ok();
+    measure::mark_engine_created();
+    measure::mark_pdfium_loaded();
+    engine
+}
 
 fn main() {
     measure::mark_process_start();
     let mut args = std::env::args().skip(1);
     match args.next().as_deref() {
         Some("--measure") => {
+            // Same process env as a normal run. Do not set FONTCONFIG_*/XDG_*/GTK_*.
+            measure::remember_inherited_env();
+            // Engine::new is ~4 ms (bind + spawn). Font warmup continues on the
+            // render thread and overlaps GTK activate. Do not wait for it here.
+            let engine = create_engine();
             // Skip bindtextdomain / catalog I/O; measure always uses English msgids.
             let pages = args
                 .next()
                 .and_then(|s| s.parse().ok())
                 .unwrap_or(DEFAULT_MEASURE_PAGES);
-            std::process::exit(openpdf_gtk::run_measure(pages));
+            std::process::exit(openpdf_gtk::run_measure(pages, engine));
         }
         Some("-h") | Some("--help") => {
             init_i18n();
@@ -147,19 +170,23 @@ fn main() {
             );
         }
         Some(path) => {
+            let engine = create_engine();
             init_i18n();
             openpdf_gtk::run(
                 Some(path.into()),
                 Box::new(LazyPkcs11::new(try_load_signer)),
                 Box::new(PdfVerifier),
+                engine,
             );
         }
         None => {
+            let engine = create_engine();
             init_i18n();
             openpdf_gtk::run(
                 None,
                 Box::new(LazyPkcs11::new(try_load_signer)),
                 Box::new(PdfVerifier),
+                engine,
             );
         }
     }
@@ -200,7 +227,7 @@ mod tests {
         ));
         assert_eq!(err.to_string(), "PKCS#11 module not available");
         assert!(
-            lazy.sign(b"%PDF", &SignRequest::default()).is_err(),
+            lazy.sign(b"%PDF", &SignRequest::new("")).is_err(),
             "sign must not swallow a failed load"
         );
     }

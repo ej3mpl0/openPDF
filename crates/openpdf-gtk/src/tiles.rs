@@ -5,7 +5,22 @@ use std::sync::Arc;
 use crate::backend::{PageSize, TileBitmap};
 
 pub const DEFAULT_TILE_SIZE: u32 = 256;
-pub const DEFAULT_CACHE_BYTES: usize = 64 * 1024 * 1024;
+pub const DEFAULT_CACHE_BYTES: usize = 16 * 1024 * 1024;
+
+/// Thumbnail sidebar request viewport. Never the full document height:
+/// a ~800 px strip shows the measure gate (`MIN_THUMB_TILES` ≈ 3–4).
+pub const MIN_THUMB_STRIP_PX: f64 = 800.0;
+
+/// `(view_y, view_h)` for thumbnail tile requests.
+///
+/// When the strip is not yet allocated, cover [`MIN_THUMB_STRIP_PX`] from
+/// the top instead of every page (32 pages would pin 32 surfaces).
+pub fn thumb_request_viewport(allocated: f64, scroll_y: f64, content_height: f64) -> (f64, f64) {
+    let content_height = content_height.max(1.0);
+    let view_h = allocated.max(MIN_THUMB_STRIP_PX).min(content_height);
+    let view_y = if allocated < 32.0 { 0.0 } else { scroll_y };
+    (view_y, view_h)
+}
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub struct TileKey {
@@ -44,17 +59,52 @@ pub fn quantize_zoom(zoom: f64) -> u32 {
     ((zoom.max(0.05) * 1000.0).round() as u32).clamp(50, 16_000)
 }
 
+/// Same rounding as [`openpdf_core::page_pixel_size`] (`round`, not `ceil`).
 pub fn page_pixel_size(size: PageSize, zoom: f64) -> (u32, u32) {
-    let z = zoom.max(0.05);
-    (
-        ((size.width * z).ceil() as u32).max(1),
-        ((size.height * z).ceil() as u32).max(1),
-    )
+    openpdf_core::page_pixel_size(size.width as f32, size.height as f32, zoom.max(0.05) as f32)
 }
 
+/// Same helper core uses when `render_tile` decides the last column/row.
 pub fn tile_grid(page_w: u32, page_h: u32, tile: u32) -> (u32, u32) {
-    let tile = tile.max(1);
-    (page_w.div_ceil(tile).max(1), page_h.div_ceil(tile).max(1))
+    openpdf_core::tile_grid(page_w, page_h, tile)
+}
+
+/// Columns/rows of `size` at `zoom` with core's pixel size and grid.
+pub fn page_tile_grid(size: PageSize, zoom: f64, tile: u32) -> (u32, u32) {
+    let (pw, ph) = page_pixel_size(size, zoom);
+    tile_grid(pw, ph, tile)
+}
+
+/// True when `(tx, ty)` is inside the page's tile grid at this key's zoom.
+pub fn tile_in_page_grid(key: &TileKey, size: PageSize) -> bool {
+    let (nx, ny) = page_tile_grid(size, key.zoom(), key.tile_size);
+    key.tx < nx && key.ty < ny
+}
+
+/// Preview keys that stay inside the coarser zoom's grid.
+///
+/// [`TileKey::preview`] keeps `tx`/`ty` while dividing zoom by 4. Those
+/// coordinates are often past the last column/row at the preview zoom.
+pub fn in_range_preview_keys(keys: &[TileKey], sizes: &[PageSize]) -> Vec<TileKey> {
+    keys.iter()
+        .filter_map(|k| {
+            let preview = k.preview();
+            let size = *sizes.get(k.page as usize)?;
+            tile_in_page_grid(&preview, size).then_some(preview)
+        })
+        .collect()
+}
+
+/// Drop keys whose `(col, row)` is outside that page's core tile grid.
+pub fn filter_keys_in_grid(keys: &[TileKey], sizes: &[PageSize]) -> Vec<TileKey> {
+    keys.iter()
+        .copied()
+        .filter(|k| {
+            sizes
+                .get(k.page as usize)
+                .is_some_and(|size| tile_in_page_grid(k, *size))
+        })
+        .collect()
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -173,7 +223,11 @@ pub fn visible_tiles(
         let top = ((view_y - page.y).max(0.0) / tile).floor() as i32 - halo as i32;
         let right = ((view_r - page.x).min(page.width) / tile).ceil() as i32 + halo as i32;
         let bottom = ((view_b - page.y).min(page.height) / tile).ceil() as i32 + halo as i32;
-        let (nx, ny) = tile_grid(page.width as u32, page.height as u32, tile_size);
+        // Integer pixel size from layout (core `page_pixel_size`), then the
+        // same `tile_grid` core uses. Do not truncate the f64 with `as u32`.
+        let pw = page.width.round().clamp(0.0, f64::from(u32::MAX)) as u32;
+        let ph = page.height.round().clamp(0.0, f64::from(u32::MAX)) as u32;
+        let (nx, ny) = tile_grid(pw, ph, tile_size);
         let x0 = left.clamp(0, nx as i32) as u32;
         let y0 = top.clamp(0, ny as i32) as u32;
         let x1 = right.clamp(0, nx as i32) as u32;
@@ -217,6 +271,24 @@ impl TileCache {
         self.map.is_empty()
     }
 
+    pub fn max_bytes(&self) -> usize {
+        self.max_bytes
+    }
+
+    /// Change the byte budget. Evicts LRU tiles when shrinking.
+    pub fn set_max_bytes(&mut self, max_bytes: usize) {
+        self.max_bytes = max_bytes.max(1);
+        while self.bytes > self.max_bytes {
+            if let Some(old_key) = self.order.pop_front() {
+                if let Some(old) = self.map.remove(&old_key) {
+                    self.bytes = self.bytes.saturating_sub(old.byte_len());
+                }
+            } else {
+                break;
+            }
+        }
+    }
+
     pub fn get(&mut self, key: &TileKey) -> Option<Arc<TileBitmap>> {
         let tile = self.map.get(key).cloned()?;
         if let Some(pos) = self.order.iter().position(|k| k == key) {
@@ -243,6 +315,23 @@ impl TileCache {
                 }
             } else {
                 break;
+            }
+        }
+    }
+
+    pub fn retain_zooms(&mut self, keep: &[u32]) {
+        let drop_keys: Vec<TileKey> = self
+            .map
+            .keys()
+            .filter(|k| !keep.contains(&k.zoom_milli))
+            .copied()
+            .collect();
+        for key in drop_keys {
+            if let Some(old) = self.map.remove(&key) {
+                self.bytes = self.bytes.saturating_sub(old.byte_len());
+            }
+            if let Some(pos) = self.order.iter().position(|k| k == &key) {
+                self.order.remove(pos);
             }
         }
     }
@@ -369,6 +458,25 @@ mod tests {
     }
 
     #[test]
+    fn cache_set_max_bytes_evicts_when_shrinking() {
+        let mut cache = TileCache::new(64);
+        for i in 0..4 {
+            let bmp = Arc::new(TileBitmap {
+                width: 2,
+                height: 2,
+                pixels: vec![1; 16],
+            });
+            cache.insert(TileKey::new(i, 1.0, 0, 0, 256), bmp);
+        }
+        assert_eq!(cache.len(), 4);
+        cache.set_max_bytes(32);
+        assert!(cache.bytes() <= 32);
+        assert_eq!(cache.len(), 2);
+        assert!(cache.get(&TileKey::new(0, 1.0, 0, 0, 256)).is_none());
+        assert!(cache.get(&TileKey::new(3, 1.0, 0, 0, 256)).is_some());
+    }
+
+    #[test]
     fn preview_key_is_coarser() {
         let k = TileKey::new(0, 2.0, 1, 1, 256);
         let p = k.preview();
@@ -387,6 +495,20 @@ mod tests {
         let i = (2 * 8 + 2) * 4;
         assert_eq!(&dest[i..i + 4], &[255, 0, 0, 255]);
         assert_eq!(&dest[0..4], &[0, 0, 0, 0]);
+    }
+
+    #[test]
+    fn thumb_request_viewport_caps_unallocated_strip() {
+        let content = 32.0 * 200.0;
+        let (y, h) = thumb_request_viewport(0.0, 40.0, content);
+        assert_eq!(y, 0.0);
+        assert_eq!(h, MIN_THUMB_STRIP_PX);
+        assert!(h < content, "must not request all 32 thumbnail pages");
+        let (y2, h2) = thumb_request_viewport(480.0, 120.0, content);
+        assert_eq!(y2, 120.0);
+        assert_eq!(h2, MIN_THUMB_STRIP_PX);
+        let (y3, h3) = thumb_request_viewport(900.0, 0.0, content);
+        assert_eq!((y3, h3), (0.0, 900.0));
     }
 
     #[test]
@@ -461,5 +583,111 @@ mod tests {
         let i = tile as usize * 4;
         assert_eq!(&dest[i..i + 4], &right.pixels[..4]);
         assert_eq!(&dest[0..4], &[0, 0, 0, 0]);
+    }
+
+    /// `TileKey::preview` keeps `tx`/`ty` at zoom/4. Those keys sit outside
+    /// the coarser page grid — GTK was requesting out-of-grid tiles here.
+    #[test]
+    fn legacy_preview_keys_were_outside_core_grid() {
+        let size = a4();
+        let zoom = 2.0;
+        let tile = 256u32;
+        let layout = layout_continuous(&[size], zoom, 4000.0, 0.0, 0.0);
+        let keys = visible_tiles(&layout, 0.0, 0.0, 4000.0, 4000.0, zoom, tile, 1);
+        assert!(!keys.is_empty());
+        let (nx, ny) = page_tile_grid(size, zoom, tile);
+        assert!(keys.iter().all(|k| k.tx < nx && k.ty < ny));
+        let oob = keys
+            .iter()
+            .map(|k| k.preview())
+            .filter(|p| !tile_in_page_grid(p, size))
+            .count();
+        assert!(
+            oob > 0,
+            "unfiltered preview keys at {zoom} must include out-of-grid (col,row)"
+        );
+        assert!(in_range_preview_keys(&keys, &[size])
+            .iter()
+            .all(|p| tile_in_page_grid(p, size)));
+    }
+
+    #[test]
+    fn fit_width_32_pages_exceeds_cairo_max_image_size() {
+        // Default --measure: FitWidth at 1280, 32×A4. DrawingArea content
+        // height is ~56k — past cairo's 32767. Snapshot must clip; see Canvas.
+        let sizes = vec![a4(); 32];
+        let zoom = (1280.0 - 36.0) / 595.0;
+        let layout = layout_continuous(&sizes, zoom, 1280.0, 18.0, 14.0);
+        assert!(
+            layout.content_height > 32767.0,
+            "measure layout height {} must exceed cairo max (the ngl CRITICAL)",
+            layout.content_height
+        );
+    }
+
+    #[test]
+    fn requested_tiles_stay_in_core_grid_at_zoom_and_rotation() {
+        let pages = [
+            PageSize {
+                width: 595.0,
+                height: 842.0,
+            },
+            PageSize {
+                width: 842.0,
+                height: 595.0,
+            },
+            PageSize {
+                width: 842.0,
+                height: 595.0,
+            },
+            PageSize {
+                width: 595.0,
+                height: 842.0,
+            },
+        ];
+        let tile = 256u32;
+        for (rot, size) in pages.iter().enumerate() {
+            for zoom in [1.0, 1.47, 2.0] {
+                let layout = layout_continuous(&[*size], zoom, 4000.0, 16.0, 12.0);
+                let keys = visible_tiles(&layout, 0.0, 0.0, 1920.0, 1080.0, zoom, tile, 1);
+                let (nx, ny) = page_tile_grid(*size, zoom, tile);
+                let core = {
+                    let (pw, ph) = openpdf_core::page_pixel_size(
+                        size.width as f32,
+                        size.height as f32,
+                        zoom as f32,
+                    );
+                    openpdf_core::tile_grid(pw, ph, tile)
+                };
+                assert_eq!(
+                    (nx, ny),
+                    core,
+                    "GTK grid must match core at {zoom} rot={rot}"
+                );
+                assert!(
+                    !keys.is_empty(),
+                    "viewport must request tiles at {zoom} rot={rot}"
+                );
+                for k in &keys {
+                    assert!(
+                        k.tx < nx && k.ty < ny,
+                        "visible ({},{}) outside {nx}x{ny} at {zoom} rot={rot}",
+                        k.tx,
+                        k.ty
+                    );
+                    assert!(tile_in_page_grid(k, *size));
+                }
+                let filtered = filter_keys_in_grid(&keys, &[*size]);
+                assert_eq!(filtered.len(), keys.len());
+                for p in in_range_preview_keys(&keys, &[*size]) {
+                    assert!(
+                        tile_in_page_grid(&p, *size),
+                        "preview ({},{}) out of grid at {zoom} rot={rot}",
+                        p.tx,
+                        p.ty
+                    );
+                }
+            }
+        }
     }
 }

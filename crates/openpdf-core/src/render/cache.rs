@@ -27,12 +27,35 @@ impl TileCache {
         self.used
     }
 
+    /// `(Arc ptr, RGBA bytes)` for each cached tile. Same pointer is one buffer.
+    pub fn buffer_idents(&self) -> Vec<(usize, usize)> {
+        self.map
+            .values()
+            .map(|t| (Arc::as_ptr(t) as usize, t.byte_len()))
+            .collect()
+    }
+
     pub fn len(&self) -> usize {
         self.map.len()
     }
 
     pub fn is_empty(&self) -> bool {
         self.map.is_empty()
+    }
+
+    pub fn cap(&self) -> usize {
+        self.cap
+    }
+
+    /// Change the byte budget. Evicts LRU tiles when the new cap is smaller
+    /// than [`Self::bytes_used`].
+    pub fn set_cap(&mut self, cap_bytes: usize) {
+        self.cap = cap_bytes.max(1);
+        while self.used > self.cap {
+            if !self.evict_one() {
+                break;
+            }
+        }
     }
 
     pub fn get(&mut self, key: &TileKey) -> Option<Arc<Tile>> {
@@ -67,13 +90,26 @@ impl TileCache {
         self.map.insert(tile.key, tile);
     }
 
-    pub fn invalidate_doc(&mut self, doc: DocumentId) {
-        let keys: Vec<TileKey> = self
+    /// Keep tiles whose `zoom_q` is in `keep`. Used when FitWidth settles.
+    pub fn retain_zooms(&mut self, keep: &[u32]) {
+        let drop_keys: Vec<TileKey> = self
             .map
             .keys()
-            .filter(|k| k.doc == doc)
+            .filter(|k| !keep.contains(&k.zoom_q))
             .copied()
             .collect();
+        for key in drop_keys {
+            if let Some(old) = self.map.remove(&key) {
+                self.used = self.used.saturating_sub(old.byte_len());
+            }
+            if let Some(pos) = self.order.iter().position(|k| *k == key) {
+                self.order.remove(pos);
+            }
+        }
+    }
+
+    pub fn invalidate_doc(&mut self, doc: DocumentId) {
+        let keys: Vec<TileKey> = self.map.keys().filter(|k| k.doc == doc).copied().collect();
         for key in keys {
             if let Some(old) = self.map.remove(&key) {
                 self.used = self.used.saturating_sub(old.byte_len());
@@ -123,14 +159,15 @@ mod tests {
         cache.insert(tile(1, 2, 4));
         cache.insert(tile(1, 3, 4));
         assert_eq!(cache.len(), 3);
-        assert!(cache.get(&TileKey {
-            doc: DocumentId(1),
-            page: 0,
-            zoom_q: 1000,
-            x: 0,
-            y: 0,
-        })
-        .is_none());
+        assert!(cache
+            .get(&TileKey {
+                doc: DocumentId(1),
+                page: 0,
+                zoom_q: 1000,
+                x: 0,
+                y: 0,
+            })
+            .is_none());
         assert!(cache
             .get(&TileKey {
                 doc: DocumentId(1),
@@ -149,5 +186,107 @@ mod tests {
         cache.insert(tile(2, 0, 4));
         cache.invalidate_doc(DocumentId(1));
         assert_eq!(cache.len(), 1);
+    }
+
+    #[test]
+    fn retain_zooms_keeps_listed_only() {
+        let mut cache = TileCache::new(64);
+        cache.insert(Arc::new(Tile {
+            key: TileKey {
+                doc: DocumentId(1),
+                page: 0,
+                zoom_q: 1333,
+                x: 0,
+                y: 0,
+            },
+            width: 1,
+            height: 1,
+            rgba: vec![0; 4],
+        }));
+        cache.insert(Arc::new(Tile {
+            key: TileKey {
+                doc: DocumentId(1),
+                page: 0,
+                zoom_q: 1592,
+                x: 0,
+                y: 0,
+            },
+            width: 1,
+            height: 1,
+            rgba: vec![0; 4],
+        }));
+        cache.insert(Arc::new(Tile {
+            key: TileKey {
+                doc: DocumentId(1),
+                page: 0,
+                zoom_q: 157,
+                x: 0,
+                y: 0,
+            },
+            width: 1,
+            height: 1,
+            rgba: vec![0; 4],
+        }));
+        cache.retain_zooms(&[1592, 398, 157]);
+        assert_eq!(cache.len(), 2);
+        assert!(cache
+            .get(&TileKey {
+                doc: DocumentId(1),
+                page: 0,
+                zoom_q: 1333,
+                x: 0,
+                y: 0,
+            })
+            .is_none());
+        assert!(cache
+            .get(&TileKey {
+                doc: DocumentId(1),
+                page: 0,
+                zoom_q: 1592,
+                x: 0,
+                y: 0,
+            })
+            .is_some());
+        assert!(cache
+            .get(&TileKey {
+                doc: DocumentId(1),
+                page: 0,
+                zoom_q: 157,
+                x: 0,
+                y: 0,
+            })
+            .is_some());
+    }
+
+    #[test]
+    fn set_cap_evicts_when_shrinking() {
+        let mut cache = TileCache::new(16);
+        cache.insert(tile(1, 0, 4));
+        cache.insert(tile(1, 1, 4));
+        cache.insert(tile(1, 2, 4));
+        cache.insert(tile(1, 3, 4));
+        assert_eq!(cache.len(), 4);
+        cache.set_cap(8);
+        assert_eq!(cache.cap(), 8);
+        assert!(cache.bytes_used() <= 8);
+        assert_eq!(cache.len(), 2);
+        assert!(cache
+            .get(&TileKey {
+                doc: DocumentId(1),
+                page: 0,
+                zoom_q: 1000,
+                x: 0,
+                y: 0,
+            })
+            .is_none());
+        assert!(cache
+            .get(&TileKey {
+                doc: DocumentId(1),
+                page: 0,
+                zoom_q: 1000,
+                x: 3,
+                y: 0,
+            })
+            .is_some());
     }
 }

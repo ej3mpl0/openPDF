@@ -1,7 +1,10 @@
+use std::fmt;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::Arc;
 
-use lopdf::{Dictionary, Document as LopdfDocument, Object, ObjectId};
+use lopdf::{Dictionary, Document as LopdfDocument, LoadOptions, Object, ObjectId};
+use zeroize::Zeroizing;
 
 use crate::command::{normalize_rotation, Applied, Command, History};
 use crate::error::{Error, Result, SignedOp};
@@ -35,6 +38,111 @@ pub(crate) struct PageSlot {
     pub rotation: i32,
 }
 
+/// Password of an encrypted document, wiped from memory on drop.
+///
+/// Deliberately has no `Clone`, `Debug` or `Display`: there is exactly one
+/// copy per opened document (shared via `Arc` by clones of that `Document`),
+/// and it can never be printed. It is dropped when the last `Document` clone
+/// is dropped (closed).
+pub(crate) struct DocSecret(Zeroizing<String>);
+
+impl DocSecret {
+    pub(crate) fn as_str(&self) -> &str {
+        &self.0
+    }
+}
+
+/// Optional [`DocSecret`] holder with a redacted `Debug`.
+#[derive(Clone, Default)]
+pub(crate) struct PasswordSlot(Option<Arc<DocSecret>>);
+
+impl PasswordSlot {
+    pub(crate) fn new(password: Zeroizing<String>) -> Self {
+        Self(Some(Arc::new(DocSecret(password))))
+    }
+
+    pub(crate) fn get(&self) -> Option<&Arc<DocSecret>> {
+        self.0.as_ref()
+    }
+
+    pub(crate) fn as_str(&self) -> Option<&str> {
+        self.0.as_deref().map(DocSecret::as_str)
+    }
+}
+
+impl fmt::Debug for PasswordSlot {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str(if self.0.is_some() {
+            "PasswordSlot(<redacted>)"
+        } else {
+            "PasswordSlot(None)"
+        })
+    }
+}
+
+/// Parse `bytes` with lopdf, decrypting with `password` when given.
+///
+/// An encrypted file that cannot be decrypted is `PasswordRequired` (no
+/// password given) or `WrongPassword`, never `EmptyDocument`.
+pub(crate) fn load_lopdf(bytes: &[u8], password: Option<&str>) -> Result<LopdfDocument> {
+    let loaded = match password {
+        // lopdf's LoadOptions takes a plain String; that copy is lopdf's and
+        // short-lived, but it is not zeroized.
+        Some(pw) => LopdfDocument::load_mem_with_options(bytes, LoadOptions::with_password(pw)),
+        None => LopdfDocument::load_mem(bytes),
+    };
+    let doc = loaded.map_err(|e| match e {
+        lopdf::Error::InvalidPassword => Error::WrongPassword,
+        e => Error::from(e),
+    })?;
+    if doc.is_encrypted() {
+        return Err(if password.is_some() {
+            Error::WrongPassword
+        } else {
+            Error::PasswordRequired
+        });
+    }
+    Ok(doc)
+}
+
+/// Whether an encrypted document needs a non-empty user password: test the
+/// empty password against /U (and /UE for R6) with lopdf's standard security
+/// handler. Only the trailer /ID and the /Encrypt dictionary are involved: a
+/// two-entry scratch document carries the /Encrypt dictionary re-encoded from
+/// the state lopdf decoded at load, so no object tree is parsed again.
+///
+/// If the state cannot be re-encoded we answer `true` (the stricter choice:
+/// a merge then keeps requiring a password rather than dropping it).
+pub(crate) fn needs_user_password(doc: &LopdfDocument, opened_without_password: bool) -> bool {
+    // Loaded without any password yet decrypted: the empty user password
+    // worked, so the file is owner-only. No need to check /U.
+    if opened_without_password && doc.was_encrypted() {
+        return false;
+    }
+    let Some(state) = doc.encryption_state.as_ref() else {
+        return false;
+    };
+    let Ok(encrypt) = state.encode() else {
+        return true;
+    };
+    let mut probe = LopdfDocument::with_version(doc.version.clone());
+    let id = probe.add_object(Object::Dictionary(encrypt));
+    probe.trailer.set("Encrypt", Object::Reference(id));
+    if let Ok(file_id) = doc.trailer.get(b"ID") {
+        probe.trailer.set("ID", file_id.clone());
+    }
+    probe.authenticate_user_password("").is_err()
+}
+
+/// Re-apply the document's encryption before writing, so a document opened
+/// with a password is never written out in plaintext by accident.
+pub(crate) fn reencrypt_for_write(doc: &mut LopdfDocument) -> Result<()> {
+    if let Some(state) = doc.encryption_state.take() {
+        doc.encrypt(&state)?;
+    }
+    Ok(())
+}
+
 /// Structure-level PDF document. Rendering and text go through [`crate::Engine`].
 #[derive(Clone, Debug)]
 pub struct Document {
@@ -46,6 +154,9 @@ pub struct Document {
     history: History,
     dirty: bool,
     signed: bool,
+    password: PasswordSlot,
+    /// Encrypted with a non-empty user password (not owner-password-only).
+    requires_user_password: bool,
 }
 
 impl Document {
@@ -55,26 +166,97 @@ impl Document {
         Self::from_bytes(bytes, Some(path.to_path_buf()))
     }
 
+    /// Open an unencrypted PDF (or one with an empty user password).
+    ///
+    /// Encrypted PDFs return [`Error::PasswordRequired`]; use
+    /// [`Document::from_bytes_with_password`].
     pub fn from_bytes(bytes: Vec<u8>, path: Option<PathBuf>) -> Result<Self> {
-        let inner = LopdfDocument::load_mem(&bytes)?;
-        Self::from_lopdf_inner(inner, bytes, path)
+        let inner = load_lopdf(&bytes, None)?;
+        Self::from_lopdf_inner(inner, bytes, path, PasswordSlot::default())
+    }
+
+    /// Open a PDF with its user or owner password.
+    ///
+    /// A wrong password is [`Error::WrongPassword`]. The password is kept
+    /// (zeroized on drop, never logged) so saves can re-encrypt and the render
+    /// engine can open the file. Unencrypted files ignore it.
+    pub fn from_bytes_with_password(
+        bytes: Vec<u8>,
+        path: Option<PathBuf>,
+        password: Zeroizing<String>,
+    ) -> Result<Self> {
+        let inner = load_lopdf(&bytes, Some(&password))?;
+        let slot = if inner.was_encrypted() {
+            PasswordSlot::new(password)
+        } else {
+            PasswordSlot::default()
+        };
+        Self::from_lopdf_inner(inner, bytes, path, slot)
+    }
+
+    /// File variant of [`Document::from_bytes_with_password`].
+    pub fn open_with_password(path: impl AsRef<Path>, password: Zeroizing<String>) -> Result<Self> {
+        let path = path.as_ref();
+        let bytes = std::fs::read(path)?;
+        Self::from_bytes_with_password(bytes, Some(path.to_path_buf()), password)
     }
 
     pub(crate) fn from_lopdf(inner: LopdfDocument, path: Option<PathBuf>) -> Result<Self> {
+        Self::from_lopdf_with(inner, path, PasswordSlot::default())
+    }
+
+    /// Like [`Document::from_lopdf`], keeping this document's password so an
+    /// encrypted source yields an encrypted result.
+    pub(crate) fn derive(&self, inner: LopdfDocument) -> Result<Self> {
+        Self::from_lopdf_with(inner, None, self.password.clone())
+    }
+
+    /// [`Document::derive`] for a freshly built lopdf document (e.g. merge
+    /// output) that carries no encryption state of its own: it is encrypted
+    /// with this document's key and reopened with this document's password.
+    pub(crate) fn derive_encrypted(&self, mut inner: LopdfDocument) -> Result<Self> {
+        inner.encryption_state = self.inner.encryption_state.clone();
+        // RC4 / AES-128 (V < 5) keys and the /U check are derived from the
+        // first file ID, so the output must carry the source's /ID.
+        if let Ok(id) = self.inner.trailer.get(b"ID") {
+            inner.trailer.set("ID", id.clone());
+        }
+        self.derive(inner)
+    }
+
+    pub(crate) fn from_lopdf_with(
+        inner: LopdfDocument,
+        path: Option<PathBuf>,
+        password: PasswordSlot,
+    ) -> Result<Self> {
         let mut tmp = inner;
+        reencrypt_for_write(&mut tmp)?;
         let mut bytes = Vec::new();
         tmp.save_to(&mut bytes)?;
-        let inner = LopdfDocument::load_mem(&bytes)?;
-        Self::from_lopdf_inner(inner, bytes, path)
+        let inner = load_lopdf(&bytes, password.as_str())?;
+        let password = if inner.was_encrypted() {
+            password
+        } else {
+            PasswordSlot::default()
+        };
+        Self::from_lopdf_inner(inner, bytes, path, password)
     }
 
     fn from_lopdf_inner(
         inner: LopdfDocument,
         original: Vec<u8>,
         path: Option<PathBuf>,
+        password: PasswordSlot,
     ) -> Result<Self> {
         let slots = slots_from(&inner)?;
         let signed = contains_signature(&inner);
+        // Decided from the bytes this Document wraps: does opening them need a
+        // non-empty user password? An owner-password-only file opened *with*
+        // its owner password still does not. Every constructor ends here, so
+        // ops that change encryption (protect -> per its user password,
+        // unprotect -> false, merge -> its chosen source, derived ops ->
+        // same state as their source) get the flag of their own output.
+        let requires_user_password = needs_user_password(&inner, password.get().is_none());
         Ok(Self {
             id: DocumentId::next(),
             path,
@@ -84,6 +266,8 @@ impl Document {
             history: History::new(),
             dirty: false,
             signed,
+            password,
+            requires_user_password,
         })
     }
 
@@ -140,9 +324,21 @@ impl Document {
         self.signed
     }
 
-    /// True when the trailer has an `/Encrypt` dictionary.
+    /// True when the file is encrypted (whether or not it was opened with a password).
     pub fn is_encrypted(&self) -> bool {
-        self.inner.is_encrypted()
+        self.inner.is_encrypted() || self.inner.was_encrypted()
+    }
+
+    /// True when the file needs a (non-empty) user password to open, as
+    /// opposed to unencrypted or owner-password-only files. Independent of
+    /// which password, if any, was supplied.
+    pub(crate) fn requires_user_password(&self) -> bool {
+        self.requires_user_password
+    }
+
+    /// Password this document was opened with, for the render engine and saves.
+    pub(crate) fn password(&self) -> &PasswordSlot {
+        &self.password
     }
 
     /// Signed documents are locked against rotate/delete/move and full rewrites.
@@ -264,8 +460,7 @@ impl Document {
     fn apply_inverse(&mut self, applied: Applied) -> Result<Applied> {
         match applied {
             Applied::Rotate { index, delta } => {
-                self.slots[index].rotation =
-                    normalize_rotation(self.slots[index].rotation - delta);
+                self.slots[index].rotation = normalize_rotation(self.slots[index].rotation - delta);
                 Ok(Applied::Rotate { index, delta })
             }
             Applied::Delete { index, slot } => {
@@ -286,8 +481,7 @@ impl Document {
     fn apply_forward(&mut self, applied: Applied) -> Result<Applied> {
         match applied {
             Applied::Rotate { index, delta } => {
-                self.slots[index].rotation =
-                    normalize_rotation(self.slots[index].rotation + delta);
+                self.slots[index].rotation = normalize_rotation(self.slots[index].rotation + delta);
                 Ok(Applied::Rotate { index, delta })
             }
             Applied::Delete { index, slot: _ } => {
@@ -341,7 +535,8 @@ impl Document {
     }
 
     pub(crate) fn lopdf_clone(&self) -> LopdfDocument {
-        self.assembled_lopdf().unwrap_or_else(|_| self.inner.clone())
+        self.assembled_lopdf()
+            .unwrap_or_else(|_| self.inner.clone())
     }
 
     pub(crate) fn assembled_lopdf(&self) -> Result<LopdfDocument> {
@@ -351,7 +546,7 @@ impl Document {
     }
 
     pub(crate) fn reload_from_saved(&mut self, bytes: Vec<u8>) -> Result<()> {
-        let inner = LopdfDocument::load_mem(&bytes)?;
+        let inner = load_lopdf(&bytes, self.password.as_str())?;
         self.slots = slots_from(&inner)?;
         self.signed = contains_signature(&inner);
         self.inner = inner;
@@ -428,9 +623,7 @@ fn page_rotate(doc: &LopdfDocument, mut id: ObjectId) -> i32 {
 fn media_box(doc: &LopdfDocument, mut id: ObjectId) -> Result<(f32, f32)> {
     for _ in 0..16 {
         let obj = doc.get_object(id)?;
-        let dict = obj
-            .as_dict()
-            .map_err(|e| Error::structure(e.to_string()))?;
+        let dict = obj.as_dict().map_err(|e| Error::structure(e.to_string()))?;
         if let Ok(mb) = dict.get(b"MediaBox") {
             return parse_box(mb);
         }
@@ -460,7 +653,7 @@ fn parse_box(obj: &Object) -> Result<(f32, f32)> {
 fn number(obj: &Object) -> Result<f32> {
     match obj {
         Object::Integer(i) => Ok(*i as f32),
-        Object::Real(r) => Ok(*r as f32),
+        Object::Real(r) => Ok(*r),
         _ => Err(Error::structure("expected number")),
     }
 }
@@ -469,6 +662,49 @@ fn number(obj: &Object) -> Result<f32> {
 mod tests {
     use super::*;
     use crate::test_support::corpus;
+
+    /// qpdf-made fixtures (corpus/encrypted/README.md): R2 RC4-40, R3 RC4-128,
+    /// R4 AES-128, R6 AES-256, each with an empty and a non-empty user password.
+    #[test]
+    fn requires_user_password_from_u_and_ue_on_qpdf_fixtures() {
+        for algo in ["rc4-40", "rc4-128", "aes-128", "aes-256"] {
+            for (kind, needs) in [("empty", false), ("user", true)] {
+                let name = format!("{algo}-{kind}");
+                let bytes = std::fs::read(corpus(&format!("encrypted/{name}.pdf"))).unwrap();
+                let pw = |p: &str| Zeroizing::new(p.to_string());
+
+                // Whichever password was supplied, the answer is the file's.
+                let by_owner =
+                    Document::from_bytes_with_password(bytes.clone(), None, pw("owner-pw"))
+                        .unwrap_or_else(|e| panic!("{name}: {e:?}"));
+                assert!(by_owner.is_encrypted(), "{name}");
+                assert_eq!(
+                    by_owner.requires_user_password(),
+                    needs,
+                    "{name} (owner pw)"
+                );
+                assert_eq!(needs_user_password(&by_owner.inner, false), needs, "{name}");
+
+                if needs {
+                    let by_user =
+                        Document::from_bytes_with_password(bytes.clone(), None, pw("user-pw"))
+                            .unwrap();
+                    assert!(by_user.requires_user_password(), "{name} (user pw)");
+                    assert!(matches!(
+                        Document::from_bytes(bytes, None),
+                        Err(Error::PasswordRequired)
+                    ));
+                } else {
+                    let open = Document::from_bytes(bytes, None).unwrap();
+                    assert!(open.is_encrypted(), "{name}");
+                    assert!(!open.requires_user_password(), "{name} (no pw)");
+                    // The no-password shortcut and the full /U check agree.
+                    assert!(!needs_user_password(&open.inner, true), "{name}");
+                    assert!(!needs_user_password(&open.inner, false), "{name}");
+                }
+            }
+        }
+    }
 
     #[test]
     fn open_hello_and_sizes() {

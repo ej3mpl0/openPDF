@@ -206,8 +206,8 @@ mod tests {
     #[test]
     fn picker_title_is_the_common_name() {
         assert_eq!(
-            certificate_common_name("O=AC DNIE,CN=María García (FIRMA),C=ES"),
-            "María García (FIRMA)"
+            certificate_common_name("O=AC DNIE,CN=Maria Garcia (FIRMA),C=ES"),
+            "Maria Garcia (FIRMA)"
         );
     }
 

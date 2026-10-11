@@ -11,9 +11,10 @@ use gtk::glib;
 use gtk4 as gtk;
 use libadwaita as adw;
 use openpdf_core::{
-    apply_overlay, crop_pages, extract, images_to_pdf, insert_pages, optimize, parse_page_ranges,
-    pdf_to_rasters, protect, raster_to_png, sanitize_metadata, tr, unprotect, CropBox, Document,
-    Engine, OptimizeOptions, Overlay, OverlayKind, PdfPermissions, ProtectOptions, SignedOp,
+    apply_overlay, crop_pages, extract, images_to_pdf, insert_pages, merge_encryption_source,
+    optimize, parse_page_ranges, pdf_to_rasters, protect, raster_to_png, sanitize_metadata, tr,
+    tr_args, unprotect, CropBox, Document, EncryptionSourceKind, Engine, Error, OptimizeOptions,
+    Overlay, OverlayKind, PdfPermissions, ProtectOptions, SignedOp,
 };
 
 use crate::i18n::{format_core_error, t};
@@ -21,6 +22,7 @@ use crate::session::Opened;
 use crate::Lang;
 use zeroize::Zeroizing;
 
+use super::password;
 use super::show_toast;
 use super::viewer::DocumentView;
 
@@ -135,22 +137,61 @@ fn tr_args_signed(_lang: Lang, op: SignedOp) -> String {
 fn apply_in_place(
     overlay: &adw::ToastOverlay,
     lang: Lang,
-    view: &DocumentView,
+    view: Rc<DocumentView>,
     f: impl FnOnce(&Document) -> openpdf_core::Result<Document>,
 ) {
-    match view.opened().apply_tool(f) {
-        Ok(()) => {
-            if let Err(e) = view.opened().save() {
-                show_toast(overlay, &e.to_string());
-            } else {
-                show_toast(overlay, t(lang, "Document updated."));
-            }
-            view.ensure_laid_out();
-            view.refresh_lock_chrome();
-            view.queue_repaint();
+    let Some(engine) = view.opened().engine() else {
+        show_toast(overlay, t(lang, "Page edits need a real document."));
+        return;
+    };
+    let prepared = match view.opened() {
+        crate::session::Opened::Core(session) => session.apply_tool_prepare(f),
+        crate::session::Opened::Mock(_) => {
+            show_toast(overlay, t(lang, "Page edits need a real document."));
+            return;
         }
-        Err(e) => show_toast(overlay, &e.to_string()),
-    }
+    };
+    let (old_id, new) = match prepared {
+        Ok(v) => v,
+        Err(e) => {
+            show_toast(overlay, &e.to_string());
+            return;
+        }
+    };
+    let parent = overlay
+        .root()
+        .and_then(|r| r.downcast::<gtk::Window>().ok());
+    let busy = parent
+        .as_ref()
+        .map(|w| crate::bind::present_busy(w, lang, t(lang, "Document updated.")));
+    let overlay = overlay.clone();
+    crate::bind::spawn_engine_bind(
+        move || {
+            engine
+                .bind(&new)
+                .map(|_| new)
+                .map_err(|e| crate::i18n::format_core_error(&e))
+        },
+        move |result| {
+            if let Some(b) = busy {
+                b.close();
+            }
+            match result {
+                Ok(new) => {
+                    view.opened().adopt_document(old_id, new);
+                    if let Err(e) = view.opened().save() {
+                        show_toast(&overlay, &e.to_string());
+                    } else {
+                        show_toast(&overlay, t(lang, "Document updated."));
+                    }
+                    view.ensure_laid_out();
+                    view.refresh_lock_chrome();
+                    view.queue_repaint();
+                }
+                Err(e) => show_toast(&overlay, &e),
+            }
+        },
+    );
 }
 
 struct Form {
@@ -241,12 +282,125 @@ fn password_entry() -> gtk::PasswordEntry {
     e
 }
 
+fn doc_file_name(doc: &Document, fallback: &str) -> String {
+    doc.path()
+        .and_then(|p| p.file_name())
+        .and_then(|s| s.to_str())
+        .unwrap_or(fallback)
+        .to_string()
+}
+
+/// Localized merge/extract warning from core's public
+/// [`merge_encryption_source`]. Unknown future kinds use a generic sentence.
+/// When more than one input needs a user password, a second sentence says the
+/// other files' passwords will not open the result.
+fn merge_encryption_warning(docs: &[Document], names: &[&str]) -> Option<String> {
+    let (i, kind) = merge_encryption_source(docs)?;
+    let file = names
+        .get(i)
+        .copied()
+        .filter(|s| !s.is_empty())
+        .unwrap_or("?");
+    let file_args = &[("file", file)];
+    #[allow(unreachable_patterns)]
+    let mut msg = match kind {
+        EncryptionSourceKind::UserPassword => tr_args(
+            "The result will be protected with the password of «{file}»",
+            file_args,
+        ),
+        EncryptionSourceKind::OwnerOnly => tr_args(
+            "The result will open without a password but keep the restrictions of «{file}»",
+            file_args,
+        ),
+        _ => tr_args("The result will keep the protection of «{file}»", file_args),
+    };
+    let user_passwords = docs
+        .iter()
+        .filter(|d| {
+            matches!(
+                merge_encryption_source(std::slice::from_ref(*d)),
+                Some((_, EncryptionSourceKind::UserPassword))
+            )
+        })
+        .count();
+    if user_passwords > 1 {
+        msg.push(' ');
+        msg.push_str(&tr(
+            "The passwords of the other files will no longer open it.",
+        ));
+    }
+    Some(msg)
+}
+
+fn set_merge_warning(warn: &gtk::Label, docs: &[Document], names: &[&str]) {
+    match merge_encryption_warning(docs, names) {
+        Some(msg) => {
+            warn.set_text(&msg);
+            warn.set_visible(true);
+        }
+        None => {
+            warn.set_text("");
+            warn.set_visible(false);
+        }
+    }
+}
+
 fn ranges_of(spec: &str, count: u32) -> openpdf_core::Result<Vec<openpdf_core::PageRange>> {
     let spec = spec.trim();
     if spec.is_empty() {
         return Ok(Vec::new());
     }
     parse_page_ranges(spec, count)
+}
+
+#[derive(Clone)]
+struct InsertSourceUi {
+    view: Rc<DocumentView>,
+    source: Rc<RefCell<Option<(PathBuf, Document)>>>,
+    source_l: gtk::Label,
+    warn: gtk::Label,
+}
+
+fn adopt_insert_source(
+    parent: &impl IsA<gtk::Window>,
+    lang: Lang,
+    overlay: &adw::ToastOverlay,
+    ui: &InsertSourceUi,
+    path: PathBuf,
+) {
+    match Document::open(&path) {
+        Ok(doc) => store_insert_source(ui, path, doc),
+        Err(Error::PasswordRequired) => {
+            let ui = InsertSourceUi {
+                view: ui.view.clone(),
+                source: ui.source.clone(),
+                source_l: ui.source_l.clone(),
+                warn: ui.warn.clone(),
+            };
+            let dest = path.clone();
+            password::prompt(parent, lang, &path, move |pw, done| {
+                done(Document::open_with_password(&dest, pw).map(|doc| {
+                    store_insert_source(&ui, dest.clone(), doc);
+                }));
+            });
+        }
+        Err(e) => show_toast(overlay, &format_core_error(&e)),
+    }
+}
+
+fn store_insert_source(ui: &InsertSourceUi, path: PathBuf, src: Document) {
+    ui.source_l.set_text(&path.display().to_string());
+    let src_name = doc_file_name(&src, "PDF");
+    let _ = ui.view.opened().with_document(|cur| {
+        let cur_name = doc_file_name(cur, "PDF");
+        set_merge_warning(
+            &ui.warn,
+            &[cur.clone(), src.clone()],
+            &[&cur_name, &src_name],
+        );
+        Ok(())
+    });
+    *ui.source.borrow_mut() = Some((path, src));
 }
 
 fn insert_dialog(
@@ -257,12 +411,17 @@ fn insert_dialog(
 ) {
     let Some(view) = view else { return };
     let form = form(parent, lang, Tool::Insert, Some(view.opened()));
-    let source = Rc::new(RefCell::new(None::<PathBuf>));
+    let source = Rc::new(RefCell::new(None::<(PathBuf, Document)>));
     let pick = gtk::Button::with_label(t(lang, "Source PDF"));
     let source_l = gtk::Label::new(Some(t(lang, "Source PDF")));
     source_l.set_ellipsize(gtk::pango::EllipsizeMode::Middle);
     source_l.add_css_class("dim-label");
     source_l.set_xalign(0.0);
+    let warn = gtk::Label::new(None);
+    warn.add_css_class("warning");
+    warn.set_wrap(true);
+    warn.set_xalign(0.0);
+    warn.set_visible(false);
     let at = gtk::SpinButton::with_range(1.0, f64::from(page_count(&view).max(1) + 1), 1.0);
     at.set_value(1.0);
     let pages = entry(t(lang, "1-based ranges, e.g. 1-3,5"));
@@ -272,12 +431,17 @@ fn insert_dialog(
         .append(&labeled(lang, "1-based insert position", &at));
     form.col
         .append(&labeled(lang, "1-based ranges, e.g. 1-3,5", &pages));
+    form.col.append(&warn);
 
     pick.connect_clicked({
         let win = form.win.clone();
-        let source = source.clone();
-        let source_l = source_l.clone();
-        let lang = lang;
+        let overlay = overlay.clone();
+        let ui = InsertSourceUi {
+            view: view.clone(),
+            source: source.clone(),
+            source_l: source_l.clone(),
+            warn: warn.clone(),
+        };
         move |_| {
             let dialog = gtk::FileDialog::builder()
                 .title(t(lang, "Source PDF"))
@@ -286,14 +450,18 @@ fn insert_dialog(
             let filter = gtk::FileFilter::new();
             filter.add_suffix("pdf");
             dialog.set_default_filter(Some(&filter));
-            let source = source.clone();
-            let source_l = source_l.clone();
+            let ui = InsertSourceUi {
+                view: ui.view.clone(),
+                source: ui.source.clone(),
+                source_l: ui.source_l.clone(),
+                warn: ui.warn.clone(),
+            };
+            let overlay = overlay.clone();
             let win = win.clone();
             glib::spawn_future_local(async move {
                 if let Ok(file) = dialog.open_future(Some(&win)).await {
                     if let Some(path) = file.path() {
-                        source_l.set_text(&path.display().to_string());
-                        *source.borrow_mut() = Some(path);
+                        adopt_insert_source(&win, lang, &overlay, &ui, path);
                     }
                 }
             });
@@ -309,16 +477,9 @@ fn insert_dialog(
             if blocked {
                 return;
             }
-            let Some(path) = source.borrow().clone() else {
+            let Some((_path, src)) = source.borrow().clone() else {
                 show_toast(&overlay, t(lang, "Choose a source PDF."));
                 return;
-            };
-            let src = match Document::open(&path) {
-                Ok(d) => d,
-                Err(e) => {
-                    show_toast(&overlay, &format_core_error(&e));
-                    return;
-                }
             };
             let count = src.page_count();
             let ranges = match ranges_of(&pages.text(), count) {
@@ -331,7 +492,7 @@ fn insert_dialog(
                 }
             };
             let at_idx = (at.value() as u32).saturating_sub(1);
-            apply_in_place(&overlay, lang, &view, |doc| {
+            apply_in_place(&overlay, lang, view.clone(), |doc| {
                 insert_pages(doc, at_idx, &src, &ranges)
             });
             win.close();
@@ -351,6 +512,17 @@ fn extract_dialog(
     let pages = entry(t(lang, "1-based ranges, e.g. 1-3,5"));
     form.col
         .append(&labeled(lang, "1-based ranges, e.g. 1-3,5", &pages));
+    let warn = gtk::Label::new(None);
+    warn.add_css_class("warning");
+    warn.set_wrap(true);
+    warn.set_xalign(0.0);
+    warn.set_visible(false);
+    let _ = view.opened().with_document(|doc| {
+        let name = doc_file_name(doc, "PDF");
+        set_merge_warning(&warn, std::slice::from_ref(doc), &[&name]);
+        Ok(())
+    });
+    form.col.append(&warn);
     form.apply.connect_clicked({
         let win = form.win.clone();
         let overlay = overlay.clone();
@@ -421,7 +593,9 @@ fn crop_dialog(
                     return;
                 }
             };
-            apply_in_place(&overlay, lang, &view, |doc| crop_pages(doc, &ranges, crop));
+            apply_in_place(&overlay, lang, view.clone(), |doc| {
+                crop_pages(doc, &ranges, crop)
+            });
             win.close();
         }
     });
@@ -469,7 +643,7 @@ fn optimize_dialog(
                 drop_unused: true,
                 linearize: !linear.is_active(),
             };
-            apply_in_place(&overlay, lang, &view, |doc| optimize(doc, &opts));
+            apply_in_place(&overlay, lang, view.clone(), |doc| optimize(doc, &opts));
             win.close();
         }
     });
@@ -513,7 +687,7 @@ fn protect_dialog(
                     return;
                 }
             };
-            apply_in_place(&overlay, lang, &view, |doc| protect(doc, &opts));
+            apply_in_place(&overlay, lang, view.clone(), |doc| protect(doc, &opts));
             win.close();
         }
     });
@@ -542,7 +716,9 @@ fn unprotect_dialog(
             }
             let pw = Zeroizing::new(password.text().to_string());
             password.set_text("");
-            apply_in_place(&overlay, lang, &view, |doc| unprotect(doc, pw.as_str()));
+            apply_in_place(&overlay, lang, view.clone(), |doc| {
+                unprotect(doc, pw.as_str())
+            });
             win.close();
         }
     });
@@ -573,7 +749,7 @@ fn sanitize_dialog(
             if blocked {
                 return;
             }
-            apply_in_place(&overlay, lang, &view, sanitize_metadata);
+            apply_in_place(&overlay, lang, view.clone(), sanitize_metadata);
             win.close();
         }
     });
@@ -635,7 +811,7 @@ fn overlay_dialog(
                     return;
                 }
             }
-            apply_in_place(&toast, lang, &view, |doc| apply_overlay(doc, &stamp));
+            apply_in_place(&toast, lang, view.clone(), |doc| apply_overlay(doc, &stamp));
             win.close();
         }
     });
@@ -732,30 +908,40 @@ fn to_images_dialog(
                 return;
             }
         };
-        match pdf_to_rasters(&engine, &doc, 1.0) {
-            Ok(rasters) => {
-                for (i, raster) in rasters.iter().enumerate() {
-                    match raster_to_png(raster) {
-                        Ok(png) => {
-                            let path = dir.join(format!("page-{}.png", i + 1));
-                            if let Err(e) = std::fs::write(&path, png) {
-                                show_toast(&overlay, &e.to_string());
-                                return;
+        let busy = crate::bind::present_busy(&parent, lang, t(lang, "Document updated."));
+        crate::bind::spawn_engine_bind(
+            move || pdf_to_rasters(&engine, &doc, 1.0).map_err(|e| format_core_error(&e)),
+            move |result| {
+                busy.close();
+                match result {
+                    Ok(rasters) => {
+                        for (i, raster) in rasters.iter().enumerate() {
+                            match raster_to_png(raster) {
+                                Ok(png) => {
+                                    let path = dir.join(format!("page-{}.png", i + 1));
+                                    if let Err(e) = std::fs::write(&path, png) {
+                                        show_toast(&overlay, &e.to_string());
+                                        return;
+                                    }
+                                }
+                                Err(e) => {
+                                    show_toast(&overlay, &format_core_error(&e));
+                                    return;
+                                }
                             }
                         }
-                        Err(e) => {
-                            show_toast(&overlay, &format_core_error(&e));
-                            return;
-                        }
+                        show_toast(
+                            &overlay,
+                            &openpdf_core::tr_args(
+                                "wrote {path}",
+                                &[("path", &dir.display().to_string())],
+                            ),
+                        );
                     }
+                    Err(e) => show_toast(&overlay, &e),
                 }
-                show_toast(
-                    &overlay,
-                    &openpdf_core::tr_args("wrote {path}", &[("path", &dir.display().to_string())]),
-                );
-            }
-            Err(e) => show_toast(&overlay, &format_core_error(&e)),
-        }
+            },
+        );
     });
 }
 
@@ -820,5 +1006,114 @@ mod tests {
         ));
         assert_eq!(required, "password is required");
         assert!(!required.contains(secret));
+    }
+
+    fn corpus_pdf(name: &str) -> Option<Document> {
+        let path = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+            .join("../../corpus")
+            .join(name);
+        Document::open(path).ok()
+    }
+
+    #[test]
+    fn merge_warning_follows_core_source_kind() {
+        let Some(plain) = corpus_pdf("hello.pdf") else {
+            return;
+        };
+        let Some(other) = corpus_pdf("two_page.pdf") else {
+            return;
+        };
+        let user = protect(&plain, &ProtectOptions::new("user-a", "owner-a").unwrap()).unwrap();
+        let owner = protect(&plain, &ProtectOptions::new("", "owner-only").unwrap()).unwrap();
+        let _g = openpdf_core::test_support::locale_test_guard();
+        openpdf_core::set_locale("en");
+        assert_eq!(
+            merge_encryption_source(&[plain.clone(), user.clone()]),
+            Some((1, EncryptionSourceKind::UserPassword))
+        );
+        assert_eq!(
+            merge_encryption_warning(&[plain.clone(), user.clone()], &["plain.pdf", "a.pdf"])
+                .as_deref(),
+            Some("The result will be protected with the password of «a.pdf»")
+        );
+        assert_eq!(
+            merge_encryption_warning(&[plain.clone(), owner.clone()], &["plain.pdf", "o.pdf"])
+                .as_deref(),
+            Some("The result will open without a password but keep the restrictions of «o.pdf»")
+        );
+        let user_b = protect(&other, &ProtectOptions::new("user-b", "owner-b").unwrap()).unwrap();
+        let two =
+            merge_encryption_warning(&[user.clone(), user_b.clone()], &["a.pdf", "b.pdf"]).unwrap();
+        assert_eq!(
+            two,
+            "The result will be protected with the password of «a.pdf» The passwords of the other files will no longer open it."
+        );
+        assert!(merge_encryption_warning(&[plain.clone(), other.clone()], &["x", "y"]).is_none());
+
+        openpdf_core::set_locale("es");
+        let es = merge_encryption_warning(&[user, user_b], &["a.pdf", "b.pdf"]).unwrap();
+        let expected = format!(
+            "{} {}",
+            tr_args(
+                "The result will be protected with the password of «{file}»",
+                &[("file", "a.pdf")],
+            ),
+            tr("The passwords of the other files will no longer open it."),
+        );
+        assert_eq!(es, expected);
+        assert_ne!(
+            es,
+            "The result will be protected with the password of «a.pdf» The passwords of the other files will no longer open it."
+        );
+        assert_eq!(
+            merge_encryption_warning(&[owner], &["o.pdf"]).unwrap(),
+            tr_args(
+                "The result will open without a password but keep the restrictions of «{file}»",
+                &[("file", "o.pdf")],
+            )
+        );
+        openpdf_core::set_locale("en");
+    }
+
+    #[test]
+    fn protect_then_merge_without_saving_keeps_user_password() {
+        let Some(plain) = corpus_pdf("hello.pdf") else {
+            return;
+        };
+        let Some(other) = corpus_pdf("two_page.pdf") else {
+            return;
+        };
+        let protected = protect(
+            &plain,
+            &ProtectOptions::new("mem-secret", "mem-owner").unwrap(),
+        )
+        .unwrap();
+        assert!(
+            protected.path().is_none(),
+            "protect must stay in memory; saving would hide a merge-source bug"
+        );
+        assert_eq!(
+            merge_encryption_source(&[protected.clone(), other.clone()]),
+            Some((0, EncryptionSourceKind::UserPassword))
+        );
+        let _g = openpdf_core::test_support::locale_test_guard();
+        openpdf_core::set_locale("en");
+        assert_eq!(
+            merge_encryption_warning(
+                &[protected.clone(), other.clone()],
+                &["mem.pdf", "hello.pdf"]
+            )
+            .as_deref(),
+            Some("The result will be protected with the password of «mem.pdf»")
+        );
+        let merged = openpdf_core::merge(&[protected, other]).unwrap();
+        let bytes = merged.to_bytes().unwrap();
+        assert!(
+            matches!(
+                Document::from_bytes(bytes, None),
+                Err(Error::PasswordRequired)
+            ),
+            "unsaved protect() must still be the merge encryption source"
+        );
     }
 }

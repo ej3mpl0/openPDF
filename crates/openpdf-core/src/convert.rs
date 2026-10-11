@@ -67,6 +67,42 @@ pub fn blank_document(page_count: u32) -> Result<Document> {
     Document::from_lopdf(doc, None)
 }
 
+/// One 72×72 pt page filled with DeviceRGB red (`1 0 0 rg`). For colour tests.
+pub fn red_rect_document() -> Result<Document> {
+    let mut doc = lopdf::Document::with_version("1.5");
+    let pages_id = doc.new_object_id();
+    let content = Content {
+        operations: vec![
+            Operation::new("rg", vec![1.into(), 0.into(), 0.into()]),
+            Operation::new("re", vec![0.into(), 0.into(), 72.into(), 72.into()]),
+            Operation::new("f", vec![]),
+        ],
+    };
+    let encoded = content
+        .encode()
+        .map_err(|e| Error::structure(e.to_string()))?;
+    let content_id = doc.add_object(Stream::new(Dictionary::new(), encoded));
+    let page_id = doc.add_object(dictionary! {
+        "Type" => "Page",
+        "Parent" => pages_id,
+        "Contents" => content_id,
+        "MediaBox" => vec![0.into(), 0.into(), 72.into(), 72.into()],
+    });
+    let pages = dictionary! {
+        "Type" => "Pages",
+        "Kids" => vec![page_id.into()],
+        "Count" => 1,
+        "MediaBox" => vec![0.into(), 0.into(), 72.into(), 72.into()],
+    };
+    doc.objects.insert(pages_id, Object::Dictionary(pages));
+    let catalog_id = doc.add_object(dictionary! {
+        "Type" => "Catalog",
+        "Pages" => pages_id,
+    });
+    doc.trailer.set("Root", catalog_id);
+    Document::from_lopdf(doc, None)
+}
+
 /// One page per image, scaled to fit US Letter.
 pub fn images_to_pdf<P: AsRef<Path>>(paths: &[P]) -> Result<Document> {
     if paths.is_empty() {
@@ -81,8 +117,8 @@ pub fn images_to_pdf<P: AsRef<Path>>(paths: &[P]) -> Result<Document> {
 
     for path in paths {
         let bytes = std::fs::read(path.as_ref())?;
-        let dyn_img = image::load_from_memory(&bytes)
-            .map_err(|e| Error::structure(e.to_string()))?;
+        let dyn_img =
+            image::load_from_memory(&bytes).map_err(|e| Error::structure(e.to_string()))?;
         let rgb = dyn_img.to_rgb8();
         let (iw, ih) = rgb.dimensions();
         if iw == 0 || ih == 0 {
@@ -185,10 +221,7 @@ mod tests {
     fn blank_and_images_roundtrip() {
         let doc = blank_document(3).unwrap();
         assert_eq!(doc.page_count(), 3);
-        let dir = std::env::temp_dir().join(format!(
-            "openpdf-img-{}",
-            std::process::id()
-        ));
+        let dir = std::env::temp_dir().join(format!("openpdf-img-{}", std::process::id()));
         let _ = std::fs::create_dir_all(&dir);
         let png = dir.join("dot.png");
         // 2x2 red PNG
@@ -201,5 +234,46 @@ mod tests {
     #[test]
     fn corpus_stays_openable() {
         assert_eq!(Document::open(corpus("hello.pdf")).unwrap().page_count(), 1);
+    }
+
+    #[test]
+    fn red_rect_document_is_one_page() {
+        let doc = red_rect_document().unwrap();
+        assert_eq!(doc.page_count(), 1);
+        let page = doc.page(0).unwrap();
+        assert!((page.width_pt - 72.0).abs() < 0.01);
+        assert!((page.height_pt - 72.0).abs() < 0.01);
+    }
+
+    /// `set_reverse_byte_order(true)` stores RGBA; white fill ⇒ alpha 255.
+    /// A DeviceRGB red rect must stay red (R high, B low), not swapped.
+    #[test]
+    fn red_rect_tiles_are_opaque_rgba_red() {
+        let Ok(engine) = Engine::new() else {
+            eprintln!("red_rect colour: Engine::new skipped (no PDFium)");
+            return;
+        };
+        let doc = red_rect_document().unwrap();
+        engine.bind(&doc).unwrap();
+        let raster = engine.render_page(doc.id(), 0, 1.0).unwrap();
+        assert!(raster.width > 0 && raster.height > 0);
+        assert!(
+            raster.rgba.chunks_exact(4).all(|p| p[3] == 255),
+            "R8g8b8x8 requires opaque tiles (alpha 255)"
+        );
+        let cx = (raster.width / 2) as usize;
+        let cy = (raster.height / 2) as usize;
+        let i = (cy * raster.width as usize + cx) * 4;
+        let (r, g, b, a) = (
+            raster.rgba[i],
+            raster.rgba[i + 1],
+            raster.rgba[i + 2],
+            raster.rgba[i + 3],
+        );
+        assert_eq!(a, 255);
+        assert!(
+            r > 200 && b < 40,
+            "center pixel must be red not blue (R={r} G={g} B={b})"
+        );
     }
 }

@@ -1,24 +1,27 @@
 use std::collections::HashMap;
 use std::path::Path;
-use std::sync::mpsc::{self, Receiver, RecvTimeoutError, Sender, TryRecvError};
+use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::mpsc::{self, Receiver, RecvTimeoutError, Sender};
 use std::sync::{Arc, Mutex, OnceLock};
 use std::thread;
 use std::time::Duration;
 
 use pdfium_render::prelude::{PdfDocument, Pdfium};
 
-use crate::document::{Document, DocumentId};
+use crate::document::{DocSecret, Document, DocumentId};
 use crate::error::{Error, InvalidKind, Result};
+use zeroize::Zeroizing;
 
 use super::cache::TileCache;
 use super::pdfium::{self as pdfium_bind};
 use super::queue::RenderQueue;
-use super::{Raster, SearchHit, Tile, TileEvent, TileKey, TileRequest, DEFAULT_CACHE_BYTES};
+use super::{Raster, SearchHit, Tile, TileEvent, TileKey, TileRequest};
 
 enum WorkerCmd {
     Bind {
         id: DocumentId,
         bytes: Vec<u8>,
+        password: Option<Arc<DocSecret>>,
         reply: Sender<Result<()>>,
     },
     Unbind {
@@ -62,36 +65,40 @@ struct WorkerHandle {
     events: Mutex<Receiver<TileEvent>>,
     event_tx: Sender<TileEvent>,
     cache: Arc<Mutex<TileCache>>,
+    render_tile_calls: Arc<AtomicU64>,
 }
 
-static WORKER: OnceLock<std::result::Result<WorkerHandle, String>> = OnceLock::new();
+static WORKER: OnceLock<std::result::Result<Arc<WorkerHandle>, String>> = OnceLock::new();
 
-fn worker() -> Result<&'static WorkerHandle> {
+fn process_worker() -> Result<Arc<WorkerHandle>> {
     match WORKER.get_or_init(|| start_worker(None).map_err(|e| e.to_string())) {
-        Ok(h) => Ok(h),
+        Ok(h) => Ok(Arc::clone(h)),
         Err(e) => Err(Error::pdfium(e.clone())),
     }
 }
 
-fn start_worker(bundled: Option<&Path>) -> Result<WorkerHandle> {
+fn start_worker(bundled: Option<&Path>) -> Result<Arc<WorkerHandle>> {
     let pdfium = pdfium_bind::bind_pdfium(bundled)?;
     let (cmd_tx, cmd_rx) = mpsc::channel();
     let (event_tx, event_rx) = mpsc::channel();
-    let cache = Arc::new(Mutex::new(TileCache::new(DEFAULT_CACHE_BYTES)));
+    let cache = Arc::new(Mutex::new(TileCache::new(super::tile_cache_bytes())));
     let cache_thread = Arc::clone(&cache);
     let event_tx_thread = event_tx.clone();
+    let render_tile_calls = Arc::new(AtomicU64::new(0));
+    let calls_thread = Arc::clone(&render_tile_calls);
 
     thread::Builder::new()
         .name("openpdf-render".into())
-        .spawn(move || worker_loop(pdfium, cmd_rx, event_tx_thread, cache_thread))
+        .spawn(move || worker_loop(pdfium, cmd_rx, event_tx_thread, cache_thread, calls_thread))
         .map_err(|e| Error::pdfium(e.to_string()))?;
 
-    Ok(WorkerHandle {
+    Ok(Arc::new(WorkerHandle {
         cmd: cmd_tx,
         events: Mutex::new(event_rx),
         event_tx,
         cache,
-    })
+        render_tile_calls,
+    }))
 }
 
 struct BoundDoc {
@@ -99,9 +106,14 @@ struct BoundDoc {
     doc: PdfDocument<'static>,
 }
 
-fn load_bound(pdfium: &Pdfium, bytes: Vec<u8>) -> Result<BoundDoc> {
+/// Load `bytes` into PDFium, decrypting with `password` if the file is encrypted.
+///
+/// PDFium receives the password as a `&str` and keeps its own internal copy
+/// for the document's lifetime; that copy lives in C memory we cannot zeroize.
+/// Our side stays in the document's zeroizing `DocSecret`.
+fn load_bound(pdfium: &Pdfium, bytes: Vec<u8>, password: Option<&str>) -> Result<BoundDoc> {
     let doc = pdfium
-        .load_pdf_from_byte_vec(bytes, None)
+        .load_pdf_from_byte_vec(bytes, password)
         .map_err(|e| Error::pdfium(e.to_string()))?;
     // See BoundDoc.
     let doc = unsafe { std::mem::transmute::<PdfDocument<'_>, PdfDocument<'static>>(doc) };
@@ -113,13 +125,22 @@ fn worker_loop(
     cmd_rx: Receiver<WorkerCmd>,
     event_tx: Sender<TileEvent>,
     cache: Arc<Mutex<TileCache>>,
+    render_tile_calls: Arc<AtomicU64>,
 ) {
     let mut docs: HashMap<DocumentId, BoundDoc> = HashMap::new();
     let mut queue = RenderQueue::new();
 
     loop {
         while let Ok(cmd) = cmd_rx.try_recv() {
-            if !handle_cmd(&pdfium, cmd, &mut docs, &mut queue, &event_tx, &cache) {
+            if !handle_cmd(
+                &pdfium,
+                cmd,
+                &mut docs,
+                &mut queue,
+                &event_tx,
+                &cache,
+                &render_tile_calls,
+            ) {
                 return;
             }
         }
@@ -134,20 +155,23 @@ fn worker_loop(
                 continue;
             }
             let result = match docs.get(&key.doc) {
-                Some(bound) => pdfium_bind::render_tile(
-                    &bound.doc,
-                    key.page,
-                    key.zoom(),
-                    key.x,
-                    key.y,
-                    super::TILE_SIZE,
-                )
-                .map(|(w, h, rgba)| Tile {
-                    key,
-                    width: w,
-                    height: h,
-                    rgba,
-                }),
+                Some(bound) => {
+                    render_tile_calls.fetch_add(1, Ordering::Relaxed);
+                    pdfium_bind::render_tile(
+                        &bound.doc,
+                        key.page,
+                        key.zoom(),
+                        key.x,
+                        key.y,
+                        super::TILE_SIZE,
+                    )
+                    .map(|(w, h, rgba)| Tile {
+                        key,
+                        width: w,
+                        height: h,
+                        rgba,
+                    })
+                }
                 None => Err(Error::invalid(InvalidKind::DocumentNotBound)),
             };
             if queue.is_cancelled(&key, gen) {
@@ -174,7 +198,15 @@ fn worker_loop(
 
         match cmd_rx.recv_timeout(Duration::from_millis(50)) {
             Ok(cmd) => {
-                if !handle_cmd(&pdfium, cmd, &mut docs, &mut queue, &event_tx, &cache) {
+                if !handle_cmd(
+                    &pdfium,
+                    cmd,
+                    &mut docs,
+                    &mut queue,
+                    &event_tx,
+                    &cache,
+                    &render_tile_calls,
+                ) {
                     return;
                 }
             }
@@ -191,15 +223,23 @@ fn handle_cmd(
     queue: &mut RenderQueue,
     event_tx: &Sender<TileEvent>,
     cache: &Arc<Mutex<TileCache>>,
+    render_tile_calls: &AtomicU64,
 ) -> bool {
     match cmd {
-        WorkerCmd::Bind { id, bytes, reply } => {
-            let result = load_bound(pdfium, bytes).map(|bound| {
-                docs.insert(id, bound);
-                if let Ok(mut c) = cache.lock() {
-                    c.invalidate_doc(id);
-                }
-            });
+        WorkerCmd::Bind {
+            id,
+            bytes,
+            password,
+            reply,
+        } => {
+            let result = load_bound(pdfium, bytes, password.as_deref().map(DocSecret::as_str)).map(
+                |bound| {
+                    docs.insert(id, bound);
+                    if let Ok(mut c) = cache.lock() {
+                        c.invalidate_doc(id);
+                    }
+                },
+            );
             let _ = reply.send(result);
         }
         WorkerCmd::Unbind { id } => {
@@ -243,11 +283,13 @@ fn handle_cmd(
             reply,
         } => {
             let result = match docs.get(&id) {
-                Some(b) => pdfium_bind::render_page(&b.doc, page, zoom).map(|(w, h, rgba)| Raster {
-                    width: w,
-                    height: h,
-                    rgba,
-                }),
+                Some(b) => {
+                    pdfium_bind::render_page(&b.doc, page, zoom).map(|(w, h, rgba)| Raster {
+                        width: w,
+                        height: h,
+                        rgba,
+                    })
+                }
                 None => Err(Error::invalid(InvalidKind::DocumentNotBound)),
             };
             let _ = reply.send(result);
@@ -258,20 +300,23 @@ fn handle_cmd(
                 return true;
             }
             let result = match docs.get(&key.doc) {
-                Some(b) => pdfium_bind::render_tile(
-                    &b.doc,
-                    key.page,
-                    key.zoom(),
-                    key.x,
-                    key.y,
-                    super::TILE_SIZE,
-                )
-                .map(|(w, h, rgba)| Tile {
-                    key,
-                    width: w,
-                    height: h,
-                    rgba,
-                }),
+                Some(b) => {
+                    render_tile_calls.fetch_add(1, Ordering::Relaxed);
+                    pdfium_bind::render_tile(
+                        &b.doc,
+                        key.page,
+                        key.zoom(),
+                        key.x,
+                        key.y,
+                        super::TILE_SIZE,
+                    )
+                    .map(|(w, h, rgba)| Tile {
+                        key,
+                        width: w,
+                        height: h,
+                        rgba,
+                    })
+                }
                 None => Err(Error::invalid(InvalidKind::DocumentNotBound)),
             };
             if let Ok(ref tile) = result {
@@ -323,58 +368,105 @@ fn search_doc(doc: &PdfDocument<'_>, query: &str) -> Result<Vec<SearchHit>> {
     Ok(hits)
 }
 
-/// Process-wide PDFium handle plus the single render thread.
-#[derive(Clone, Debug)]
+/// PDFium handle plus one render thread.
+///
+/// [`Engine::new`] / [`Engine::with_bundled_library`] share one process-wide
+/// worker. Tests that measure cache reuse must use [`Engine::isolated`] so
+/// they do not share the tile cache or `render_tile` counter.
+#[derive(Clone)]
 pub struct Engine {
-    _private: (),
+    worker: Arc<WorkerHandle>,
+}
+
+impl std::fmt::Debug for Engine {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("Engine").finish_non_exhaustive()
+    }
 }
 
 impl Engine {
     /// Bind PDFium from `OPENPDF_PDFIUM`, a bundled path, or the system library.
     pub fn new() -> Result<Self> {
-        worker()?;
-        Ok(Self { _private: () })
+        Ok(Self {
+            worker: process_worker()?,
+        })
     }
 
     /// First successful call wins; later engines share the same worker.
     pub fn with_bundled_library(path: impl AsRef<Path>) -> Result<Self> {
         let path = path.as_ref().to_path_buf();
         match WORKER.get_or_init(|| start_worker(Some(&path)).map_err(|e| e.to_string())) {
-            Ok(_) => Ok(Self { _private: () }),
+            Ok(h) => Ok(Self {
+                worker: Arc::clone(h),
+            }),
             Err(e) => Err(Error::pdfium(e.clone())),
         }
     }
 
+    /// Private worker, cache, and `render_tile` counter. Tests only.
+    #[cfg(any(test, feature = "test-support"))]
+    pub fn isolated() -> Result<Self> {
+        Ok(Self {
+            worker: start_worker(None)?,
+        })
+    }
+
+    /// Open and bind. Blocks on the render worker (see [`Self::bind`]).
     pub fn open(&self, path: impl AsRef<Path>) -> Result<Document> {
         let doc = Document::open(path)?;
         self.bind(&doc)?;
         Ok(doc)
     }
 
+    /// Open with a password and bind. Blocks on the render worker (see [`Self::bind`]).
+    pub fn open_with_password(
+        &self,
+        path: impl AsRef<Path>,
+        password: Zeroizing<String>,
+    ) -> Result<Document> {
+        let doc = Document::open_with_password(path, password)?;
+        self.bind(&doc)?;
+        Ok(doc)
+    }
+
+    /// Bind in-memory bytes. Blocks on the render worker (see [`Self::bind`]).
     pub fn open_bytes(&self, bytes: Vec<u8>, path: Option<std::path::PathBuf>) -> Result<Document> {
         let doc = Document::from_bytes(bytes, path)?;
         self.bind(&doc)?;
         Ok(doc)
     }
 
+    /// Send the document to the render worker and **block until it is bound**.
+    ///
+    /// The caller waits on `rx.recv()`. If the worker is still in the
+    /// synchronous font warmup this can take ~200 ms cold. GTK and FFI host
+    /// UIs must call this from a worker (`gio::spawn_blocking` / a background
+    /// queue), never the UI thread.
     pub fn bind(&self, doc: &Document) -> Result<()> {
         let bytes = if doc.is_dirty() {
             doc.to_bytes()?
         } else {
             doc.original_bytes().to_vec()
         };
-        self.bind_bytes(doc.id(), bytes)
+        self.bind_bytes(doc.id(), bytes, doc.password().get().cloned())
     }
 
+    /// Re-bind after an edit. Same contract as [`Self::bind`]: not for the UI thread.
     pub fn refresh(&self, doc: &Document) -> Result<()> {
         self.bind(doc)
     }
 
-    fn bind_bytes(&self, id: DocumentId, bytes: Vec<u8>) -> Result<()> {
+    fn bind_bytes(
+        &self,
+        id: DocumentId,
+        bytes: Vec<u8>,
+        password: Option<Arc<DocSecret>>,
+    ) -> Result<()> {
         let (tx, rx) = mpsc::channel();
         self.send(WorkerCmd::Bind {
             id,
             bytes,
+            password,
             reply: tx,
         })?;
         rx.recv()
@@ -415,21 +507,72 @@ impl Engine {
     }
 
     pub fn cache_get(&self, key: &TileKey) -> Option<Arc<Tile>> {
-        worker().ok()?.cache.lock().ok()?.get(key)
+        self.worker.cache.lock().ok()?.get(key)
     }
 
-    pub fn try_recv(&self) -> Option<TileEvent> {
-        let h = worker().ok()?;
-        let rx = h.events.lock().ok()?;
-        match rx.try_recv() {
-            Ok(ev) => Some(ev),
-            Err(TryRecvError::Empty | TryRecvError::Disconnected) => None,
+    /// Resize this engine's tile cache. Evicts LRU entries when shrinking.
+    pub fn set_cache_bytes(&self, bytes: usize) {
+        if let Ok(mut c) = self.worker.cache.lock() {
+            c.set_cap(bytes);
         }
     }
 
+    /// Drop tiles whose zoom is not in `keep` (current main / preview / thumbs).
+    pub fn retain_cache_zooms(&self, keep: &[u32]) {
+        if let Ok(mut c) = self.worker.cache.lock() {
+            c.retain_zooms(keep);
+        }
+    }
+
+    pub fn cache_cap(&self) -> Option<usize> {
+        Some(self.worker.cache.lock().ok()?.cap())
+    }
+
+    /// Decoded RGBA bytes currently held by this engine's tile cache.
+    pub fn cache_bytes_used(&self) -> usize {
+        self.worker
+            .cache
+            .lock()
+            .ok()
+            .map(|c| c.bytes_used())
+            .unwrap_or(0)
+    }
+
+    /// Decoded RGBA bytes in the process-wide tile cache (`Engine::new`).
+    pub fn tile_cache_bytes_used() -> usize {
+        process_worker()
+            .ok()
+            .and_then(|h| h.cache.lock().ok().map(|c| c.bytes_used()))
+            .unwrap_or(0)
+    }
+
+    /// Unique tile buffers in the process-wide cache (`Arc` pointer + byte length).
+    ///
+    /// Does not start the worker; empty if `Engine::new` has not run.
+    pub fn tile_cache_buffer_idents() -> Vec<(usize, usize)> {
+        WORKER
+            .get()
+            .and_then(|r| r.as_ref().ok())
+            .and_then(|h| h.cache.lock().ok().map(|c| c.buffer_idents()))
+            .unwrap_or_default()
+    }
+
+    /// `render_tile` rasters on this engine (cache hits excluded).
+    pub fn render_tile_calls(&self) -> u64 {
+        self.worker.render_tile_calls.load(Ordering::Relaxed)
+    }
+
+    pub fn reset_render_tile_calls(&self) {
+        self.worker.render_tile_calls.store(0, Ordering::Relaxed);
+    }
+
+    pub fn try_recv(&self) -> Option<TileEvent> {
+        let rx = self.worker.events.lock().ok()?;
+        rx.try_recv().ok()
+    }
+
     pub fn recv_timeout(&self, timeout: Duration) -> Option<TileEvent> {
-        let h = worker().ok()?;
-        let rx = h.events.lock().ok()?;
+        let rx = self.worker.events.lock().ok()?;
         rx.recv_timeout(timeout).ok()
     }
 
@@ -475,7 +618,7 @@ impl Engine {
     }
 
     fn send(&self, cmd: WorkerCmd) -> Result<()> {
-        worker()?
+        self.worker
             .cmd
             .send(cmd)
             .map_err(|_| Error::pdfium("render thread closed"))
@@ -485,6 +628,34 @@ impl Engine {
 impl Engine {
     #[allow(dead_code)]
     fn event_sender(&self) -> Result<Sender<TileEvent>> {
-        Ok(worker()?.event_tx.clone())
+        Ok(self.worker.event_tx.clone())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn isolated_engines_do_not_share_cache_or_render_counter() {
+        let Ok(a) = Engine::isolated() else {
+            return;
+        };
+        let Ok(b) = Engine::isolated() else {
+            return;
+        };
+        a.reset_render_tile_calls();
+        b.reset_render_tile_calls();
+        a.set_cache_bytes(1);
+        b.set_cache_bytes(32 * 1024 * 1024);
+        assert_eq!(a.cache_cap(), Some(1));
+        assert_eq!(b.cache_cap(), Some(32 * 1024 * 1024));
+        assert_eq!(a.render_tile_calls(), 0);
+        assert_eq!(b.render_tile_calls(), 0);
+        assert_ne!(
+            a.cache_cap(),
+            b.cache_cap(),
+            "isolated engines must not share set_cache_bytes"
+        );
     }
 }
