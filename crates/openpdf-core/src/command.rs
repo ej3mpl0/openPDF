@@ -60,6 +60,10 @@ impl History {
     pub fn len(&self) -> usize {
         self.undo.len()
     }
+
+    pub fn is_empty(&self) -> bool {
+        self.undo.is_empty()
+    }
 }
 
 pub(crate) fn normalize_rotation(degrees: i32) -> i32 {

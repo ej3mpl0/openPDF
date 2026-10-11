@@ -100,7 +100,7 @@ fn help_follows_locale() {
     let cat = es_catalog();
     let translated = cat.translate(about);
     assert_ne!(translated, about);
-    assert!(es_out.contains(&translated), "{es_out}");
+    assert!(es_out.contains(translated), "{es_out}");
     assert!(!es_out.contains(about), "{es_out}");
 }
 

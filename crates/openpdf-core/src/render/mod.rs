@@ -123,7 +123,7 @@ pub fn page_pixel_size(width_pt: f32, height_pt: f32, zoom: f32) -> (u32, u32) {
 
 pub fn tile_grid(pixel_w: u32, pixel_h: u32, tile: u32) -> (u32, u32) {
     let t = tile.max(1);
-    ((pixel_w + t - 1) / t, (pixel_h + t - 1) / t)
+    (pixel_w.div_ceil(t), pixel_h.div_ceil(t))
 }
 
 pub fn tile_rect(full_w: u32, full_h: u32, x: u32, y: u32, tile: u32) -> (u32, u32, u32, u32) {
